@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Face Studio World Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #0f1728;
+      color: #e6eeff;
+      font-family: Trebuchet MS, Arial, sans-serif;
+    }
+
+    #map {
+      height: 100%;
+      width: 100%;
+    }
+
+    .map-banner {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 999;
+      background: rgba(13, 21, 38, 0.86);
+      border: 1px solid #4f6994;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #d7e7ff;
+      letter-spacing: 0.2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="map-banner">Face Studio Global Map</div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const map = L.map('map', {
+      zoomControl: true,
+      minZoom: 2,
+      worldCopyJump: true
+    }).setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const cities = [
+      { name: 'Mumbai, India', lat: 19.0760, lng: 72.8777 },
+      { name: 'Delhi, India', lat: 28.6139, lng: 77.2090 },
+      { name: 'Bengaluru, India', lat: 12.9716, lng: 77.5946 },
+      { name: 'London, UK', lat: 51.5074, lng: -0.1278 },
+      { name: 'New York, USA', lat: 40.7128, lng: -74.0060 },
+      { name: 'Tokyo, Japan', lat: 35.6762, lng: 139.6503 },
+      { name: 'Sydney, Australia', lat: -33.8688, lng: 151.2093 },
+      { name: 'Dubai, UAE', lat: 25.2048, lng: 55.2708 }
+    ];
+
+    for (const city of cities) {
+      L.circleMarker([city.lat, city.lng], {
+        radius: 6,
+        color: '#ff7d7d',
+        fillColor: '#4ade80',
+        fillOpacity: 0.9,
+        weight: 2
+      }).addTo(map).bindPopup(city.name);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<html><head><meta charset='utf-8'><title>Face Studio Project Report</title>
+<style>body{font-family:Segoe UI,Arial;background:#0f1226;color:#f5f7ff;padding:24px}h1{color:#ff5b7f}h2{color:#7ad0ff}.card{background:#171c3a;padding:16px;border-radius:12px;margin:10px 0}table{width:100%;border-collapse:collapse}th,td{border:1px solid #2f376d;padding:8px;text-align:left}th{background:#222a5a} .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}</style></head><body>
+<h1>Face Studio Mid-Term Project Report</h1>
+<div class='card'><b>Generated:</b> 2026-03-13 11:45:10</div>
+<h2>Database Metrics</h2>
+<div class='grid'>
+<div class='card'><b>Users</b><br>123</div>
+<div class='card'><b>Admins</b><br>5</div>
+<div class='card'><b>Face Events</b><br>15725</div>
+<div class='card'><b>Activity Events</b><br>9020</div>
+<div class='card'><b>Attendance Entries</b><br>1200</div>
+<div class='card'><b>Distinct People</b><br>135</div>
+<div class='card'><b>Avg Similarity</b><br>0.5965</div>
+<div class='card'><b>Db Size Mb</b><br>5.75</div>
+</div>
+<h2>Query Benchmark (ms average)</h2><div class='card'><table><tr><th>Query</th><th>Time</th></tr>
+<tr><td>count_users</td><td>0.0105</td></tr>
+<tr><td>lookup_email</td><td>0.0103</td></tr>
+<tr><td>latest_face_events</td><td>0.0408</td></tr>
+<tr><td>latest_activity</td><td>0.0407</td></tr>
+<tr><td>top_people</td><td>0.9576</td></tr>
+</table></div>
+<h2>Top Recognized People</h2><div class='card'><table><tr><th>Name</th><th>Events</th><th>Avg Similarity</th></tr>
+<tr><td>shishir</td><td>491</td><td>0.3314</td></tr>
+<tr><td>Unknown</td><td>224</td><td>0.6137</td></tr>
+<tr><td>Kabir922</td><td>149</td><td>0.5975</td></tr>
+<tr><td>Dhruv10</td><td>146</td><td>0.6403</td></tr>
+<tr><td>Kabir308</td><td>145</td><td>0.6498</td></tr>
+<tr><td>Pari23</td><td>142</td><td>0.6118</td></tr>
+<tr><td>Aditya45</td><td>141</td><td>0.6364</td></tr>
+<tr><td>Kabir484</td><td>138</td><td>0.6226</td></tr>
+<tr><td>Ira249</td><td>137</td><td>0.6203</td></tr>
+<tr><td>Pari586</td><td>137</td><td>0.625</td></tr>
+<tr><td>Anaya339</td><td>135</td><td>0.623</td></tr>
+<tr><td>Arjun116</td><td>134</td><td>0.5966</td></tr>
+</table></div>
+<h2>Top Activities</h2><div class='card'><table><tr><th>Action</th><th>Count</th></tr>
+<tr><td>Export CSV</td><td>1044</td></tr>
+<tr><td>Attendance Marked</td><td>1041</td></tr>
+<tr><td>Login</td><td>1023</td></tr>
+<tr><td>Settings Changed</td><td>1008</td></tr>
+<tr><td>Password Changed</td><td>987</td></tr>
+<tr><td>Model Retrain</td><td>981</td></tr>
+<tr><td>Logout</td><td>980</td></tr>
+<tr><td>Compare Faces</td><td>971</td></tr>
+<tr><td>Generate Face</td><td>965</td></tr>
+<tr><td>API Started</td><td>12</td></tr>
+<tr><td>API Stopped</td><td>6</td></tr>
+<tr><td>Scheduler Stopped</td><td>2</td></tr>
+</table></div>
+<h2>Anomaly Scan</h2><div class='card'><ul>
+<li>Invalid similarity scores: 59</li>
+</ul></div>
+</body></html>
