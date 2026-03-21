@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -15,7 +16,7 @@ const Color _kBg = Color(0xFF1A1A2E);
 const Color _kPanel = Color(0xFF11182A);
 const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
-const Duration _kNetworkTimeout = Duration(seconds: 3);
+const Duration _kNetworkTimeout = Duration(seconds: 12);
 
 void main() {
   runApp(const FaceStudioMobileClientApp());
@@ -170,8 +171,18 @@ class BackendApi {
   }
 
   List<String> _candidateBases() {
+    final active = _base;
+    final isPublicHttps = active.startsWith('https://') &&
+        !active.contains('localhost') &&
+        !active.contains('127.0.0.1') &&
+        !active.contains('10.0.2.2') &&
+        !active.contains('10.0.3.2');
+    if (isPublicHttps) {
+      return [active];
+    }
+
     final ordered = <String>[
-      _base,
+      active,
       const String.fromEnvironment(
         'FACE_STUDIO_BASE_URL',
         defaultValue: 'http://10.0.2.2:8787',
@@ -493,7 +504,7 @@ class BackendApi {
 BackendApi _createBackendApi() {
   const baseUrl = String.fromEnvironment(
     'FACE_STUDIO_BASE_URL',
-    defaultValue: 'https://hexadic-nora-unlodged.ngrok-free.dev',
+    defaultValue: 'https://facerecognition-4.onrender.com',
   );
   const apiKey =
       String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
@@ -525,46 +536,53 @@ class _AuthGateState extends State<AuthGate> {
   }
 
   Future<void> _loadSession() async {
-    final api = buildBackendApi();
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('fs_token') ?? '';
-    final username = prefs.getString('fs_username') ?? '';
-    final role = (prefs.getString('fs_role') ?? 'user').toLowerCase();
+    try {
+      final api = buildBackendApi();
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('fs_token') ?? '';
+      final username = prefs.getString('fs_username') ?? '';
+      final role = (prefs.getString('fs_role') ?? 'user').toLowerCase();
 
-    if (token.isNotEmpty && username.isNotEmpty) {
-      api.setSession(token: token, username: username, role: role);
-      final me = await api.getCurrentUser();
-      if (me['ok'] == true) {
-        final data = (me['data'] as Map<String, dynamic>?) ?? {};
-        _username = (data['username'] ?? username).toString();
-        _isAdmin = ((data['role'] ?? role).toString().toLowerCase() == 'admin');
-        api.setSession(
-          token: token,
-          username: _username,
-          role: _isAdmin ? 'admin' : 'user',
-        );
-      } else {
-        final errorText = (me['error'] ?? '').toString().toLowerCase();
-        final connectivityIssue = errorText.contains('unavailable') ||
-            errorText.contains('failed to connect') ||
-            errorText.contains('socket');
-        if (connectivityIssue) {
-          // Keep cached session if backend is temporarily unreachable.
-          _username = username;
-          _isAdmin = role == 'admin';
+      if (token.isNotEmpty && username.isNotEmpty) {
+        api.setSession(token: token, username: username, role: role);
+        final me = await api.getCurrentUser().timeout(
+              const Duration(seconds: 10),
+              onTimeout: () => {'ok': false, 'error': 'session_check_timeout'},
+            );
+        if (me['ok'] == true) {
+          final data = (me['data'] as Map<String, dynamic>?) ?? {};
+          _username = (data['username'] ?? username).toString();
+          _isAdmin =
+              ((data['role'] ?? role).toString().toLowerCase() == 'admin');
+          api.setSession(
+            token: token,
+            username: _username,
+            role: _isAdmin ? 'admin' : 'user',
+          );
         } else {
-          await prefs.remove('fs_token');
-          await prefs.remove('fs_username');
-          await prefs.remove('fs_role');
-          api.clearSession();
+          final errorText = (me['error'] ?? '').toString().toLowerCase();
+          final connectivityIssue = errorText.contains('unavailable') ||
+              errorText.contains('failed to connect') ||
+              errorText.contains('socket') ||
+              errorText.contains('timeout');
+          if (connectivityIssue) {
+            _username = username;
+            _isAdmin = role == 'admin';
+          } else {
+            await prefs.remove('fs_token');
+            await prefs.remove('fs_username');
+            await prefs.remove('fs_role');
+            api.clearSession();
+          }
         }
       }
+    } catch (_) {
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _ready = true;
+      });
     }
-
-    if (!mounted) return;
-    setState(() {
-      _ready = true;
-    });
   }
 
   Future<void> _onLoggedIn(Map<String, dynamic> user) async {
@@ -678,9 +696,20 @@ class _LoginPageState extends State<LoginPage> {
     final user = await api.login(identifier: id, password: pw);
     if (!mounted) return;
     if (user == null) {
+      final health = await api.getHealth();
+      if (!mounted) return;
+      final backendReady = health['ok'] == true;
       setState(() {
         _busy = false;
-        _error = 'Invalid credentials or backend unreachable at ${api.baseUrl}';
+        if (backendReady) {
+          _error =
+              'Invalid credentials. Please check username/email and password.';
+          _info = '';
+        } else {
+          _error = '';
+          _info =
+              'App is loading. Please wait 20-40 seconds, then tap Login again.';
+        }
       });
       return;
     }
@@ -877,7 +906,7 @@ class _LoginPageState extends State<LoginPage> {
                   width: 16,
                   child: CircularProgressIndicator(strokeWidth: 2))
               : const Icon(Icons.login),
-          label: Text(_busy ? 'Signing in...' : 'Login'),
+          label: Text(_busy ? 'Loading...' : 'Login'),
         ),
       ],
     );
@@ -1074,14 +1103,6 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Server: ${buildBackendApi().baseUrl}',
-                  textAlign: TextAlign.center,
-                  style:
-                      const TextStyle(color: Color(0xFFBFD4F4), fontSize: 12),
-                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 12),
                 _modeSelector(),
@@ -1585,7 +1606,11 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   List<Map<String, dynamic>> _liveFaces = const [];
   int _imgW = 0;
   int _imgH = 0;
-  _KnownMapLocation _selectedLocation = _worldMapLocations.first;
+  bool _locationPermissionGranted = false;
+  double? _currentLat;
+  double? _currentLng;
+  String _currentLocationLabel = 'Detecting location...';
+  DateTime? _lastLocationFetchAt;
   String _lastSavedInfo = 'No recognition location saved yet';
 
   @override
@@ -1603,6 +1628,9 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
 
   Future<void> _setup() async {
     try {
+      await _ensureLocationAccess();
+      await _updateCurrentLocation(force: true);
+
       final cams = await availableCameras();
       if (cams.isEmpty) {
         setState(() => _status = 'No camera found on device');
@@ -1639,6 +1667,80 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     } catch (e) {
       if (mounted) {
         setState(() => _status = 'Camera setup error: $e');
+      }
+    }
+  }
+
+  Future<void> _ensureLocationAccess() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          setState(() {
+            _locationPermissionGranted = false;
+            _currentLocationLabel = 'Location service is off';
+          });
+        }
+        return;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      final granted = permission == LocationPermission.whileInUse ||
+          permission == LocationPermission.always;
+      if (mounted) {
+        setState(() {
+          _locationPermissionGranted = granted;
+          if (!granted) {
+            _currentLocationLabel = 'Location permission denied';
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _locationPermissionGranted = false;
+          _currentLocationLabel = 'Location error: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _updateCurrentLocation({bool force = false}) async {
+    if (!_locationPermissionGranted) {
+      return;
+    }
+    final now = DateTime.now();
+    if (!force &&
+        _lastLocationFetchAt != null &&
+        now.difference(_lastLocationFetchAt!).inSeconds < 12) {
+      return;
+    }
+
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 0,
+        ),
+      );
+      _lastLocationFetchAt = now;
+      if (mounted) {
+        setState(() {
+          _currentLat = pos.latitude;
+          _currentLng = pos.longitude;
+          _currentLocationLabel =
+              'Lat ${pos.latitude.toStringAsFixed(5)}, Lng ${pos.longitude.toStringAsFixed(5)}';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _currentLocationLabel = 'Location fetch failed';
+        });
       }
     }
   }
@@ -1685,6 +1787,8 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         return;
       }
 
+      await _updateCurrentLocation();
+
       final shot = await ctrl.takePicture();
       final file = File(shot.path);
       final bytes = await file.readAsBytes();
@@ -1703,10 +1807,11 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
           'image_b64': imageB64,
           'top_k': 1,
           'tracking': {
-            'location_name': _selectedLocation.name,
-            'latitude': _selectedLocation.latitude,
-            'longitude': _selectedLocation.longitude,
+            'location_name': _currentLocationLabel,
+            'latitude': _currentLat,
+            'longitude': _currentLng,
             'requested_by': sessionUser.isEmpty ? 'mobile' : sessionUser,
+            'force_update': true,
           },
         }),
       );
@@ -1738,9 +1843,9 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       final saveInfo = name.toLowerCase() == 'unknown'
           ? 'No save: unknown face'
           : saved
-              ? 'Saved: $name at ${_selectedLocation.name}'
+              ? 'Saved: $name at $_currentLocationLabel'
               : (deduped
-                  ? 'Already saved recently for $name at ${_selectedLocation.name}'
+                  ? 'Already saved recently for $name at $_currentLocationLabel'
                   : 'Save pending for $name');
 
       if (mounted) {
@@ -1841,32 +1946,21 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                 Text('Status: $_status',
                     style: const TextStyle(color: Colors.white)),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<_KnownMapLocation>(
-                  initialValue: _selectedLocation,
-                  dropdownColor: const Color(0xFF11182A),
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                    labelText: 'Recognition Location',
-                    labelStyle: TextStyle(color: Color(0xFFBBD0F8)),
-                    filled: true,
-                    fillColor: Color(0xFF0E1422),
+                Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0E1422),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF355070)),
                   ),
-                  items: _worldMapLocations
-                      .map(
-                        (loc) => DropdownMenuItem<_KnownMapLocation>(
-                          value: loc,
-                          child: Text(loc.name),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value == null) {
-                      return;
-                    }
-                    setState(() {
-                      _selectedLocation = value;
-                    });
-                  },
+                  child: Text(
+                    _locationPermissionGranted
+                        ? 'Current Location: $_currentLocationLabel'
+                        : 'Location permission required for auto map updates',
+                    style: const TextStyle(color: Color(0xFFBBD0F8)),
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -1884,6 +1978,13 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                     ElevatedButton(
                       onPressed: _captureAndRecognize,
                       child: const Text('Recognize Now'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        await _ensureLocationAccess();
+                        await _updateCurrentLocation(force: true);
+                      },
+                      child: const Text('Refresh Location'),
                     ),
                     ElevatedButton(
                       onPressed: () {

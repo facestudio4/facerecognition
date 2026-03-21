@@ -711,6 +711,7 @@ class Phase3ServiceHub:
         confidence=None,
         source: str = "mobile_live",
         requested_by: str = "mobile",
+        force_update: bool = False,
     ):
         name = (recognized_name or "").strip()
         location = (location_name or "").strip()
@@ -743,7 +744,7 @@ class Phase3ServiceHub:
                 """,
                 (name, location),
             ).fetchone()
-            if last and last["event_time"]:
+            if (not force_update) and last and last["event_time"]:
                 try:
                     prev_ts = datetime.strptime(last["event_time"], "%Y-%m-%d %H:%M:%S")
                     if (datetime.now() - prev_ts).total_seconds() < 12:
@@ -965,6 +966,7 @@ class Phase3ServiceHub:
                 confidence=global_best.get("score"),
                 source="mobile_identify",
                 requested_by=requested_by,
+                force_update=bool(track.get("force_update", False)),
             )
             if saved.get("ok") is True:
                 result["location_tracking"] = saved.get("data", {})
@@ -1526,6 +1528,7 @@ class Phase3ServiceHub:
                             confidence=payload.get("confidence"),
                             source=str(payload.get("source", "mobile_manual")).strip() or "mobile_manual",
                             requested_by=str(payload.get("requested_by", "mobile")).strip() or "mobile",
+                            force_update=bool(payload.get("force_update", False)),
                         )
                         code = 200 if result.get("ok") is True else 400
                         self._send_json(code, result)
