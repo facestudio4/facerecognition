@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8, help="Entries per request")
     parser.add_argument("--retries", type=int, default=6, help="Retry count for temporary HTTP failures")
     parser.add_argument("--clear-existing", action="store_true", help="Clear cloud person folders before first upload")
+    parser.add_argument("--refresh-after", action="store_true", help="Trigger server-side refresh after final batch (may use high memory)")
     args = parser.parse_args()
 
     base_url = normalize_base_url(args.base_url)
@@ -157,7 +158,7 @@ def main():
         payload = {
             "entries": batch,
             "clear_existing": bool(args.clear_existing and first),
-            "refresh_after": bool((sent + len(batch)) >= total),
+            "refresh_after": bool(args.refresh_after and (sent + len(batch)) >= total),
         }
         result = post_json(endpoint, api_key, token, payload, retries=args.retries)
         sent += len(batch)

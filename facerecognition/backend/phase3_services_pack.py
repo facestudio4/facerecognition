@@ -899,7 +899,7 @@ class Phase3ServiceHub:
         self._sync_refresh_thread.start()
         return {"scheduled": True, "running": True, "error": ""}
 
-    def sync_known_faces(self, entries, clear_existing: bool = False, refresh_after: bool = True):
+    def sync_known_faces(self, entries, clear_existing: bool = False, refresh_after: bool = False):
         if not isinstance(entries, list) or not entries:
             raise ValueError("entries must be a non-empty list")
 
@@ -1689,7 +1689,7 @@ class Phase3ServiceHub:
                     if path == "/api/admin/faces/sync":
                         entries = payload.get("entries")
                         clear_existing = bool(payload.get("clear_existing", False))
-                        refresh_after = bool(payload.get("refresh_after", True))
+                        refresh_after = bool(payload.get("refresh_after", False))
                         result = hub.sync_known_faces(
                             entries=entries,
                             clear_existing=clear_existing,
