@@ -806,31 +806,52 @@ class Phase3ServiceHub:
         )
         return {"ok": True, "data": {"saved": True, "event_id": event_id, "event": payload}}
 
-    def search_recognition_locations(self, name: str, limit: int = 100):
+    def search_recognition_locations(self, name: str, limit: int = 100, latest_only: bool = False):
         person = (name or "").strip()
         if not person:
             return []
         limit = max(1, min(int(limit), 2000))
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    id,
-                    event_time,
-                    recognized_name,
-                    location_name,
-                    latitude,
-                    longitude,
-                    confidence,
-                    source,
-                    requested_by
-                FROM recognition_location_events
-                WHERE lower(recognized_name)=lower(?)
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (person, limit),
-            ).fetchall()
+            if latest_only:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id,
+                        event_time,
+                        recognized_name,
+                        location_name,
+                        latitude,
+                        longitude,
+                        confidence,
+                        source,
+                        requested_by
+                    FROM recognition_location_events
+                    WHERE lower(recognized_name)=lower(?)
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (person,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id,
+                        event_time,
+                        recognized_name,
+                        location_name,
+                        latitude,
+                        longitude,
+                        confidence,
+                        source,
+                        requested_by
+                    FROM recognition_location_events
+                    WHERE lower(recognized_name)=lower(?)
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (person, limit),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def _decode_image_b64(self, image_b64: str):
@@ -1492,7 +1513,19 @@ class Phase3ServiceHub:
                 if path == "/api/mobile/recognition-location/search":
                     name = query.get("name", [""])[0]
                     limit = int(query.get("limit", ["100"])[0])
-                    rows = hub.search_recognition_locations(name=name, limit=limit)
+                    requested_latest = query.get("latest_only", ["false"])[0].strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    )
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    latest_only = requested_latest or role != "admin"
+                    rows = hub.search_recognition_locations(
+                        name=name,
+                        limit=limit,
+                        latest_only=latest_only,
+                    )
                     self._send_json(200, {"ok": True, "data": rows})
                     return
 

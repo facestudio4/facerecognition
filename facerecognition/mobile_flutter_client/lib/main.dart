@@ -2488,6 +2488,12 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
   String _status = 'Search a recognized name to view recognition places';
   List<Map<String, dynamic>> _rows = const [];
 
+  String _osmExactLocationUrl(double lat, double lng) {
+    final latText = lat.toStringAsFixed(6);
+    final lngText = lng.toStringAsFixed(6);
+    return 'https://www.openstreetmap.org/?mlat=$latText&mlon=$lngText#map=18/$latText/$lngText';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2571,12 +2577,15 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
+      final isAdmin = api.role.toLowerCase() == 'admin';
       setState(() {
         _loading = false;
         _rows = data;
         _status = data.isEmpty
             ? 'No recognition location found for "$query"'
-            : 'Found ${data.length} recognition location records';
+            : (isAdmin
+                ? 'Found ${data.length} recognition location records (admin view)'
+                : 'Showing latest recognition location for "$query"');
       });
     } catch (e) {
       if (!mounted) {
@@ -2809,47 +2818,71 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
                 borderRadius: BorderRadius.circular(14),
                 side: const BorderSide(color: Color(0xFF3E527D)),
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.location_on, color: Color(0xFFFF7D7D)),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            location,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () {
+                  final latNum = double.tryParse((lat ?? '').toString());
+                  final lngNum = double.tryParse((lng ?? '').toString());
+                  if (latNum == null || lngNum == null) {
+                    setState(() {
+                      _status = 'Selected location has no valid coordinates';
+                    });
+                    return;
+                  }
+                  final exactUrl = _osmExactLocationUrl(latNum, lngNum);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => FullScreenMapPage(
+                        mapCandidates: [exactUrl, ..._mapCandidates],
+                        initialIndex: 0,
+                      ),
+                    ),
+                  );
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.location_on,
+                              color: Color(0xFFFF7D7D)),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              location,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white),
+                            ),
                           ),
-                        ),
-                        Text(
-                          '${(conf * 100).toStringAsFixed(1)}%',
-                          style: const TextStyle(
-                              color: Color(0xFFA8D5FF),
-                              fontWeight: FontWeight.w700),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const Icon(Icons.schedule,
-                            size: 15, color: Color(0xFFB8CAE8)),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text('Time: $when',
-                              style: const TextStyle(color: Color(0xFFD3DDF2))),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text('Coordinates: ${lat ?? '-'}, ${lng ?? '-'}',
-                        style: const TextStyle(color: Color(0xFFAABCE2))),
-                  ],
+                          Text(
+                            '${(conf * 100).toStringAsFixed(1)}%',
+                            style: const TextStyle(
+                                color: Color(0xFFA8D5FF),
+                                fontWeight: FontWeight.w700),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Icon(Icons.schedule,
+                              size: 15, color: Color(0xFFB8CAE8)),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text('Time: $when',
+                                style:
+                                    const TextStyle(color: Color(0xFFD3DDF2))),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text('Coordinates: ${lat ?? '-'}, ${lng ?? '-'}',
+                          style: const TextStyle(color: Color(0xFFAABCE2))),
+                    ],
+                  ),
                 ),
               ),
             );
