@@ -17,6 +17,7 @@ const Color _kPanel = Color(0xFF11182A);
 const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
 const Duration _kNetworkTimeout = Duration(seconds: 12);
+const Duration _kAuthTimeout = Duration(seconds: 4);
 
 void main() {
   runApp(const FaceStudioMobileClientApp());
@@ -185,8 +186,10 @@ class BackendApi {
       active,
       const String.fromEnvironment(
         'FACE_STUDIO_BASE_URL',
-        defaultValue: 'http://10.0.2.2:8787',
+        defaultValue: 'https://face-studio-api.onrender.com',
       ).trim().replaceAll(RegExp(r'/$'), ''),
+      'https://face-studio-api.onrender.com',
+      'https://facerecognition-4.onrender.com',
       'http://10.0.2.2:8787',
       'http://10.0.3.2:8787',
       'http://127.0.0.1:8787',
@@ -212,10 +215,11 @@ class BackendApi {
     _role = 'user';
   }
 
-  Future<Map<String, dynamic>?> login({
+  Future<Map<String, dynamic>> login({
     required String identifier,
     required String password,
   }) async {
+    String lastReason = 'backend_unreachable';
     for (final base in _candidateBases()) {
       try {
         final res = await http
@@ -225,8 +229,12 @@ class BackendApi {
               body: jsonEncode(
                   {'identifier': identifier, 'password': password, 'ttl': 180}),
             )
-            .timeout(_kNetworkTimeout);
+            .timeout(_kAuthTimeout);
+        if (res.statusCode == 401 || res.statusCode == 403) {
+          return {'ok': false, 'reason': 'invalid_credentials'};
+        }
         if (res.statusCode != 200) {
+          lastReason = 'backend_http_${res.statusCode}';
           continue;
         }
         final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -236,16 +244,21 @@ class BackendApi {
         final username = (user['username'] ?? '').toString();
         final role = (user['role'] ?? 'user').toString().toLowerCase();
         if (token.isEmpty || username.isEmpty) {
+          lastReason = 'invalid_payload';
           continue;
         }
         _baseUrl = base;
         setSession(token: token, username: username, role: role);
-        return user;
+        return {'ok': true, 'user': user};
+      } on TimeoutException {
+        lastReason = 'timeout';
+        continue;
       } catch (_) {
+        lastReason = 'network_error';
         continue;
       }
     }
-    return null;
+    return {'ok': false, 'reason': lastReason};
   }
 
   Future<Map<String, dynamic>> requestSignupVerification({
@@ -504,7 +517,7 @@ class BackendApi {
 BackendApi _createBackendApi() {
   const baseUrl = String.fromEnvironment(
     'FACE_STUDIO_BASE_URL',
-    defaultValue: 'https://facerecognition-4.onrender.com',
+    defaultValue: 'https://face-studio-api.onrender.com',
   );
   const apiKey =
       String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
@@ -693,23 +706,30 @@ class _LoginPageState extends State<LoginPage> {
       _info = '';
     });
     final api = buildBackendApi();
-    final user = await api.login(identifier: id, password: pw);
+    final result = await api.login(identifier: id, password: pw);
     if (!mounted) return;
-    if (user == null) {
-      final health = await api.getHealth();
-      if (!mounted) return;
-      final backendReady = health['ok'] == true;
+    if (result['ok'] != true) {
+      final reason = (result['reason'] ?? '').toString();
       setState(() {
         _busy = false;
-        if (backendReady) {
+        if (reason == 'invalid_credentials') {
           _error =
               'Invalid credentials. Please check username/email and password.';
           _info = '';
         } else {
-          _error = '';
-          _info =
-              'App is loading. Please wait 20-40 seconds, then tap Login again.';
+          _error = 'Cannot reach backend right now.';
+          _info = 'Check internet, then retry. Active server: ${api.baseUrl}';
         }
+      });
+      return;
+    }
+    final user =
+        Map<String, dynamic>.from((result['user'] as Map?) ?? const {});
+    if (user.isEmpty) {
+      setState(() {
+        _busy = false;
+        _error = 'Login response was empty. Please try again.';
+        _info = '';
       });
       return;
     }
