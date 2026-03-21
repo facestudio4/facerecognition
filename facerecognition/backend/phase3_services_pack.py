@@ -990,11 +990,21 @@ class Phase3ServiceHub:
 
         return list(getattr(legacy, "STYLE_LIST", []))
 
+    def _legacy_detect_and_encode(self, legacy, frame):
+        try:
+            return legacy.detect_and_encode(frame)
+        except TypeError as ex:
+            if "detector" not in str(ex).lower():
+                raise
+            h, w = frame.shape[:2]
+            detector = legacy._create_yunet(w, h)
+            return legacy.detect_and_encode(frame, detector)
+
     def mobile_identify(self, image_b64: str, top_k: int = 3, tracking=None):
         from frontend import facercognition as legacy
 
         frame = self._decode_image_b64(image_b64)
-        detections = legacy.detect_and_encode(frame)
+        detections = self._legacy_detect_and_encode(legacy, frame)
         if not detections:
             return {
                 "detected": False,
@@ -1205,8 +1215,8 @@ class Phase3ServiceHub:
         left_frame = self._decode_image_b64(left_image_b64)
         right_frame = self._decode_image_b64(right_image_b64)
 
-        left_det = legacy.detect_and_encode(left_frame)
-        right_det = legacy.detect_and_encode(right_frame)
+        left_det = self._legacy_detect_and_encode(legacy, left_frame)
+        right_det = self._legacy_detect_and_encode(legacy, right_frame)
         if not left_det or not right_det:
             return {
                 "ok": False,
