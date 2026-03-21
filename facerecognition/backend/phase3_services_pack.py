@@ -566,20 +566,20 @@ class Phase3ServiceHub:
             ],
         }
 
-        def get_world_map_html(self):
-                candidate_paths = [
-                        os.path.join(self.base_dir, "map.html"),
-                        os.path.join(os.path.dirname(self.base_dir), "map.html"),
-                ]
-                for path in candidate_paths:
-                        if os.path.exists(path):
-                                try:
-                                        with open(path, "r", encoding="utf-8") as f:
-                                                return f.read()
-                                except Exception:
-                                        continue
+    def get_world_map_html(self):
+        candidate_paths = [
+            os.path.join(self.base_dir, "map.html"),
+            os.path.join(os.path.dirname(self.base_dir), "map.html"),
+        ]
+        for path in candidate_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        return f.read()
+                except Exception:
+                    continue
 
-                return """
+        return """
 <!doctype html>
 <html>
 <head>
@@ -1498,8 +1498,21 @@ class Phase3ServiceHub:
                         image_b64 = str(payload.get("image_b64", ""))
                         top_k = int(payload.get("top_k", 3))
                         tracking = payload.get("tracking") if isinstance(payload.get("tracking"), dict) else None
-                        data = hub.mobile_identify(image_b64=image_b64, top_k=top_k, tracking=tracking)
-                        self._send_json(200, {"ok": True, "data": data})
+                        try:
+                            data = hub.mobile_identify(image_b64=image_b64, top_k=top_k, tracking=tracking)
+                            self._send_json(200, {"ok": True, "data": data})
+                        except Exception as e:
+                            fallback = {
+                                "detected": False,
+                                "message": f"Identify failed: {e}",
+                                "face_count": 0,
+                                "faces": [],
+                                "image_width": 0,
+                                "image_height": 0,
+                                "best": {"name": "Unknown", "score": 0.0},
+                                "matches": [],
+                            }
+                            self._send_json(200, {"ok": False, "error": "identify_failed", "data": fallback})
                         return
 
                     if path == "/api/mobile/generate":
