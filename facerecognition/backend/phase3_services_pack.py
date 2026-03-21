@@ -895,7 +895,15 @@ class Phase3ServiceHub:
             }
 
         enc_arr = np.array(encs)
-        threshold = float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.36))
+        threshold_raw = os.getenv(
+            "MOBILE_RECOGNITION_THRESHOLD",
+            str(getattr(legacy, "RECOGNITION_THRESHOLD", 0.25)),
+        )
+        try:
+            threshold = float(threshold_raw)
+        except Exception:
+            threshold = 0.25
+        threshold = max(0.15, min(0.75, threshold))
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
@@ -1249,7 +1257,23 @@ class Phase3ServiceHub:
                     return
 
                 if path == "/api/map/view":
-                    self._send_html(200, hub.get_world_map_html())
+                    try:
+                        html_text = hub.get_world_map_html()
+                        if not isinstance(html_text, str) or not html_text.strip():
+                            html_text = (
+                                "<!doctype html><html><head><meta charset='utf-8'><title>Map</title></head>"
+                                "<body style='font-family:Arial,sans-serif;background:#0f1728;color:#e6eeff;padding:16px;'>"
+                                "<h3>Map Ready</h3><p>Map content is temporarily unavailable.</p></body></html>"
+                            )
+                        self._send_html(200, html_text)
+                    except Exception as e:
+                        safe_error = str(e).replace("<", "(").replace(">", ")")
+                        self._send_html(
+                            200,
+                            "<!doctype html><html><head><meta charset='utf-8'><title>Map Error</title></head>"
+                            "<body style='font-family:Arial,sans-serif;background:#0f1728;color:#e6eeff;padding:16px;'>"
+                            "<h3>Map Error</h3><p>" + safe_error + "</p></body></html>",
+                        )
                     return
 
                 if path == "/api/auth/token":
