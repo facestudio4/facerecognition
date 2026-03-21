@@ -868,7 +868,7 @@ class Phase3ServiceHub:
             raise ValueError("Invalid person name")
         return text[:64]
 
-    def sync_known_faces(self, entries, clear_existing: bool = False):
+    def sync_known_faces(self, entries, clear_existing: bool = False, refresh_after: bool = True):
         if not isinstance(entries, list) or not entries:
             raise ValueError("entries must be a non-empty list")
 
@@ -925,24 +925,29 @@ class Phase3ServiceHub:
             imported_files += 1
             imported_people.add(person)
 
-        self._mobile_known_encodings = None
-        self._mobile_known_loaded_at = 0.0
-        try:
-            from frontend import facercognition as legacy
-            enc_path = getattr(legacy, "ENCODINGS_PATH", "")
-            if enc_path and os.path.exists(enc_path):
-                os.remove(enc_path)
-        except Exception:
-            pass
+        known_count = None
+        if refresh_after:
+            self._mobile_known_encodings = None
+            self._mobile_known_loaded_at = 0.0
+            try:
+                from frontend import facercognition as legacy
+                enc_path = getattr(legacy, "ENCODINGS_PATH", "")
+                if enc_path and os.path.exists(enc_path):
+                    os.remove(enc_path)
+            except Exception:
+                pass
 
-        known = self._get_mobile_known_encodings()
+            known = self._get_mobile_known_encodings()
+            known_count = len(known or {})
+
         return {
             "ok": True,
             "data": {
                 "imported_files": imported_files,
                 "imported_people": sorted(imported_people),
-                "known_people_after_sync": len(known or {}),
+                "known_people_after_sync": known_count,
                 "faces_root": faces_root,
+                "refresh_after": bool(refresh_after),
             },
         }
 
@@ -1660,7 +1665,12 @@ class Phase3ServiceHub:
                     if path == "/api/admin/faces/sync":
                         entries = payload.get("entries")
                         clear_existing = bool(payload.get("clear_existing", False))
-                        result = hub.sync_known_faces(entries=entries, clear_existing=clear_existing)
+                        refresh_after = bool(payload.get("refresh_after", True))
+                        result = hub.sync_known_faces(
+                            entries=entries,
+                            clear_existing=clear_existing,
+                            refresh_after=refresh_after,
+                        )
                         self._send_json(200, result)
                         return
                 except ValueError as e:

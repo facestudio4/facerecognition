@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import os
+import time
 import urllib.request
 from urllib.error import HTTPError
 
@@ -77,7 +78,7 @@ def collect_entries(source_dir: str):
     return entries
 
 
-def post_json(url: str, api_key: str | None, token: str | None, payload: dict):
+def post_json(url: str, api_key: str | None, token: str | None, payload: dict, retries: int = 3):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -93,19 +94,31 @@ def post_json(url: str, api_key: str | None, token: str | None, payload: dict):
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = resp.read().decode("utf-8")
-            return json.loads(data)
-    except HTTPError as e:
-        details = ""
+    retries = max(0, int(retries))
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            details = e.read().decode("utf-8", errors="replace")
-        except Exception:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = resp.read().decode("utf-8")
+                return json.loads(data)
+        except HTTPError as e:
             details = ""
-        if details:
-            raise RuntimeError(f"HTTP {e.code} {e.reason}: {details}") from e
-        raise RuntimeError(f"HTTP {e.code} {e.reason}") from e
+            try:
+                details = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                details = ""
+
+            retryable = e.code in (429, 500, 502, 503, 504)
+            if retryable and attempt <= (retries + 1):
+                sleep_seconds = min(20, 2 * attempt)
+                print(f"retry {attempt}/{retries + 1} after HTTP {e.code}; sleeping {sleep_seconds}s")
+                time.sleep(sleep_seconds)
+                continue
+
+            if details:
+                raise RuntimeError(f"HTTP {e.code} {e.reason}: {details}") from e
+            raise RuntimeError(f"HTTP {e.code} {e.reason}") from e
 
 
 def main():
@@ -115,6 +128,7 @@ def main():
     parser.add_argument("--token", default="", help="Bearer token from /api/auth/login")
     parser.add_argument("--source-dir", default="database/faces", help="Local source folder")
     parser.add_argument("--batch-size", type=int, default=25, help="Entries per request")
+    parser.add_argument("--retries", type=int, default=3, help="Retry count for temporary HTTP failures")
     parser.add_argument("--clear-existing", action="store_true", help="Clear cloud person folders before first upload")
     args = parser.parse_args()
 
@@ -143,8 +157,9 @@ def main():
         payload = {
             "entries": batch,
             "clear_existing": bool(args.clear_existing and first),
+            "refresh_after": bool((sent + len(batch)) >= total),
         }
-        result = post_json(endpoint, api_key, token, payload)
+        result = post_json(endpoint, api_key, token, payload, retries=args.retries)
         sent += len(batch)
         batch_index += 1
         first = False
