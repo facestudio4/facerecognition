@@ -17,7 +17,7 @@ const Color _kPanel = Color(0xFF11182A);
 const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
 const Duration _kNetworkTimeout = Duration(seconds: 12);
-const Duration _kAuthTimeout = Duration(seconds: 4);
+const Duration _kAuthTimeout = Duration(seconds: 12);
 
 void main() {
   runApp(const FaceStudioMobileClientApp());
@@ -179,17 +179,23 @@ class BackendApi {
         !active.contains('10.0.2.2') &&
         !active.contains('10.0.3.2');
     if (isPublicHttps) {
-      return [active];
+      final cloudFirst = <String>[
+        active,
+        'https://facerecognition-4.onrender.com',
+        'https://face-studio-api.onrender.com',
+      ];
+      final seen = <String>{};
+      return cloudFirst.where((u) => u.isNotEmpty && seen.add(u)).toList();
     }
 
     final ordered = <String>[
       active,
       const String.fromEnvironment(
         'FACE_STUDIO_BASE_URL',
-        defaultValue: 'https://face-studio-api.onrender.com',
+        defaultValue: 'https://facerecognition-4.onrender.com',
       ).trim().replaceAll(RegExp(r'/$'), ''),
-      'https://face-studio-api.onrender.com',
       'https://facerecognition-4.onrender.com',
+      'https://face-studio-api.onrender.com',
       'http://10.0.2.2:8787',
       'http://10.0.3.2:8787',
       'http://127.0.0.1:8787',
@@ -517,7 +523,7 @@ class BackendApi {
 BackendApi _createBackendApi() {
   const baseUrl = String.fromEnvironment(
     'FACE_STUDIO_BASE_URL',
-    defaultValue: 'https://face-studio-api.onrender.com',
+    defaultValue: 'https://facerecognition-4.onrender.com',
   );
   const apiKey =
       String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
