@@ -127,8 +127,8 @@ def main():
     parser.add_argument("--api-key", default="", help="X-API-Key from backend")
     parser.add_argument("--token", default="", help="Bearer token from /api/auth/login")
     parser.add_argument("--source-dir", default="database/faces", help="Local source folder")
-    parser.add_argument("--batch-size", type=int, default=25, help="Entries per request")
-    parser.add_argument("--retries", type=int, default=3, help="Retry count for temporary HTTP failures")
+    parser.add_argument("--batch-size", type=int, default=8, help="Entries per request")
+    parser.add_argument("--retries", type=int, default=6, help="Retry count for temporary HTTP failures")
     parser.add_argument("--clear-existing", action="store_true", help="Clear cloud person folders before first upload")
     args = parser.parse_args()
 

@@ -3,6 +3,7 @@ import os
 import secrets
 import sqlite3
 import smtplib
+import shutil
 import threading
 import time
 import urllib.parse
@@ -51,6 +52,9 @@ class Phase3ServiceHub:
         self._mobile_known_loaded_at = 0.0
         self._pending_reset_codes = {}
         self._pending_signup_codes = {}
+        self._sync_refresh_thread = None
+        self._sync_refresh_running = False
+        self._sync_refresh_error = ""
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
@@ -868,6 +872,33 @@ class Phase3ServiceHub:
             raise ValueError("Invalid person name")
         return text[:64]
 
+    def _run_sync_refresh(self):
+        try:
+            self._mobile_known_encodings = None
+            self._mobile_known_loaded_at = 0.0
+            try:
+                from frontend import facercognition as legacy
+                enc_path = getattr(legacy, "ENCODINGS_PATH", "")
+                if enc_path and os.path.exists(enc_path):
+                    os.remove(enc_path)
+            except Exception:
+                pass
+            self._get_mobile_known_encodings()
+            self._sync_refresh_error = ""
+        except Exception as ex:
+            self._sync_refresh_error = str(ex)
+        finally:
+            self._sync_refresh_running = False
+
+    def start_sync_refresh(self):
+        if self._sync_refresh_running:
+            return {"scheduled": False, "running": True, "error": self._sync_refresh_error}
+        self._sync_refresh_running = True
+        self._sync_refresh_error = ""
+        self._sync_refresh_thread = threading.Thread(target=self._run_sync_refresh, daemon=True)
+        self._sync_refresh_thread.start()
+        return {"scheduled": True, "running": True, "error": ""}
+
     def sync_known_faces(self, entries, clear_existing: bool = False, refresh_after: bool = True):
         if not isinstance(entries, list) or not entries:
             raise ValueError("entries must be a non-empty list")
@@ -926,19 +957,9 @@ class Phase3ServiceHub:
             imported_people.add(person)
 
         known_count = None
+        refresh_state = {"scheduled": False, "running": bool(self._sync_refresh_running), "error": self._sync_refresh_error}
         if refresh_after:
-            self._mobile_known_encodings = None
-            self._mobile_known_loaded_at = 0.0
-            try:
-                from frontend import facercognition as legacy
-                enc_path = getattr(legacy, "ENCODINGS_PATH", "")
-                if enc_path and os.path.exists(enc_path):
-                    os.remove(enc_path)
-            except Exception:
-                pass
-
-            known = self._get_mobile_known_encodings()
-            known_count = len(known or {})
+            refresh_state = self.start_sync_refresh()
 
         return {
             "ok": True,
@@ -948,6 +969,9 @@ class Phase3ServiceHub:
                 "known_people_after_sync": known_count,
                 "faces_root": faces_root,
                 "refresh_after": bool(refresh_after),
+                "refresh_scheduled": bool(refresh_state.get("scheduled", False)),
+                "refresh_running": bool(refresh_state.get("running", False)),
+                "refresh_error": str(refresh_state.get("error", "") or ""),
             },
         }
 
