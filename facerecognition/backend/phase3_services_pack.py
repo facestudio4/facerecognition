@@ -9,6 +9,7 @@ import urllib.parse
 import base64
 import hashlib
 import hmac
+import re
 import traceback
 from email.message import EmailMessage
 from datetime import datetime, timedelta
@@ -562,6 +563,7 @@ class Phase3ServiceHub:
                 {"path": "/api/admin/backup/now", "method": "POST"},
                 {"path": "/api/admin/scheduler/start", "method": "POST"},
                 {"path": "/api/admin/scheduler/stop", "method": "POST"},
+                {"path": "/api/admin/faces/sync", "method": "POST", "body": "{entries:[{person,filename,image_b64}], clear_existing?}"},
                 {"path": "/api/auth/token?subject=demo&ttl=120", "method": "GET", "requires": "X-API-Key"},
             ],
         }
@@ -857,6 +859,93 @@ class Phase3ServiceHub:
         self._mobile_known_loaded_at = now
         return self._mobile_known_encodings
 
+    def _sanitize_face_name(self, value: str):
+        text = str(value or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^A-Za-z0-9 _-]", "", text)
+        text = text.strip(" ._")
+        if not text:
+            raise ValueError("Invalid person name")
+        return text[:64]
+
+    def sync_known_faces(self, entries, clear_existing: bool = False):
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("entries must be a non-empty list")
+
+        faces_root = os.path.join(self.base_dir, "database", "faces")
+        os.makedirs(faces_root, exist_ok=True)
+        protected_dirs = {"known_faces", "archive", "__pycache__"}
+
+        if clear_existing:
+            for name in os.listdir(faces_root):
+                path = os.path.join(faces_root, name)
+                if not os.path.isdir(path):
+                    continue
+                if name.lower() in protected_dirs:
+                    continue
+                try:
+                    shutil.rmtree(path)
+                except Exception:
+                    pass
+
+        imported_files = 0
+        imported_people = set()
+        allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            person = self._sanitize_face_name(item.get("person", ""))
+            filename = os.path.basename(str(item.get("filename", "")).strip())
+            if not filename:
+                filename = f"{int(time.time() * 1000)}.jpg"
+            root, ext = os.path.splitext(filename)
+            if ext.lower() not in allowed_ext:
+                ext = ".jpg"
+            safe_root = re.sub(r"[^A-Za-z0-9_-]", "_", root).strip("_") or "face"
+            out_name = f"{safe_root}{ext.lower()}"
+
+            image_b64 = str(item.get("image_b64", "")).strip()
+            if not image_b64:
+                continue
+            if image_b64.lower().startswith("data:image") and "," in image_b64:
+                image_b64 = image_b64.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(image_b64)
+            except Exception:
+                continue
+            if not raw:
+                continue
+
+            person_dir = os.path.join(faces_root, person)
+            os.makedirs(person_dir, exist_ok=True)
+            out_path = os.path.join(person_dir, out_name)
+            with open(out_path, "wb") as f:
+                f.write(raw)
+            imported_files += 1
+            imported_people.add(person)
+
+        self._mobile_known_encodings = None
+        self._mobile_known_loaded_at = 0.0
+        try:
+            from frontend import facercognition as legacy
+            enc_path = getattr(legacy, "ENCODINGS_PATH", "")
+            if enc_path and os.path.exists(enc_path):
+                os.remove(enc_path)
+        except Exception:
+            pass
+
+        known = self._get_mobile_known_encodings()
+        return {
+            "ok": True,
+            "data": {
+                "imported_files": imported_files,
+                "imported_people": sorted(imported_people),
+                "known_people_after_sync": len(known or {}),
+                "faces_root": faces_root,
+            },
+        }
+
     def mobile_styles(self):
         from frontend import facercognition as legacy
 
@@ -898,13 +987,13 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            str(getattr(legacy, "RECOGNITION_THRESHOLD", 0.25)),
+            "0.22",
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.25
-        threshold = max(0.15, min(0.75, threshold))
+            threshold = 0.22
+        threshold = max(0.12, min(0.75, threshold))
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
@@ -1566,6 +1655,13 @@ class Phase3ServiceHub:
                     if path == "/api/admin/scheduler/stop":
                         hub.stop_backup_scheduler()
                         self._send_json(200, {"ok": True, "data": {"running": hub.is_scheduler_running()}})
+                        return
+
+                    if path == "/api/admin/faces/sync":
+                        entries = payload.get("entries")
+                        clear_existing = bool(payload.get("clear_existing", False))
+                        result = hub.sync_known_faces(entries=entries, clear_existing=clear_existing)
+                        self._send_json(200, result)
                         return
                 except ValueError as e:
                     self._send_json(400, {"ok": False, "error": str(e)})

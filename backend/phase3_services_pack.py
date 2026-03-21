@@ -3,6 +3,7 @@ import os
 import secrets
 import sqlite3
 import smtplib
+import shutil
 import threading
 import time
 import urllib.parse
@@ -987,13 +988,13 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            str(getattr(legacy, "RECOGNITION_THRESHOLD", 0.25)),
+            "0.22",
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.25
-        threshold = max(0.15, min(0.75, threshold))
+            threshold = 0.22
+        threshold = max(0.12, min(0.75, threshold))
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
