@@ -1773,7 +1773,92 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     return _token.isNotEmpty;
   }
 
-  Future<void> _captureAndRecognize() async {
+  Future<void> _saveUnknownFaceWithName({
+    required String imageB64,
+    required String personName,
+  }) async {
+    if (!await _ensureToken()) {
+      if (mounted) {
+        setState(() => _status = 'Token unavailable for save');
+      }
+      return;
+    }
+    final cleanName = personName.trim();
+    if (cleanName.isEmpty) {
+      return;
+    }
+    final endpoint = Uri.parse(
+        '${_baseUrl.trim().replaceAll(RegExp(r'/$'), '')}/api/admin/faces/sync');
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final filename = 'mobile_$now.jpg';
+    final res = await http.post(
+      endpoint,
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'entries': [
+          {
+            'person': cleanName,
+            'filename': filename,
+            'image_b64': imageB64,
+          }
+        ],
+        'clear_existing': false,
+        'refresh_after': false,
+      }),
+    );
+    if (!mounted) {
+      return;
+    }
+    if (res.statusCode != 200) {
+      setState(() {
+        _status = 'Save unknown failed: ${res.statusCode}';
+      });
+      return;
+    }
+    setState(() {
+      _status = 'Saved unknown as $cleanName';
+      _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
+    });
+  }
+
+  Future<void> _promptAndSaveUnknownFace(String imageB64) async {
+    final nameController = TextEditingController();
+    final entered = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Unknown Face Detected'),
+          content: TextField(
+            controller: nameController,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Enter person name',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(''),
+              child: const Text('Skip'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(nameController.text),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    final name = (entered ?? '').trim();
+    if (name.isEmpty) {
+      return;
+    }
+    await _saveUnknownFaceWithName(imageB64: imageB64, personName: name);
+  }
+
+  Future<void> _captureAndRecognize({bool interactive = false}) async {
     final ctrl = _controller;
     if (!mounted || ctrl == null || !ctrl.value.isInitialized || _busy) {
       return;
@@ -1837,6 +1922,10 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       final ih = int.tryParse((data?['image_height'] ?? 0).toString()) ?? 0;
       final tracking = Map<String, dynamic>.from(
           (data?['location_tracking'] as Map?) ?? const {});
+      final detected = data?['detected'] == true;
+      final faceCount =
+          int.tryParse((data?['face_count'] ?? faces.length).toString()) ??
+              faces.length;
       final saved = tracking['saved'] == true;
       final deduped =
           (tracking['reason'] ?? '').toString() == 'deduped_recent_event';
@@ -1863,6 +1952,13 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                   : 'No face detected in current frame')
               : 'Live recognition running';
         });
+      }
+
+      if (interactive &&
+          detected &&
+          faceCount > 0 &&
+          name.toLowerCase() == 'unknown') {
+        await _promptAndSaveUnknownFace(imageB64);
       }
     } catch (e) {
       if (mounted) {
@@ -1979,7 +2075,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                   runSpacing: 8,
                   children: [
                     ElevatedButton(
-                      onPressed: _captureAndRecognize,
+                      onPressed: () => _captureAndRecognize(interactive: true),
                       child: const Text('Recognize Now'),
                     ),
                     ElevatedButton(
