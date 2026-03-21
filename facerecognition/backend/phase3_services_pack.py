@@ -956,6 +956,16 @@ class Phase3ServiceHub:
             imported_files += 1
             imported_people.add(person)
 
+        self._mobile_known_encodings = None
+        self._mobile_known_loaded_at = 0.0
+        try:
+            from frontend import facercognition as legacy
+            enc_path = getattr(legacy, "ENCODINGS_PATH", "")
+            if enc_path and os.path.exists(enc_path):
+                os.remove(enc_path)
+        except Exception:
+            pass
+
         known_count = None
         refresh_state = {"scheduled": False, "running": bool(self._sync_refresh_running), "error": self._sync_refresh_error}
         if refresh_after:
