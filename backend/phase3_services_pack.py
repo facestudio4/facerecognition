@@ -216,6 +216,7 @@ class Phase3ServiceHub:
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
         timeout_text = os.environ.get("FACESTUDIO_SMTP_TIMEOUT", "10").strip()
+        total_timeout_text = os.environ.get("FACESTUDIO_SMTP_TOTAL_TIMEOUT", "9").strip()
 
         if not host or not user or not password or not from_email:
             return {"ok": False, "error": "SMTP is not configured"}
@@ -229,6 +230,11 @@ class Phase3ServiceHub:
             smtp_timeout = max(3, min(int(timeout_text), 30))
         except Exception:
             smtp_timeout = 10
+
+        try:
+            total_timeout = max(4, min(int(total_timeout_text), 40))
+        except Exception:
+            total_timeout = 9
 
         if "gmail.com" in host.lower() and " " in password:
             password = password.replace(" ", "")
@@ -250,12 +256,19 @@ class Phase3ServiceHub:
             attempts.append((465, True, False))
 
         last_error = "unknown"
+        started_at = time.time()
         for p, ssl_mode, tls_mode in attempts:
+            elapsed = time.time() - started_at
+            remaining = total_timeout - elapsed
+            if remaining <= 1:
+                last_error = "SMTP timeout"
+                break
+            per_try_timeout = max(3, min(smtp_timeout, int(remaining)))
             try:
                 if ssl_mode:
-                    smtp_client = smtplib.SMTP_SSL(host, p, timeout=smtp_timeout)
+                    smtp_client = smtplib.SMTP_SSL(host, p, timeout=per_try_timeout)
                 else:
-                    smtp_client = smtplib.SMTP(host, p, timeout=smtp_timeout)
+                    smtp_client = smtplib.SMTP(host, p, timeout=per_try_timeout)
                 with smtp_client as smtp:
                     smtp.ehlo()
                     if tls_mode and not ssl_mode:
@@ -270,6 +283,10 @@ class Phase3ServiceHub:
                     "error": "SMTP authentication failed. Use Google App Password in FACESTUDIO_SMTP_APP_PASSWORD.",
                     "detail": str(ex),
                 }
+            except TimeoutError:
+                last_error = "SMTP timeout"
+            except OSError as ex:
+                last_error = f"SMTP network error: {ex}"
             except Exception as ex:
                 last_error = str(ex)
 
@@ -439,9 +456,10 @@ class Phase3ServiceHub:
                 self._pending_signup_codes.pop(email_key, None)
                 return {"ok": False, "error": email_result.get("error", "Failed to send verification email")}
 
+            smtp_error = str(email_result.get("error", "SMTP send failed"))
             self._log_activity(
                 "Signup Verification Fallback",
-                f"SMTP failed for {email}: {email_result.get('error', 'unknown')}",
+                f"SMTP failed for {email}: {smtp_error}",
                 username=username,
                 role="user",
             )
@@ -453,6 +471,7 @@ class Phase3ServiceHub:
                     "expires_in_seconds": 600,
                     "mail_sent": False,
                     "verification_code": code,
+                    "smtp_error": smtp_error,
                 },
             }
 

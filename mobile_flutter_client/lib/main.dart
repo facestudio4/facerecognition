@@ -898,13 +898,18 @@ class _LoginPageState extends State<LoginPage> {
       final data = (res['data'] as Map<String, dynamic>?) ?? const {};
       final mailSent = data['mail_sent'] != false;
       final fallbackCode = (data['verification_code'] ?? '').toString().trim();
+      final smtpError = (data['smtp_error'] ?? '').toString().trim();
       setState(() {
         _busy = false;
         _signupCodeSent = true;
         if (mailSent) {
           _info = 'Verification code sent to $email';
         } else if (fallbackCode.isNotEmpty) {
-          _info = 'SMTP unavailable. Use this code: $fallbackCode';
+          if (smtpError.isNotEmpty) {
+            _info = 'SMTP error: $smtpError. Backup code: $fallbackCode';
+          } else {
+            _info = 'SMTP unavailable. Use this code: $fallbackCode';
+          }
         } else {
           _info = 'Verification code is ready. Please continue.';
         }
