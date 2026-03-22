@@ -210,7 +210,7 @@ class Phase3ServiceHub:
     def _send_email(self, to_email: str, subject: str, body: str):
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "").strip()
         user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-        password = os.environ.get("FACESTUDIO_SMTP_PASS", "")
+        password = os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")
         from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
@@ -234,21 +234,37 @@ class Phase3ServiceHub:
         message["Subject"] = subject
         message.set_content(body)
 
-        try:
-            if use_ssl:
-                smtp_client = smtplib.SMTP_SSL(host, port, timeout=20)
-            else:
-                smtp_client = smtplib.SMTP(host, port, timeout=20)
-            with smtp_client as smtp:
-                smtp.ehlo()
-                if use_tls and not use_ssl:
-                    smtp.starttls()
+        attempts = [(port, use_ssl, use_tls)]
+        if (587, False, True) not in attempts:
+            attempts.append((587, False, True))
+        if (465, True, False) not in attempts:
+            attempts.append((465, True, False))
+
+        last_error = "unknown"
+        for p, ssl_mode, tls_mode in attempts:
+            try:
+                if ssl_mode:
+                    smtp_client = smtplib.SMTP_SSL(host, p, timeout=20)
+                else:
+                    smtp_client = smtplib.SMTP(host, p, timeout=20)
+                with smtp_client as smtp:
                     smtp.ehlo()
-                smtp.login(user, password)
-                smtp.send_message(message)
-            return {"ok": True}
-        except Exception as ex:
-            return {"ok": False, "error": f"Failed to send email: {ex}"}
+                    if tls_mode and not ssl_mode:
+                        smtp.starttls()
+                        smtp.ehlo()
+                    smtp.login(user, password)
+                    smtp.send_message(message)
+                return {"ok": True}
+            except smtplib.SMTPAuthenticationError as ex:
+                return {
+                    "ok": False,
+                    "error": "SMTP authentication failed. Use Google App Password in FACESTUDIO_SMTP_APP_PASSWORD.",
+                    "detail": str(ex),
+                }
+            except Exception as ex:
+                last_error = str(ex)
+
+        return {"ok": False, "error": f"Failed to send email: {last_error}"}
 
     def authenticate_user(self, identifier: str, password: str):
         ident = (identifier or "").strip()
