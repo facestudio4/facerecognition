@@ -9,7 +9,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 const Color _kBg = Color(0xFF1A1A2E);
@@ -18,6 +20,19 @@ const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
 const Duration _kNetworkTimeout = Duration(seconds: 12);
 const Duration _kAuthTimeout = Duration(seconds: 12);
+
+int _parseVersionNumber(String value) {
+  final match =
+      RegExp(r'^(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?$').firstMatch(value.trim());
+  if (match == null) {
+    return 0;
+  }
+  final major = int.tryParse(match.group(1) ?? '0') ?? 0;
+  final minor = int.tryParse(match.group(2) ?? '0') ?? 0;
+  final patch = int.tryParse(match.group(3) ?? '0') ?? 0;
+  final build = int.tryParse(match.group(4) ?? '0') ?? 0;
+  return (major * 1000000000) + (minor * 1000000) + (patch * 1000) + build;
+}
 
 void main() {
   runApp(const FaceStudioMobileClientApp());
@@ -518,6 +533,27 @@ class BackendApi {
     );
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
+
+  Future<Map<String, dynamic>> getMobileAppUpdateInfo() async {
+    for (final base in _candidateBases()) {
+      try {
+        final res = await http
+            .get(Uri.parse('$base/api/mobile/app-update'))
+            .timeout(_kNetworkTimeout);
+        if (res.statusCode != 200) {
+          continue;
+        }
+        _baseUrl = base;
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final data =
+            (body['data'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+        return {'ok': true, 'data': data};
+      } catch (_) {
+        continue;
+      }
+    }
+    return {'ok': false};
+  }
 }
 
 BackendApi _createBackendApi() {
@@ -547,11 +583,77 @@ class _AuthGateState extends State<AuthGate> {
   bool _ready = false;
   String _username = '';
   bool _isAdmin = false;
+  bool _updateDialogShown = false;
 
   @override
   void initState() {
     super.initState();
+    _checkForAppUpdate();
     _loadSession();
+  }
+
+  Future<void> _checkForAppUpdate() async {
+    final api = buildBackendApi();
+    final info = await api.getMobileAppUpdateInfo();
+    if (info['ok'] != true || !mounted || _updateDialogShown) {
+      return;
+    }
+
+    final data = (info['data'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+    final latestVersion = (data['latest_version'] ?? '').toString().trim();
+    final minimumVersion = (data['minimum_version'] ?? '').toString().trim();
+    final updateUrl = (data['apk_url'] ?? '').toString().trim();
+    final notes = (data['notes'] ?? '').toString().trim();
+    final forceUpdate = data['force_update'] == true;
+    if (latestVersion.isEmpty || updateUrl.isEmpty) {
+      return;
+    }
+
+    final pkg = await PackageInfo.fromPlatform();
+    final currentVersion = '${pkg.version}+${pkg.buildNumber}';
+    final currentN = _parseVersionNumber(currentVersion);
+    final latestN = _parseVersionNumber(latestVersion);
+    final minimumN = _parseVersionNumber(minimumVersion);
+    final isOutdated = latestN > 0 && latestN > currentN;
+    final mustUpdate = minimumN > 0 && currentN < minimumN;
+    if (!isOutdated && !mustUpdate) {
+      return;
+    }
+
+    _updateDialogShown = true;
+    final canSkip = !(forceUpdate || mustUpdate);
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: canSkip,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Update Available'),
+          content: Text(
+            notes.isEmpty
+                ? 'A new app version is available. Please update to continue with latest improvements.'
+                : notes,
+          ),
+          actions: [
+            if (canSkip)
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Later'),
+              ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Update Now'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result == true) {
+      final uri = Uri.tryParse(updateUrl);
+      if (uri != null) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+    }
   }
 
   Future<void> _loadSession() async {

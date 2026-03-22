@@ -538,6 +538,7 @@ class Phase3ServiceHub:
                 {"path": "/api/health", "method": "GET"},
                 {"path": "/api/docs", "method": "GET"},
                 {"path": "/api/map/view", "method": "GET"},
+                {"path": "/api/mobile/app-update", "method": "GET"},
                 {"path": "/api/auth/login", "method": "POST", "body": "{identifier, password, ttl?}"},
                 {"path": "/api/auth/signup", "method": "POST", "body": "{username?, email?, phone?, password}"},
                 {"path": "/api/auth/signup/request", "method": "POST", "body": "{username?, email, phone?, password}"},
@@ -570,6 +571,31 @@ class Phase3ServiceHub:
                 {"path": "/api/admin/faces/sync", "method": "POST", "body": "{entries:[{person,filename,image_b64}], clear_existing?}"},
                 {"path": "/api/auth/token?subject=demo&ttl=120", "method": "GET", "requires": "X-API-Key"},
             ],
+        }
+
+    def get_mobile_app_update_info(self):
+        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+2").strip()
+        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+1").strip()
+        apk_url = os.getenv(
+            "FACE_STUDIO_MOBILE_APK_URL",
+            "https://github.com/facestudio4/facerecognition/releases/latest",
+        ).strip()
+        notes = os.getenv(
+            "FACE_STUDIO_MOBILE_UPDATE_NOTES",
+            "A new version is available with performance and stability improvements.",
+        ).strip()
+        force_update = os.getenv("FACE_STUDIO_MOBILE_FORCE_UPDATE", "false").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        return {
+            "latest_version": latest_version,
+            "minimum_version": minimum_version,
+            "apk_url": apk_url,
+            "notes": notes,
+            "force_update": force_update,
         }
 
     def get_world_map_html(self):
@@ -1435,6 +1461,10 @@ class Phase3ServiceHub:
                             "<body style='font-family:Arial,sans-serif;background:#0f1728;color:#e6eeff;padding:16px;'>"
                             "<h3>Map Error</h3><p>" + safe_error + "</p></body></html>",
                         )
+                    return
+
+                if path == "/api/mobile/app-update":
+                    self._send_json(200, {"ok": True, "data": hub.get_mobile_app_update_info()})
                     return
 
                 if path == "/api/auth/token":
