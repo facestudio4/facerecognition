@@ -885,10 +885,19 @@ class _LoginPageState extends State<LoginPage> {
         });
         return;
       }
+      final data = (res['data'] as Map<String, dynamic>?) ?? const {};
+      final mailSent = data['mail_sent'] != false;
+      final fallbackCode = (data['verification_code'] ?? '').toString().trim();
       setState(() {
         _busy = false;
         _signupCodeSent = true;
-        _info = 'Verification code sent to $email';
+        if (mailSent) {
+          _info = 'Verification code sent to $email';
+        } else if (fallbackCode.isNotEmpty) {
+          _info = 'SMTP unavailable. Use this code: $fallbackCode';
+        } else {
+          _info = 'Verification code is ready. Please continue.';
+        }
       });
       return;
     }

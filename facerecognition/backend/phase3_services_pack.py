@@ -214,6 +214,7 @@ class Phase3ServiceHub:
         from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
+        use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
 
         if not host or not user or not password or not from_email:
             return {"ok": False, "error": "SMTP is not configured"}
@@ -223,6 +224,10 @@ class Phase3ServiceHub:
         except Exception:
             port = 587
 
+        if port == 465 and not use_ssl:
+            use_ssl = True
+            use_tls = False
+
         message = EmailMessage()
         message["From"] = from_email
         message["To"] = to_email
@@ -230,9 +235,13 @@ class Phase3ServiceHub:
         message.set_content(body)
 
         try:
-            with smtplib.SMTP(host, port, timeout=20) as smtp:
+            if use_ssl:
+                smtp_client = smtplib.SMTP_SSL(host, port, timeout=20)
+            else:
+                smtp_client = smtplib.SMTP(host, port, timeout=20)
+            with smtp_client as smtp:
                 smtp.ehlo()
-                if use_tls:
+                if use_tls and not use_ssl:
                     smtp.starttls()
                     smtp.ehlo()
                 smtp.login(user, password)
@@ -395,8 +404,32 @@ class Phase3ServiceHub:
             ),
         )
         if email_result.get("ok") is not True:
-            self._pending_signup_codes.pop(email_key, None)
-            return {"ok": False, "error": email_result.get("error", "Failed to send verification email")}
+            allow_fallback = os.getenv("FACESTUDIO_SIGNUP_ALLOW_SMTP_FALLBACK", "1").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if not allow_fallback:
+                self._pending_signup_codes.pop(email_key, None)
+                return {"ok": False, "error": email_result.get("error", "Failed to send verification email")}
+
+            self._log_activity(
+                "Signup Verification Fallback",
+                f"SMTP failed for {email}: {email_result.get('error', 'unknown')}",
+                username=username,
+                role="user",
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "username": username,
+                    "email": email,
+                    "expires_in_seconds": 600,
+                    "mail_sent": False,
+                    "verification_code": code,
+                },
+            }
 
         self._log_activity("Signup Verification Requested", f"Verification code sent to {email}", username=username, role="user")
         return {
@@ -405,6 +438,7 @@ class Phase3ServiceHub:
                 "username": username,
                 "email": email,
                 "expires_in_seconds": 600,
+                "mail_sent": True,
             },
         }
 
@@ -1083,13 +1117,20 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            "0.14",
+            "0.40",
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.14
-        threshold = max(0.08, min(0.75, threshold))
+            threshold = 0.40
+        threshold = max(0.25, min(0.85, threshold))
+
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.04")
+        try:
+            margin = float(margin_raw)
+        except Exception:
+            margin = 0.04
+        margin = max(0.0, min(0.25, margin))
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
@@ -1107,9 +1148,14 @@ class Phase3ServiceHub:
 
             scores.sort(key=lambda x: x["score"], reverse=True)
             top = scores[:top_k]
-            best = top[0] if top else {"name": "Unknown", "score": 0.0}
-            if best["score"] < threshold:
+            best_candidate = top[0] if top else {"name": "Unknown", "score": 0.0}
+            second_score = float(top[1]["score"]) if len(top) > 1 else 0.0
+            ambiguous = len(top) > 1 and (float(best_candidate["score"]) - second_score) < margin
+
+            if float(best_candidate["score"]) < threshold or ambiguous:
                 best = {"name": "Unknown", "score": 0.0}
+            else:
+                best = best_candidate
 
             if best["score"] > float(global_best.get("score", 0.0)):
                 global_best = best
@@ -1131,6 +1177,7 @@ class Phase3ServiceHub:
         result = {
             "detected": True,
             "threshold": threshold,
+            "margin": margin,
             "face_count": len(all_faces),
             "faces": all_faces,
             "image_width": int(frame.shape[1]),
