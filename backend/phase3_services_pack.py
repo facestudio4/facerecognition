@@ -210,11 +210,12 @@ class Phase3ServiceHub:
     def _send_email(self, to_email: str, subject: str, body: str):
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "").strip()
         user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-        password = os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")
+        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
         from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
+        timeout_text = os.environ.get("FACESTUDIO_SMTP_TIMEOUT", "10").strip()
 
         if not host or not user or not password or not from_email:
             return {"ok": False, "error": "SMTP is not configured"}
@@ -223,6 +224,14 @@ class Phase3ServiceHub:
             port = int(port_text)
         except Exception:
             port = 587
+
+        try:
+            smtp_timeout = max(3, min(int(timeout_text), 30))
+        except Exception:
+            smtp_timeout = 10
+
+        if "gmail.com" in host.lower() and " " in password:
+            password = password.replace(" ", "")
 
         if port == 465 and not use_ssl:
             use_ssl = True
@@ -244,9 +253,9 @@ class Phase3ServiceHub:
         for p, ssl_mode, tls_mode in attempts:
             try:
                 if ssl_mode:
-                    smtp_client = smtplib.SMTP_SSL(host, p, timeout=20)
+                    smtp_client = smtplib.SMTP_SSL(host, p, timeout=smtp_timeout)
                 else:
-                    smtp_client = smtplib.SMTP(host, p, timeout=20)
+                    smtp_client = smtplib.SMTP(host, p, timeout=smtp_timeout)
                 with smtp_client as smtp:
                     smtp.ehlo()
                     if tls_mode and not ssl_mode:

@@ -870,12 +870,22 @@ class _LoginPageState extends State<LoginPage> {
         _info = '';
       });
       final api = buildBackendApi();
-      final res = await api.requestSignupVerification(
-        username: username,
-        email: email,
-        phone: phone,
-        password: password,
-      );
+      Map<String, dynamic> res;
+      try {
+        res = await api.requestSignupVerification(
+          username: username,
+          email: email,
+          phone: phone,
+          password: password,
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _error = 'Could not send verification code: $e';
+        });
+        return;
+      }
       if (!mounted) return;
       if (res['ok'] != true) {
         setState(() {
