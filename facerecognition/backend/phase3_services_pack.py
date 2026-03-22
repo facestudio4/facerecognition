@@ -1117,19 +1117,19 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            "0.40",
+            "0.48",
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.40
+            threshold = 0.48
         threshold = max(0.25, min(0.85, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.04")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.06")
         try:
             margin = float(margin_raw)
         except Exception:
-            margin = 0.04
+            margin = 0.06
         margin = max(0.0, min(0.25, margin))
         top_k = max(1, min(int(top_k), 10))
 
@@ -1137,17 +1137,26 @@ class Phase3ServiceHub:
         global_best = {"name": "Unknown", "score": 0.0}
         global_top = []
         for (fx, fy, fw, fh, embedding) in detections:
-            scores = []
+            raw_scores = []
             for i, known_enc in enumerate(enc_arr):
                 score = legacy._sface_recognizer.match(
                     embedding.reshape(1, -1),
                     known_enc.reshape(1, -1),
                     cv2.FaceRecognizerSF_FR_COSINE,
                 )
-                scores.append({"name": names[i], "score": float(score)})
+                raw_scores.append({"name": names[i], "score": float(score)})
 
-            scores.sort(key=lambda x: x["score"], reverse=True)
-            top = scores[:top_k]
+            person_best = {}
+            for rec in raw_scores:
+                n = str(rec["name"])
+                s = float(rec["score"])
+                if s > float(person_best.get(n, -1.0)):
+                    person_best[n] = s
+
+            person_scores = [{"name": n, "score": s} for n, s in person_best.items()]
+            person_scores.sort(key=lambda x: x["score"], reverse=True)
+
+            top = person_scores[:top_k]
             best_candidate = top[0] if top else {"name": "Unknown", "score": 0.0}
             second_score = float(top[1]["score"]) if len(top) > 1 else 0.0
             ambiguous = len(top) > 1 and (float(best_candidate["score"]) - second_score) < margin

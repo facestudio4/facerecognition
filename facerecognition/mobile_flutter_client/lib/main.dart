@@ -1781,7 +1781,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
 
       final controller = CameraController(
         selected,
-        ResolutionPreset.low,
+        ResolutionPreset.medium,
         enableAudio: false,
       );
       await controller.initialize();
