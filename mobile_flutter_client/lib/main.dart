@@ -1670,7 +1670,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
 
       final controller = CameraController(
         selected,
-        ResolutionPreset.medium,
+        ResolutionPreset.low,
         enableAudio: false,
       );
       await controller.initialize();
@@ -1749,7 +1749,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     try {
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
+          accuracy: LocationAccuracy.medium,
           distanceFilter: 0,
         ),
       );
@@ -1898,7 +1898,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         return;
       }
 
-      await _updateCurrentLocation();
+      unawaited(_updateCurrentLocation());
 
       final shot = await ctrl.takePicture();
       final file = File(shot.path);
@@ -1908,24 +1908,26 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       final uri = Uri.parse(
           '${_baseUrl.trim().replaceAll(RegExp(r'/$'), '')}/api/mobile/identify');
       final sessionUser = buildBackendApi().username;
-      final res = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $_token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'image_b64': imageB64,
-          'top_k': 1,
-          'tracking': {
-            'location_name': _currentLocationLabel,
-            'latitude': _currentLat,
-            'longitude': _currentLng,
-            'requested_by': sessionUser.isEmpty ? 'mobile' : sessionUser,
-            'force_update': true,
-          },
-        }),
-      );
+      final res = await http
+          .post(
+            uri,
+            headers: {
+              'Authorization': 'Bearer $_token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'image_b64': imageB64,
+              'top_k': 1,
+              'tracking': {
+                'location_name': _currentLocationLabel,
+                'latitude': _currentLat,
+                'longitude': _currentLng,
+                'requested_by': sessionUser.isEmpty ? 'mobile' : sessionUser,
+                'force_update': false,
+              },
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
 
       if (res.statusCode != 200) {
         if (mounted) {
