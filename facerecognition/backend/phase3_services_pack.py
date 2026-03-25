@@ -208,10 +208,10 @@ class Phase3ServiceHub:
         return self._hash_password(password) == str(hashed)
 
     def _send_email(self, to_email: str, subject: str, body: str):
-        host = os.environ.get("FACESTUDIO_SMTP_HOST", "").strip()
-        user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
-        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
+        host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
+        user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
+        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "zxwv lzbu rjii dqon") or os.environ.get("FACESTUDIO_SMTP_PASS", "zxwv lzbu rjii dqon")).strip()
+        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "facestudio4@gmail.com").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -936,6 +936,26 @@ class Phase3ServiceHub:
                     """,
                     (person,),
                 ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            event_time,
+                            recognized_name,
+                            location_name,
+                            latitude,
+                            longitude,
+                            confidence,
+                            source,
+                            requested_by
+                        FROM recognition_location_events
+                        WHERE lower(recognized_name) LIKE lower(?)
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (f"%{person}%",),
+                    ).fetchall()
             else:
                 rows = conn.execute(
                     """
@@ -956,6 +976,26 @@ class Phase3ServiceHub:
                     """,
                     (person, limit),
                 ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            event_time,
+                            recognized_name,
+                            location_name,
+                            latitude,
+                            longitude,
+                            confidence,
+                            source,
+                            requested_by
+                        FROM recognition_location_events
+                        WHERE lower(recognized_name) LIKE lower(?)
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (f"%{person}%", limit),
+                    ).fetchall()
         return [dict(r) for r in rows]
 
     def _decode_image_b64(self, image_b64: str):
@@ -1161,19 +1201,19 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            "0.48",
+            "0.44",
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.48
+            threshold = 0.44
         threshold = max(0.25, min(0.85, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.06")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.04")
         try:
             margin = float(margin_raw)
         except Exception:
-            margin = 0.06
+            margin = 0.04
         margin = max(0.0, min(0.25, margin))
         top_k = max(1, min(int(top_k), 10))
 

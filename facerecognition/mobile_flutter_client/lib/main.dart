@@ -522,13 +522,15 @@ class BackendApi {
   Future<Map<String, dynamic>> searchRecognitionLocations({
     required String name,
     int limit = 100,
+    bool latestOnly = true,
   }) async {
     final ok = await ensureToken();
     if (!ok) return {'ok': false, 'error': 'Token issue failed'};
     final person = Uri.encodeQueryComponent(name.trim());
+    final latestFlag = latestOnly ? 'true' : 'false';
     final res = await http.get(
       Uri.parse(
-          '$_base/api/mobile/recognition-location/search?name=$person&limit=$limit'),
+          '$_base/api/mobile/recognition-location/search?name=$person&limit=$limit&latest_only=$latestFlag'),
       headers: {'Authorization': 'Bearer $_token'},
     );
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -1364,12 +1366,19 @@ class MobileHomePage extends StatefulWidget {
 class _MobileHomePageState extends State<MobileHomePage> {
   late bool _isAdmin;
   late String _username;
+  final TextEditingController _menuSearchController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _isAdmin = widget.isAdmin;
     _username = widget.username;
+  }
+
+  @override
+  void dispose() {
+    _menuSearchController.dispose();
+    super.dispose();
   }
 
   List<_MenuItem> get _commonItems => [
@@ -1565,10 +1574,65 @@ class _MobileHomePageState extends State<MobileHomePage> {
         ),
       ];
 
-  List<_MenuItem> get _visibleItems => [
-        ..._commonItems,
-        ...(_isAdmin ? _adminItems : _userItems),
-      ];
+  List<_MenuItem> _filterItems(List<_MenuItem> items) {
+    final q = _menuSearchController.text.trim().toLowerCase();
+    if (q.isEmpty) {
+      return items;
+    }
+    return items
+        .where(
+          (item) =>
+              item.title.toLowerCase().contains(q) ||
+              item.subtitle.toLowerCase().contains(q),
+        )
+        .toList();
+  }
+
+  Widget _buildMenuSection({
+    required String title,
+    required String subtitle,
+    required List<_MenuItem> items,
+    required int delayStart,
+  }) {
+    if (items.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF131B2F),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF304363)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            subtitle,
+            style: const TextStyle(color: Color(0xFFB3C6E8)),
+          ),
+          const SizedBox(height: 8),
+          ...items.asMap().entries.map(
+                (entry) => _AnimatedMenuCard(
+                  delay: Duration(milliseconds: 70 * (delayStart + entry.key)),
+                  item: entry.value,
+                  onTap: () => _openPage(entry.value.page),
+                ),
+              ),
+        ],
+      ),
+    );
+  }
 
   void _openPage(Widget page) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
@@ -1579,6 +1643,10 @@ class _MobileHomePageState extends State<MobileHomePage> {
     final roleText = _isAdmin ? 'Admin Mode' : 'User Mode';
     final roleColor =
         _isAdmin ? const Color(0xFFE94560) : const Color(0xFF0F3460);
+    final commonFiltered = _filterItems(_commonItems);
+    final roleItems = _isAdmin ? _adminItems : _userItems;
+    final roleFiltered = _filterItems(roleItems);
+    final noMatch = commonFiltered.isEmpty && roleFiltered.isEmpty;
 
     return Scaffold(
       appBar: AppBar(
@@ -1621,13 +1689,52 @@ class _MobileHomePageState extends State<MobileHomePage> {
             style: TextStyle(color: Color(0xFFA0A0B8)),
           ),
           const SizedBox(height: 12),
-          ..._visibleItems.asMap().entries.map(
-                (entry) => _AnimatedMenuCard(
-                  delay: Duration(milliseconds: 80 * entry.key),
-                  item: entry.value,
-                  onTap: () => _openPage(entry.value.page),
-                ),
+          TextField(
+            controller: _menuSearchController,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Search features',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _menuSearchController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: () {
+                        _menuSearchController.clear();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.clear),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _buildMenuSection(
+            title: 'Core Features',
+            subtitle: 'Face tools available for every user',
+            items: commonFiltered,
+            delayStart: 0,
+          ),
+          _buildMenuSection(
+            title: _isAdmin ? 'Admin Workspace' : 'My Workspace',
+            subtitle: _isAdmin
+                ? 'Management, analytics and project controls'
+                : 'Profile, search and personal usage tools',
+            items: roleFiltered,
+            delayStart: 12,
+          ),
+          if (noMatch)
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A2238),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF3A4F74)),
               ),
+              child: const Text(
+                'No feature found for this search. Try another keyword.',
+                style: TextStyle(color: Color(0xFFCEE1FF)),
+              ),
+            ),
           const SizedBox(height: 14),
           TextButton.icon(
             onPressed: () async {
@@ -1764,6 +1871,8 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   String _currentLocationLabel = 'Detecting location...';
   DateTime? _lastLocationFetchAt;
   String _lastSavedInfo = 'No recognition location saved yet';
+  int _authFailures = 0;
+  int _loopFailures = 0;
 
   @override
   void initState() {
@@ -1809,7 +1918,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         setState(() => _status = 'Live recognition running');
       }
 
-      _loopTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _loopTimer = Timer.periodic(const Duration(seconds: 3), (_) {
         _captureAndRecognize();
       });
       await _captureAndRecognize();
@@ -2034,30 +2143,66 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       final uri = Uri.parse(
           '${_baseUrl.trim().replaceAll(RegExp(r'/$'), '')}/api/mobile/identify');
       final sessionUser = buildBackendApi().username;
-      final res = await http
-          .post(
-            uri,
-            headers: {
-              'Authorization': 'Bearer $_token',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'image_b64': imageB64,
-              'top_k': 1,
-              'tracking': {
-                'location_name': _currentLocationLabel,
-                'latitude': _currentLat,
-                'longitude': _currentLng,
-                'requested_by': sessionUser.isEmpty ? 'mobile' : sessionUser,
-                'force_update': false,
-              },
-            }),
-          )
-          .timeout(const Duration(seconds: 8));
+      final reqBody = jsonEncode({
+        'image_b64': imageB64,
+        'top_k': 3,
+        'tracking': {
+          'location_name': _currentLocationLabel,
+          'latitude': _currentLat,
+          'longitude': _currentLng,
+          'requested_by': sessionUser.isEmpty ? 'mobile' : sessionUser,
+          'force_update': false,
+        },
+      });
+
+      Future<http.Response> sendIdentify() {
+        return http.post(
+          uri,
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: reqBody,
+        ).timeout(const Duration(seconds: 8));
+      }
+
+      var res = await sendIdentify();
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        _token = '';
+        final refreshed = await _ensureToken();
+        if (refreshed) {
+          res = await sendIdentify();
+        }
+      }
+
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        _authFailures += 1;
+        if (_authFailures >= 3) {
+          _loopTimer?.cancel();
+          _loopTimer = null;
+        }
+        if (mounted) {
+          setState(() {
+            _status = _authFailures >= 3
+                ? 'Identify unauthorized repeatedly. Live mode paused. Tap Resume Live after login.'
+                : 'Identify unauthorized. Retrying auth...';
+          });
+        }
+        return;
+      }
 
       if (res.statusCode != 200) {
+        _loopFailures += 1;
+        if (_loopFailures >= 6) {
+          _loopTimer?.cancel();
+          _loopTimer = null;
+        }
         if (mounted) {
-          setState(() => _status = 'Identify error: ${res.statusCode}');
+          setState(() {
+            _status = _loopFailures >= 6
+                ? 'Identify keeps failing (${res.statusCode}). Live mode paused.'
+                : 'Identify error: ${res.statusCode}';
+          });
         }
         return;
       }
@@ -2093,6 +2238,8 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
 
       if (mounted) {
         setState(() {
+          _authFailures = 0;
+          _loopFailures = 0;
           _topName = name;
           _topScore = score;
           _liveFaces = faces;
@@ -2115,8 +2262,17 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         await _promptAndSaveUnknownFace(imageB64);
       }
     } catch (e) {
+      _loopFailures += 1;
+      if (_loopFailures >= 6) {
+        _loopTimer?.cancel();
+        _loopTimer = null;
+      }
       if (mounted) {
-        setState(() => _status = 'Live loop error: $e');
+        setState(() {
+          _status = _loopFailures >= 6
+              ? 'Live loop failed repeatedly. Live mode paused.'
+              : 'Live loop error: $e';
+        });
       }
     } finally {
       _busy = false;
@@ -2243,7 +2399,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                       onPressed: () {
                         if (_loopTimer == null) {
                           _loopTimer =
-                              Timer.periodic(const Duration(seconds: 2), (_) {
+                              Timer.periodic(const Duration(seconds: 3), (_) {
                             _captureAndRecognize();
                           });
                           setState(() => _status = 'Live recognition resumed');
@@ -2463,11 +2619,19 @@ class _UsersPageState extends State<UsersPage> {
   bool _loading = true;
   String _error = '';
   List<Map<String, dynamic>> _users = const [];
+  final TextEditingController _searchController = TextEditingController();
+  String _sortBy = 'Name (A-Z)';
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -2488,6 +2652,65 @@ class _UsersPageState extends State<UsersPage> {
         _loading = false;
       });
     }
+  }
+
+  List<Map<String, dynamic>> _applySearchAndSort(List<Map<String, dynamic>> all) {
+    final q = _searchController.text.trim().toLowerCase();
+    var filtered = all;
+    if (q.isNotEmpty) {
+      filtered = all.where((u) {
+        final username = (u['username'] ?? '').toString().toLowerCase();
+        final email = (u['email'] ?? '').toString().toLowerCase();
+        final phone = (u['phone'] ?? '').toString().toLowerCase();
+        final role = (u['role'] ?? '').toString().toLowerCase();
+        return username.contains(q) ||
+            email.contains(q) ||
+            phone.contains(q) ||
+            role.contains(q);
+      }).toList();
+    }
+
+    int loginCount(Map<String, dynamic> row) {
+      final logs = (row['logins'] as List?) ?? const [];
+      return logs.length;
+    }
+
+    int asCreatedStamp(Map<String, dynamic> row) {
+      final text = (row['created'] ?? '').toString();
+      final parsed = DateTime.tryParse(text.replaceFirst(' ', 'T'));
+      return parsed?.millisecondsSinceEpoch ?? 0;
+    }
+
+    filtered.sort((a, b) {
+      switch (_sortBy) {
+        case 'Name (Z-A)':
+          return (b['username'] ?? '').toString().toLowerCase().compareTo(
+              (a['username'] ?? '').toString().toLowerCase());
+        case 'Created (Newest)':
+          return asCreatedStamp(b).compareTo(asCreatedStamp(a));
+        case 'Created (Oldest)':
+          return asCreatedStamp(a).compareTo(asCreatedStamp(b));
+        case 'Role (A-Z)':
+          final roleCompare = (a['role'] ?? '')
+              .toString()
+              .toLowerCase()
+              .compareTo((b['role'] ?? '').toString().toLowerCase());
+          if (roleCompare != 0) {
+            return roleCompare;
+          }
+          return (a['username'] ?? '')
+              .toString()
+              .toLowerCase()
+              .compareTo((b['username'] ?? '').toString().toLowerCase());
+        case 'Login Count (High-Low)':
+          return loginCount(b).compareTo(loginCount(a));
+        default:
+          return (a['username'] ?? '').toString().toLowerCase().compareTo(
+              (b['username'] ?? '').toString().toLowerCase());
+      }
+    });
+
+    return filtered;
   }
 
   @override
@@ -2512,18 +2735,129 @@ class _UsersPageState extends State<UsersPage> {
                     Text(_error, style: const TextStyle(color: Colors.white)),
               ),
             ),
-          Text('Total users: ${_users.length}',
-              style: const TextStyle(fontWeight: FontWeight.bold)),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF26456E), Color(0xFF17253D)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              border: Border.all(color: const Color(0xFF496286), width: 1),
+            ),
+            child: Text(
+              'User Registry  |  Total users: ${_users.length}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+          ),
           const SizedBox(height: 8),
-          ..._users.map(
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    labelText: 'Search username / email / phone / role',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchController.text.isEmpty
+                        ? null
+                        : IconButton(
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() {});
+                            },
+                            icon: const Icon(Icons.clear),
+                          ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: _sortBy,
+            decoration: const InputDecoration(
+              labelText: 'Sort By',
+              prefixIcon: Icon(Icons.sort),
+            ),
+            items: const [
+              DropdownMenuItem(value: 'Name (A-Z)', child: Text('Name (A-Z)')),
+              DropdownMenuItem(value: 'Name (Z-A)', child: Text('Name (Z-A)')),
+              DropdownMenuItem(
+                  value: 'Created (Newest)', child: Text('Created (Newest)')),
+              DropdownMenuItem(
+                  value: 'Created (Oldest)', child: Text('Created (Oldest)')),
+              DropdownMenuItem(value: 'Role (A-Z)', child: Text('Role (A-Z)')),
+              DropdownMenuItem(
+                  value: 'Login Count (High-Low)',
+                  child: Text('Login Count (High-Low)')),
+            ],
+            onChanged: (v) {
+              if (v == null) {
+                return;
+              }
+              setState(() {
+                _sortBy = v;
+              });
+            },
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Showing ${_applySearchAndSort(_users).length} of ${_users.length} users',
+            style: const TextStyle(color: Color(0xFFAFC4E9)),
+          ),
+          const SizedBox(height: 8),
+          ..._applySearchAndSort(_users).map(
             (u) => Card(
               child: ListTile(
                 leading: const Icon(Icons.person),
                 title: Text((u['username'] ?? '-').toString()),
-                subtitle: Text(
-                  widget.showRoles
-                      ? 'Role: ${(u['role'] ?? 'user')}  |  Email: ${(u['email'] ?? '-')}'
-                      : 'Email: ${(u['email'] ?? '-')}  |  Phone: ${(u['phone'] ?? '-')}',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (widget.showRoles)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: (u['role'] ?? 'user')
+                                            .toString()
+                                            .toLowerCase() ==
+                                        'admin'
+                                    ? const Color(0xFF6B2437)
+                                    : const Color(0xFF1F3B63),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                'Role: ${(u['role'] ?? 'user')} ',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 4),
+                    Text('Email: ${(u['email'] ?? '-')}',
+                        style: const TextStyle(fontSize: 12)),
+                    Text('Phone: ${(u['phone'] ?? '-')}',
+                        style: const TextStyle(fontSize: 12)),
+                  ],
                 ),
                 trailing: Text((u['created'] ?? '').toString(),
                     style: const TextStyle(fontSize: 11)),
@@ -2716,7 +3050,11 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
     });
     try {
       final api = buildBackendApi();
-      final res = await api.searchRecognitionLocations(name: query, limit: 200);
+      final res = await api.searchRecognitionLocations(
+        name: query,
+        limit: 200,
+        latestOnly: true,
+      );
       if (!mounted) {
         return;
       }
@@ -2731,15 +3069,12 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
-      final isAdmin = api.role.toLowerCase() == 'admin';
       setState(() {
         _loading = false;
         _rows = data;
         _status = data.isEmpty
             ? 'No recognition location found for "$query"'
-            : (isAdmin
-                ? 'Found ${data.length} recognition location records (admin view)'
-                : 'Showing latest recognition location for "$query"');
+            : 'Showing latest saved location for "$query"';
       });
     } catch (e) {
       if (!mounted) {
