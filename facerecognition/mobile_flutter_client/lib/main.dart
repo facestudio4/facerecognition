@@ -19,7 +19,7 @@ const Color _kPanel = Color(0xFF11182A);
 const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
 const Duration _kNetworkTimeout = Duration(seconds: 12);
-const Duration _kAuthTimeout = Duration(seconds: 12);
+const Duration _kAuthTimeout = Duration(seconds: 24);
 
 int _parseVersionNumber(String value) {
   final match =
@@ -243,14 +243,30 @@ class BackendApi {
     String lastReason = 'backend_unreachable';
     for (final base in _candidateBases()) {
       try {
-        final res = await http
-            .post(
-              Uri.parse('$base/api/auth/login'),
-              headers: {'Content-Type': 'application/json'},
-              body: jsonEncode(
-                  {'identifier': identifier, 'password': password, 'ttl': 180}),
-            )
+        final health = await http
+            .get(Uri.parse('$base/api/health'))
             .timeout(_kAuthTimeout);
+        if (health.statusCode != 200) {
+          lastReason = 'backend_http_${health.statusCode}';
+          continue;
+        }
+
+        Future<http.Response> sendLogin() {
+          return http.post(
+            Uri.parse('$base/api/auth/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(
+                {'identifier': identifier, 'password': password, 'ttl': 180}),
+          ).timeout(_kAuthTimeout);
+        }
+
+        http.Response res;
+        try {
+          res = await sendLogin();
+        } on TimeoutException {
+          res = await sendLogin();
+        }
+
         if (res.statusCode == 401 || res.statusCode == 403) {
           return {'ok': false, 'reason': 'invalid_credentials'};
         }
@@ -826,6 +842,12 @@ class _LoginPageState extends State<LoginPage> {
           _error =
               'Invalid credentials. Please check username/email and password.';
           _info = '';
+        } else if (reason == 'timeout') {
+          _error = 'Backend is waking up. Please retry in 10-20 seconds.';
+          _info = 'Server: ${api.baseUrl}';
+        } else if (reason.startsWith('backend_http_')) {
+          _error = 'Backend returned an error (${reason.replaceFirst('backend_http_', '')}).';
+          _info = 'Server: ${api.baseUrl}';
         } else {
           _error = 'Cannot reach backend right now.';
           _info = 'Check internet, then retry. Active server: ${api.baseUrl}';
