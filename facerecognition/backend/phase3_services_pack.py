@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import re
 import traceback
+from random import randint
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -423,7 +424,7 @@ class Phase3ServiceHub:
             if exists:
                 return {"ok": False, "error": "user already exists"}
 
-        code = f"{secrets.randbelow(900000) + 100000}"
+        code = f"{randint(100000, 999999)}"
         expires_at = time.time() + 600
         email_key = email.lower()
         self._pending_signup_codes[email_key] = {
@@ -528,21 +529,70 @@ class Phase3ServiceHub:
                 return {"ok": False, "error": "user not found"}
             username = str(row["username"])
 
-        code = f"{secrets.randbelow(900000) + 100000}"
+        code = f"{randint(100000, 999999)}"
         expires_at = time.time() + 600
         self._pending_reset_codes[username.lower()] = {
             "username": username,
+            "email": str(row["email"] or "").strip(),
             "code": code,
             "expires_at": expires_at,
         }
+        rec_email = str(row["email"] or "").strip()
+        if rec_email and "@" in rec_email:
+            email_result = self._send_email(
+                to_email=rec_email,
+                subject="Face Studio Password Reset Code",
+                body=(
+                    f"Hello {username},\n\n"
+                    f"Your Face Studio password reset code is: {code}\n"
+                    "This code will expire in 10 minutes.\n\n"
+                    "If you did not request a password reset, ignore this email."
+                ),
+            )
+            if email_result.get("ok") is True:
+                self._log_activity(
+                    "Password Reset Requested",
+                    f"Reset code mailed to {rec_email}",
+                    username=username,
+                    role="user",
+                )
+                return {
+                    "ok": True,
+                    "data": {
+                        "username": username,
+                        "mail_sent": True,
+                        "expires_in_seconds": 600,
+                    },
+                }
+
+            smtp_error = str(email_result.get("error", "SMTP send failed"))
+            self._log_activity(
+                "Password Reset Fallback",
+                f"SMTP failed for {rec_email}: {smtp_error}",
+                username=username,
+                role="user",
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "username": username,
+                    "mail_sent": False,
+                    "code": code,
+                    "smtp_error": smtp_error,
+                    "expires_in_seconds": 600,
+                    "note": "SMTP failed, use this code directly",
+                },
+            }
+
         self._log_activity("Password Reset Requested", f"Reset requested for {username}", username=username, role="user")
         return {
             "ok": True,
             "data": {
                 "username": username,
+                "mail_sent": False,
                 "code": code,
                 "expires_in_seconds": 600,
-                "note": "Development mode: use this code directly in app",
+                "note": "No email configured for this user, use this code directly",
             },
         }
 

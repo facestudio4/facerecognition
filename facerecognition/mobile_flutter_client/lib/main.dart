@@ -990,10 +990,20 @@ class _LoginPageState extends State<LoginPage> {
     final data = (res['data'] as Map<String, dynamic>?) ?? {};
     final username = (data['username'] ?? '').toString();
     final code = (data['code'] ?? '').toString();
+    final mailSent = data['mail_sent'] == true;
+    final smtpError = (data['smtp_error'] ?? '').toString().trim();
     setState(() {
       _busy = false;
       _forgotUserController.text = username;
-      _info = 'Reset code: $code';
+      if (mailSent) {
+        _info = 'Reset code sent to your email.';
+      } else if (code.isNotEmpty) {
+        _info = smtpError.isNotEmpty
+            ? 'SMTP error: $smtpError. Backup reset code: $code'
+            : 'Reset code: $code';
+      } else {
+        _info = 'Reset request accepted. Check your email.';
+      }
     });
   }
 
