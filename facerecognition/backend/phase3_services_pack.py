@@ -365,7 +365,7 @@ class Phase3ServiceHub:
                 (username, email),
             ).fetchone()
             if exists:
-                return {"ok": False, "error": "user already exists"}
+                return {"ok": False, "error": "Account already exists. Please log in with your username or email."}
 
             created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
@@ -422,7 +422,7 @@ class Phase3ServiceHub:
                 (username, email),
             ).fetchone()
             if exists:
-                return {"ok": False, "error": "user already exists"}
+                return {"ok": False, "error": "Account already exists. Please log in with your username or email."}
 
         code = f"{randint(100000, 999999)}"
         expires_at = time.time() + 600
@@ -522,7 +522,7 @@ class Phase3ServiceHub:
             if not self._table_exists(conn, "users"):
                 return {"ok": False, "error": "users table is missing"}
             row = conn.execute(
-                "SELECT username FROM users WHERE lower(username)=lower(?) OR lower(email)=lower(?) LIMIT 1",
+                "SELECT username, email FROM users WHERE lower(username)=lower(?) OR lower(email)=lower(?) LIMIT 1",
                 (ident, ident),
             ).fetchone()
             if not row:
