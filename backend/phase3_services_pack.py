@@ -910,8 +910,8 @@ class Phase3ServiceHub:
         }
 
     def get_mobile_app_update_info(self):
-        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+13").strip()
-        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+12").strip()
+        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+14").strip()
+        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+13").strip()
         apk_url = os.getenv(
             "FACE_STUDIO_MOBILE_APK_URL",
             "https://github.com/facestudio4/facerecognition/releases/latest",
@@ -1236,26 +1236,34 @@ class Phase3ServiceHub:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with self._connect() as conn:
-            last = conn.execute(
+            latest_for_person = conn.execute(
                 """
-                SELECT id, event_time
+                SELECT id, event_time, location_name
                 FROM recognition_location_events
-                WHERE lower(recognized_name)=lower(?) AND lower(location_name)=lower(?)
+                WHERE lower(recognized_name)=lower(?)
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (name, location),
+                (name,),
             ).fetchone()
-            if (not force_update) and last and last["event_time"]:
+            if (
+                (not force_update)
+                and latest_for_person
+                and latest_for_person["event_time"]
+                and str(latest_for_person["location_name"] or "").strip().lower() == location.lower()
+            ):
                 try:
-                    prev_ts = datetime.strptime(last["event_time"], "%Y-%m-%d %H:%M:%S")
+                    prev_ts = datetime.strptime(
+                        latest_for_person["event_time"],
+                        "%Y-%m-%d %H:%M:%S",
+                    )
                     if (datetime.now() - prev_ts).total_seconds() < 12:
                         return {
                             "ok": True,
                             "data": {
                                 "saved": False,
                                 "reason": "deduped_recent_event",
-                                "event_id": int(last["id"]),
+                                "event_id": int(latest_for_person["id"]),
                             },
                         }
                 except Exception:
@@ -1271,28 +1279,60 @@ class Phase3ServiceHub:
                 "source": source,
                 "requested_by": requested_by,
             }
-            cur = conn.execute(
+            if latest_for_person:
+                event_id = int(latest_for_person["id"])
+                conn.execute(
+                    """
+                    UPDATE recognition_location_events
+                    SET event_time=?, recognized_name=?, location_name=?,
+                        latitude=?, longitude=?, confidence=?,
+                        source=?, requested_by=?, payload_json=?
+                    WHERE id=?
+                    """,
+                    (
+                        ts,
+                        name,
+                        location,
+                        lat,
+                        lng,
+                        conf,
+                        source,
+                        requested_by,
+                        json.dumps(payload, ensure_ascii=False),
+                        event_id,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO recognition_location_events(
+                        event_time, recognized_name, location_name,
+                        latitude, longitude, confidence,
+                        source, requested_by, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ts,
+                        name,
+                        location,
+                        lat,
+                        lng,
+                        conf,
+                        source,
+                        requested_by,
+                        json.dumps(payload, ensure_ascii=False),
+                    ),
+                )
+                event_id = int(cur.lastrowid or 0)
+
+            conn.execute(
                 """
-                INSERT INTO recognition_location_events(
-                    event_time, recognized_name, location_name,
-                    latitude, longitude, confidence,
-                    source, requested_by, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                DELETE FROM recognition_location_events
+                WHERE lower(recognized_name)=lower(?) AND id<>?
                 """,
-                (
-                    ts,
-                    name,
-                    location,
-                    lat,
-                    lng,
-                    conf,
-                    source,
-                    requested_by,
-                    json.dumps(payload, ensure_ascii=False),
-                ),
+                (name, event_id),
             )
             conn.commit()
-            event_id = int(cur.lastrowid or 0)
 
         self._log_activity(
             "Recognition Location Saved",
@@ -1328,6 +1368,26 @@ class Phase3ServiceHub:
                     """,
                     (person,),
                 ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            event_time,
+                            recognized_name,
+                            location_name,
+                            latitude,
+                            longitude,
+                            confidence,
+                            source,
+                            requested_by
+                        FROM recognition_location_events
+                        WHERE lower(recognized_name) LIKE lower(?)
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (f"%{person}%",),
+                    ).fetchall()
             else:
                 rows = conn.execute(
                     """
@@ -1348,6 +1408,26 @@ class Phase3ServiceHub:
                     """,
                     (person, limit),
                 ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            event_time,
+                            recognized_name,
+                            location_name,
+                            latitude,
+                            longitude,
+                            confidence,
+                            source,
+                            requested_by
+                        FROM recognition_location_events
+                        WHERE lower(recognized_name) LIKE lower(?)
+                        ORDER BY id DESC
+                        LIMIT ?
+                        """,
+                        (f"%{person}%", limit),
+                    ).fetchall()
         return [dict(r) for r in rows]
 
     def _decode_image_b64(self, image_b64: str):
