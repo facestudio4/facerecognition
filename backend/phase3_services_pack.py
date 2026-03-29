@@ -11,12 +11,20 @@ import base64
 import hashlib
 import hmac
 import re
+import sys
 import traceback
+from random import randint
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except Exception:
+    tk = None
+    filedialog = None
+    messagebox = None
+    ttk = None
 
 import cv2
 import numpy as np
@@ -106,7 +114,124 @@ class Phase3ServiceHub:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_time ON activity_events(event_time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_name ON recognition_location_events(recognized_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_time ON recognition_location_events(event_time)")
+            if self._table_exists(conn, "users"):
+                self._ensure_users_privacy_columns(conn)
             conn.commit()
+
+    def _column_exists(self, conn, table_name: str, column_name: str):
+        try:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        except Exception:
+            return False
+        for row in rows:
+            if str(row[1]).strip().lower() == str(column_name).strip().lower():
+                return True
+        return False
+
+    def _ensure_users_privacy_columns(self, conn):
+        if not self._column_exists(conn, "users", "privacy_mode"):
+            conn.execute("ALTER TABLE users ADD COLUMN privacy_mode TEXT DEFAULT 'public'")
+        if not self._column_exists(conn, "users", "privacy_allowed_json"):
+            conn.execute("ALTER TABLE users ADD COLUMN privacy_allowed_json TEXT DEFAULT '[]'")
+        if not self._column_exists(conn, "users", "privacy_allowed_map_json"):
+            conn.execute("ALTER TABLE users ADD COLUMN privacy_allowed_map_json TEXT DEFAULT '[]'")
+        if not self._column_exists(conn, "users", "privacy_allowed_profile_json"):
+            conn.execute("ALTER TABLE users ADD COLUMN privacy_allowed_profile_json TEXT DEFAULT '[]'")
+        conn.execute("UPDATE users SET privacy_mode='public' WHERE privacy_mode IS NULL OR trim(privacy_mode)=''")
+        conn.execute("UPDATE users SET privacy_allowed_json='[]' WHERE privacy_allowed_json IS NULL OR trim(privacy_allowed_json)=''")
+        conn.execute(
+            "UPDATE users SET privacy_allowed_map_json=privacy_allowed_json "
+            "WHERE privacy_allowed_map_json IS NULL OR trim(privacy_allowed_map_json)=''"
+        )
+        conn.execute(
+            "UPDATE users SET privacy_allowed_profile_json=privacy_allowed_json "
+            "WHERE privacy_allowed_profile_json IS NULL OR trim(privacy_allowed_profile_json)=''"
+        )
+
+    def _normalize_privacy_mode(self, value):
+        mode = str(value or "public").strip().lower()
+        return "private" if mode == "private" else "public"
+
+    def _parse_allowed_usernames(self, value):
+        raw = value
+        if isinstance(value, str):
+            try:
+                raw = json.loads(value)
+            except Exception:
+                raw = []
+        if not isinstance(raw, list):
+            raw = []
+        out = []
+        seen = set()
+        for item in raw:
+            uname = str(item or "").strip().lower()
+            if not uname or uname in seen:
+                continue
+            seen.add(uname)
+            out.append(uname)
+        return out
+
+    def _encode_allowed_usernames(self, usernames):
+        if not isinstance(usernames, list):
+            usernames = []
+        cleaned = self._parse_allowed_usernames(usernames)
+        return json.dumps(cleaned, ensure_ascii=False)
+
+    def _get_user_privacy_row(self, conn, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return None
+        if not self._table_exists(conn, "users"):
+            return None
+        row = conn.execute(
+            """
+            SELECT username, role, privacy_mode, privacy_allowed_json,
+                   privacy_allowed_map_json, privacy_allowed_profile_json
+            FROM users
+            WHERE lower(username)=lower(?)
+            LIMIT 1
+            """,
+            (uname,),
+        ).fetchone()
+        if not row:
+            return None
+        allowed_legacy = self._parse_allowed_usernames(row["privacy_allowed_json"])
+        allowed_map = self._parse_allowed_usernames(row["privacy_allowed_map_json"])
+        allowed_profile = self._parse_allowed_usernames(row["privacy_allowed_profile_json"])
+        if not allowed_map:
+            allowed_map = list(allowed_legacy)
+        if not allowed_profile:
+            allowed_profile = list(allowed_legacy)
+        return {
+            "username": str(row["username"] or "").strip(),
+            "role": str(row["role"] or "user").strip().lower(),
+            "privacy_mode": self._normalize_privacy_mode(row["privacy_mode"]),
+            "privacy_allowed": allowed_legacy,
+            "privacy_allowed_map": allowed_map,
+            "privacy_allowed_profile": allowed_profile,
+        }
+
+    def can_user_access_person(self, target_username: str, requester_username: str = "", requester_role: str = "user", access_scope: str = "profile"):
+        role = str(requester_role or "user").strip().lower()
+        requester = str(requester_username or "").strip().lower()
+        target = str(target_username or "").strip()
+        scope = str(access_scope or "profile").strip().lower()
+        if not target:
+            return False
+        if role == "admin":
+            return True
+        with self._connect() as conn:
+            target_row = self._get_user_privacy_row(conn, target)
+        if not target_row:
+            return True
+        target_name_l = str(target_row["username"]).lower()
+        if requester and requester == target_name_l:
+            return True
+        if target_row["privacy_mode"] != "private":
+            return True
+        if scope == "map":
+            return requester in set(target_row["privacy_allowed_map"])
+        return requester in set(target_row["privacy_allowed_profile"])
 
     def _get_or_create_api_key(self):
         with self._connect() as conn:
@@ -205,13 +330,16 @@ class Phase3ServiceHub:
     def _verify_password(self, password: str, hashed: str):
         if not hashed:
             return False
-        return self._hash_password(password) == str(hashed)
+        stored = str(hashed)
+        if self._hash_password(password) == stored:
+            return True
+        return password == stored
 
     def _send_email(self, to_email: str, subject: str, body: str):
-        host = os.environ.get("FACESTUDIO_SMTP_HOST", "").strip()
-        user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
-        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
+        host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
+        user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
+        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "mlyu ajgr zorl foog") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
+        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "facestudio4@gmail.com").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -301,7 +429,9 @@ class Phase3ServiceHub:
                 return None
             row = conn.execute(
                 """
-                SELECT username, email, phone, role, password, created, logins_json
+                SELECT username, email, phone, role, password, created, logins_json,
+                       privacy_mode, privacy_allowed_json,
+                       privacy_allowed_map_json, privacy_allowed_profile_json
                 FROM users
                 WHERE lower(username)=lower(?) OR lower(email)=lower(?)
                 LIMIT 1
@@ -312,6 +442,16 @@ class Phase3ServiceHub:
                 return None
             if not self._verify_password(password, row["password"]):
                 return None
+
+            if str(row["password"] or "") == password:
+                try:
+                    conn.execute(
+                        "UPDATE users SET password=? WHERE username=?",
+                        (self._hash_password(password), row["username"]),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
 
             username = row["username"]
             role = (row["role"] or "user").lower()
@@ -340,6 +480,10 @@ class Phase3ServiceHub:
             "phone": row["phone"] or "",
             "role": role,
             "created": row["created"] or "",
+            "privacy_mode": self._normalize_privacy_mode(row["privacy_mode"]),
+            "privacy_allowed": self._parse_allowed_usernames(row["privacy_allowed_json"]),
+            "privacy_allowed_map": self._parse_allowed_usernames(row["privacy_allowed_map_json"]),
+            "privacy_allowed_profile": self._parse_allowed_usernames(row["privacy_allowed_profile_json"]),
         }
 
     def register_user(self, username: str, email: str, phone: str, password: str):
@@ -364,13 +508,13 @@ class Phase3ServiceHub:
                 (username, email),
             ).fetchone()
             if exists:
-                return {"ok": False, "error": "user already exists"}
+                return {"ok": False, "error": "Account already exists. Please log in with your username or email."}
 
             created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
                 """
-                INSERT INTO users(username, password, email, phone, role, created, logins_json, verified_email, data_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users(username, password, email, phone, role, created, logins_json, verified_email, data_json, privacy_mode, privacy_allowed_json, privacy_allowed_map_json, privacy_allowed_profile_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     username,
@@ -382,6 +526,10 @@ class Phase3ServiceHub:
                     "[]",
                     1,
                     "{}",
+                    "public",
+                    "[]",
+                    "[]",
+                    "[]",
                 ),
             )
             conn.commit()
@@ -395,6 +543,10 @@ class Phase3ServiceHub:
                 "phone": phone,
                 "role": "user",
                 "created": created,
+                "privacy_mode": "public",
+                "privacy_allowed": [],
+                "privacy_allowed_map": [],
+                "privacy_allowed_profile": [],
             },
         }
 
@@ -421,9 +573,9 @@ class Phase3ServiceHub:
                 (username, email),
             ).fetchone()
             if exists:
-                return {"ok": False, "error": "user already exists"}
+                return {"ok": False, "error": "Account already exists. Please log in with your username or email."}
 
-        code = f"{secrets.randbelow(900000) + 100000}"
+        code = f"{randint(100000, 999999)}"
         expires_at = time.time() + 600
         email_key = email.lower()
         self._pending_signup_codes[email_key] = {
@@ -434,7 +586,7 @@ class Phase3ServiceHub:
             "code": code,
             "expires_at": expires_at,
         }
-
+                                                                                                                                                                                                                                                                                                            
         email_result = self._send_email(
             to_email=email,
             subject="Face Studio Email Verification Code",
@@ -521,28 +673,77 @@ class Phase3ServiceHub:
             if not self._table_exists(conn, "users"):
                 return {"ok": False, "error": "users table is missing"}
             row = conn.execute(
-                "SELECT username FROM users WHERE lower(username)=lower(?) OR lower(email)=lower(?) LIMIT 1",
+                "SELECT username, email FROM users WHERE lower(username)=lower(?) OR lower(email)=lower(?) LIMIT 1",
                 (ident, ident),
             ).fetchone()
             if not row:
                 return {"ok": False, "error": "user not found"}
             username = str(row["username"])
 
-        code = f"{secrets.randbelow(900000) + 100000}"
+        code = f"{randint(100000, 999999)}"
         expires_at = time.time() + 600
         self._pending_reset_codes[username.lower()] = {
             "username": username,
+            "email": str(row["email"] or "").strip(),
             "code": code,
             "expires_at": expires_at,
         }
+        rec_email = str(row["email"] or "").strip()
+        if rec_email and "@" in rec_email:
+            email_result = self._send_email(
+                to_email=rec_email,
+                subject="Face Studio Password Reset Code",
+                body=(
+                    f"Hello {username},\n\n"
+                    f"Your Face Studio password reset code is: {code}\n"
+                    "This code will expire in 10 minutes.\n\n"
+                    "If you did not request a password reset, ignore this email."
+                ),
+            )
+            if email_result.get("ok") is True:
+                self._log_activity(
+                    "Password Reset Requested",
+                    f"Reset code mailed to {rec_email}",
+                    username=username,
+                    role="user",
+                )
+                return {
+                    "ok": True,
+                    "data": {
+                        "username": username,
+                        "mail_sent": True,
+                        "expires_in_seconds": 600,
+                    },
+                }
+
+            smtp_error = str(email_result.get("error", "SMTP send failed"))
+            self._log_activity(
+                "Password Reset Fallback",
+                f"SMTP failed for {rec_email}: {smtp_error}",
+                username=username,
+                role="user",
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "username": username,
+                    "mail_sent": False,
+                    "code": code,
+                    "smtp_error": smtp_error,
+                    "expires_in_seconds": 600,
+                    "note": "SMTP failed, use this code directly",
+                },
+            }
+
         self._log_activity("Password Reset Requested", f"Reset requested for {username}", username=username, role="user")
         return {
             "ok": True,
             "data": {
                 "username": username,
+                "mail_sent": False,
                 "code": code,
                 "expires_in_seconds": 600,
-                "note": "Development mode: use this code directly in app",
+                "note": "No email configured for this user, use this code directly",
             },
         }
 
@@ -582,7 +783,7 @@ class Phase3ServiceHub:
             if not self._table_exists(conn, "users"):
                 return None
             row = conn.execute(
-                "SELECT username, email, phone, role, created, logins_json FROM users WHERE username=? LIMIT 1",
+                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_map_json, privacy_allowed_profile_json FROM users WHERE username=? LIMIT 1",
                 (uname,),
             ).fetchone()
             if not row:
@@ -600,7 +801,63 @@ class Phase3ServiceHub:
             "role": (row["role"] or "user").lower(),
             "created": row["created"] or "",
             "recent_logins": list(reversed(logins[-10:])),
+            "privacy_mode": self._normalize_privacy_mode(row["privacy_mode"]),
+            "privacy_allowed": self._parse_allowed_usernames(row["privacy_allowed_json"]),
+            "privacy_allowed_map": self._parse_allowed_usernames(row["privacy_allowed_map_json"]),
+            "privacy_allowed_profile": self._parse_allowed_usernames(row["privacy_allowed_profile_json"]),
         }
+
+    def update_user_privacy(self, target_username: str, privacy_mode: str, allowed_usernames, allowed_map_usernames, allowed_profile_usernames, actor_username: str, actor_role: str):
+        target = (target_username or "").strip()
+        actor = (actor_username or "").strip().lower()
+        role = (actor_role or "user").strip().lower()
+        if not target:
+            return {"ok": False, "error": "target username is required"}
+        if role != "admin" and actor != target.lower():
+            return {"ok": False, "error": "Only owner or admin can change privacy"}
+
+        mode = self._normalize_privacy_mode(privacy_mode)
+        allowed_legacy = self._parse_allowed_usernames(allowed_usernames)
+        allowed_map = self._parse_allowed_usernames(allowed_map_usernames)
+        allowed_profile = self._parse_allowed_usernames(allowed_profile_usernames)
+        if not allowed_map:
+            allowed_map = list(allowed_legacy)
+        if not allowed_profile:
+            allowed_profile = list(allowed_legacy)
+        allowed_legacy = [u for u in allowed_legacy if u != target.lower()]
+        allowed_map = [u for u in allowed_map if u != target.lower()]
+        allowed_profile = [u for u in allowed_profile if u != target.lower()]
+
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": False, "error": "users table is missing"}
+            self._ensure_users_privacy_columns(conn)
+            exists = conn.execute(
+                "SELECT username FROM users WHERE lower(username)=lower(?) LIMIT 1",
+                (target,),
+            ).fetchone()
+            if not exists:
+                return {"ok": False, "error": "User not found"}
+            conn.execute(
+                "UPDATE users SET privacy_mode=?, privacy_allowed_json=?, privacy_allowed_map_json=?, privacy_allowed_profile_json=? WHERE lower(username)=lower(?)",
+                (
+                    mode,
+                    self._encode_allowed_usernames(allowed_legacy),
+                    self._encode_allowed_usernames(allowed_map),
+                    self._encode_allowed_usernames(allowed_profile),
+                    target,
+                ),
+            )
+            conn.commit()
+
+        self._log_activity(
+            "Privacy Updated",
+            f"{target} set profile to {mode}",
+            username=target,
+            role=role,
+        )
+        profile = self.get_user_profile(target)
+        return {"ok": True, "data": profile}
 
     def get_api_docs(self):
         base = f"http://{self.host}:{self.port}"
@@ -626,6 +883,7 @@ class Phase3ServiceHub:
             ],
             "secure_endpoints": [
                 {"path": "/api/stats", "method": "GET"},
+                {"path": "/api/system-info", "method": "GET"},
                 {"path": "/api/users?limit=200", "method": "GET"},
                 {"path": "/api/activity?limit=200", "method": "GET"},
                 {"path": "/api/db/overview", "method": "GET"},
@@ -652,8 +910,8 @@ class Phase3ServiceHub:
         }
 
     def get_mobile_app_update_info(self):
-        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+2").strip()
-        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+1").strip()
+        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+11").strip()
+        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+10").strip()
         apk_url = os.getenv(
             "FACE_STUDIO_MOBILE_APK_URL",
             "https://github.com/facestudio4/facerecognition/releases/latest",
@@ -728,6 +986,140 @@ class Phase3ServiceHub:
                     count = -1
                 overview["tables"].append({"name": tname, "rows": count})
         return overview
+
+    def get_system_info_summary(self, role: str = "user"):
+        current_role = (role or "user").strip().lower()
+        is_admin = current_role == "admin"
+
+        model_roots = [
+            os.path.join(self.base_dir, "config", "models"),
+            os.path.join(os.path.dirname(self.base_dir), "config", "models"),
+        ]
+
+        def _model_path(filename: str):
+            for root in model_roots:
+                path = os.path.join(root, filename)
+                if os.path.exists(path):
+                    return path
+            return os.path.join(model_roots[0], filename)
+
+        yunet_path = _model_path("face_detection_yunet_2023mar.onnx")
+        sface_path = _model_path("face_recognition_sface_2021dec.onnx")
+
+        yunet_kb = (os.path.getsize(yunet_path) / 1024.0) if os.path.exists(yunet_path) else 0.0
+        sface_mb = (os.path.getsize(sface_path) / (1024.0 * 1024.0)) if os.path.exists(sface_path) else 0.0
+
+        faces_root_candidates = [
+            os.path.join(self.base_dir, "database", "faces"),
+            os.path.join(os.path.dirname(self.base_dir), "database", "faces"),
+        ]
+        faces_root = ""
+        for cand in faces_root_candidates:
+            if os.path.isdir(cand):
+                faces_root = cand
+                break
+        if not faces_root:
+            faces_root = faces_root_candidates[0]
+
+        ignored = {"known_faces", "archive", "__pycache__"}
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        people_dirs = []
+        total_images = 0
+        if os.path.isdir(faces_root):
+            for name in os.listdir(faces_root):
+                path = os.path.join(faces_root, name)
+                if not os.path.isdir(path):
+                    continue
+                if name.lower() in ignored:
+                    continue
+                people_dirs.append(name)
+                try:
+                    total_images += len(
+                        [f for f in os.listdir(path) if os.path.splitext(f)[1].lower() in image_exts]
+                    )
+                except Exception:
+                    continue
+
+        threshold = 0.363
+        frame_scale = 0.5
+        stability_window = 5
+        enc_cache_kb = 0.0
+        try:
+            from frontend import facercognition as legacy
+
+            threshold = float(getattr(legacy, "RECOGNITION_THRESHOLD", threshold))
+            frame_scale = float(getattr(legacy, "FRAME_SCALE", frame_scale))
+            stability_window = int(getattr(legacy, "STABILITY_WINDOW", stability_window))
+            enc_path = str(getattr(legacy, "ENCODINGS_PATH", "")).strip()
+            if enc_path and os.path.exists(enc_path):
+                enc_cache_kb = os.path.getsize(enc_path) / 1024.0
+        except Exception:
+            pass
+
+        users_count = 0
+        attendance_count = 0
+        face_log_count = 0
+        activity_count = 0
+        with self._connect() as conn:
+            if self._table_exists(conn, "users"):
+                users_count = int(conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"])
+            if self._table_exists(conn, "attendance_entries"):
+                attendance_count = int(conn.execute("SELECT COUNT(*) c FROM attendance_entries").fetchone()["c"])
+            if self._table_exists(conn, "face_events"):
+                face_log_count = int(conn.execute("SELECT COUNT(*) c FROM face_events").fetchone()["c"])
+            if self._table_exists(conn, "activity_events"):
+                activity_count = int(conn.execute("SELECT COUNT(*) c FROM activity_events").fetchone()["c"])
+
+        total_size_mb = 0.0
+        if is_admin:
+            for root, _, files in os.walk(self.base_dir):
+                for filename in files:
+                    fp = os.path.join(root, filename)
+                    try:
+                        total_size_mb += os.path.getsize(fp)
+                    except OSError:
+                        continue
+            total_size_mb = total_size_mb / (1024.0 * 1024.0)
+
+        rows = [
+            {"label": "Python Version", "value": sys.version.split()[0]},
+            {"label": "OpenCV Version", "value": cv2.__version__},
+            {"label": "NumPy Version", "value": np.__version__},
+            {"label": "Platform", "value": sys.platform},
+            {"label": "YuNet Model", "value": f"{yunet_kb:.0f} KB"},
+            {"label": "SFace Model", "value": f"{sface_mb:.1f} MB"},
+        ]
+
+        if is_admin:
+            rows.extend(
+                [
+                    {"label": "Registered People", "value": len(people_dirs)},
+                    {"label": "Total Face Images", "value": total_images},
+                    {"label": "Encodings Cache", "value": f"{enc_cache_kb:.0f} KB"},
+                    {"label": "Face Log Entries", "value": face_log_count},
+                    {"label": "Activity Log Entries", "value": activity_count},
+                    {"label": "User Accounts", "value": users_count},
+                    {"label": "Attendance Sessions", "value": attendance_count},
+                    {"label": "Recognition Threshold", "value": threshold},
+                    {"label": "Frame Scale", "value": frame_scale},
+                    {"label": "Stability Window", "value": stability_window},
+                    {"label": "Total Project Size", "value": f"{total_size_mb:.1f} MB"},
+                ]
+            )
+        else:
+            rows.extend(
+                [
+                    {"label": "Mode", "value": "User (restricted view)"},
+                    {"label": "Recognition Threshold", "value": threshold},
+                    {"label": "Frame Scale", "value": frame_scale},
+                    {"label": "Stability Window", "value": stability_window},
+                ]
+            )
+
+        return {
+            "role": current_role,
+            "rows": rows,
+        }
 
     def admin_advanced_lab_summary(self):
         stats = self.get_stats()
@@ -1159,9 +1551,10 @@ class Phase3ServiceHub:
             }
 
         enc_arr = np.array(encs)
+        threshold_default = float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.38))
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            "0.48",
+            str(threshold_default),
         )
         try:
             threshold = float(threshold_raw)
@@ -1169,7 +1562,7 @@ class Phase3ServiceHub:
             threshold = 0.48
         threshold = max(0.25, min(0.85, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.06")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.03")
         try:
             margin = float(margin_raw)
         except Exception:
@@ -1232,6 +1625,8 @@ class Phase3ServiceHub:
             "detected": True,
             "threshold": threshold,
             "margin": margin,
+            "known_people": len(known or {}),
+            "known_vectors": len(encs),
             "face_count": len(all_faces),
             "faces": all_faces,
             "image_width": int(frame.shape[1]),
@@ -1340,19 +1735,51 @@ class Phase3ServiceHub:
         row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
         return bool(row)
 
-    def list_users(self, limit: int = 200):
+    def list_users(self, limit: int = 200, requester_username: str = "", requester_role: str = "admin"):
         if limit < 1:
             limit = 1
         if limit > 2000:
             limit = 2000
+        requester = (requester_username or "").strip().lower()
+        role = (requester_role or "user").strip().lower()
         with self._connect() as conn:
             if not self._table_exists(conn, "users"):
                 return []
+            self._ensure_users_privacy_columns(conn)
             rows = conn.execute(
-                "SELECT username, email, phone, role, created FROM users ORDER BY username LIMIT ?",
+                "SELECT username, email, phone, role, created, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json FROM users ORDER BY username LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for row in rows:
+            username = str(row["username"] or "")
+            uname_l = username.lower()
+            privacy_mode = self._normalize_privacy_mode(row["privacy_mode"])
+            allowed = self._parse_allowed_usernames(row["privacy_allowed_profile_json"])
+            if not allowed:
+                allowed = self._parse_allowed_usernames(row["privacy_allowed_json"])
+
+            if role != "admin" and requester != uname_l and privacy_mode == "private" and requester not in set(allowed):
+                continue
+
+            email = row["email"] or ""
+            phone = row["phone"] or ""
+            if role != "admin" and requester != uname_l:
+                email = ""
+                phone = ""
+
+            out.append(
+                {
+                    "username": username,
+                    "email": email,
+                    "phone": phone,
+                    "role": row["role"] or "user",
+                    "created": row["created"] or "",
+                    "privacy_mode": privacy_mode,
+                    "private_profile_allowed": requester in set(allowed) if privacy_mode == "private" else True,
+                }
+            )
+        return out
 
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
@@ -1589,7 +2016,20 @@ class Phase3ServiceHub:
 
                 if path == "/api/users":
                     limit = int(query.get("limit", ["200"])[0])
-                    self._send_json(200, {"ok": True, "data": hub.list_users(limit=limit)})
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    requester = str(payload.get("sub", "")).strip()
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "data": hub.list_users(
+                                limit=limit,
+                                requester_username=requester,
+                                requester_role=role,
+                            ),
+                        },
+                    )
                     return
 
                 if path == "/api/users/me":
@@ -1611,6 +2051,12 @@ class Phase3ServiceHub:
 
                 if path == "/api/db/overview":
                     self._send_json(200, {"ok": True, "data": hub.get_db_overview()})
+                    return
+
+                if path == "/api/system-info":
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    self._send_json(200, {"ok": True, "data": hub.get_system_info_summary(role=role)})
                     return
 
                 if path == "/api/admin/advanced-lab":
@@ -1651,6 +2097,15 @@ class Phase3ServiceHub:
                     )
                     payload = self._token_payload() or {}
                     role = str(payload.get("role", "user")).strip().lower()
+                    requester = str(payload.get("sub", "")).strip()
+                    if not hub.can_user_access_person(
+                        target_username=name,
+                        requester_username=requester,
+                        requester_role=role,
+                        access_scope="map",
+                    ):
+                        self._send_json(403, {"ok": False, "error": "Private account is not accessible"})
+                        return
                     latest_only = requested_latest or role != "admin"
                     rows = hub.search_recognition_locations(
                         name=name,
@@ -1849,6 +2304,27 @@ class Phase3ServiceHub:
                         self._send_json(code, result)
                         return
 
+                    if path == "/api/users/me/privacy":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        mode = str(payload.get("privacy_mode", "public")).strip()
+                        allowed = payload.get("privacy_allowed", [])
+                        allowed_map = payload.get("privacy_allowed_map", [])
+                        allowed_profile = payload.get("privacy_allowed_profile", [])
+                        result = hub.update_user_privacy(
+                            target_username=actor,
+                            privacy_mode=mode,
+                            allowed_usernames=allowed,
+                            allowed_map_usernames=allowed_map,
+                            allowed_profile_usernames=allowed_profile,
+                            actor_username=actor,
+                            actor_role=role,
+                        )
+                        code = 200 if result.get("ok") is True else 400
+                        self._send_json(code, result)
+                        return
+
                     if path == "/api/admin/evaluator-bundle/export":
                         out_dir = hub.export_demo_kit()
                         self._send_json(200, {"ok": True, "data": {"out_dir": out_dir}})
@@ -1933,6 +2409,9 @@ class Phase3ServiceHub:
 
 
 def launch_phase3_services_gui(base_dir: str, db_path: str, parent=None, on_close_callback=None):
+    if tk is None or ttk is None or filedialog is None or messagebox is None:
+        raise RuntimeError("Tkinter GUI is unavailable in this environment. Use API mode for server deployments.")
+
     hub = Phase3ServiceHub(base_dir, db_path)
 
     if parent is None:
