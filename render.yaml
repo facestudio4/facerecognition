@@ -25,9 +25,9 @@ services:
       - key: SQLITE_PATH
         value: /var/data/facestudio.db
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+11
+        value: 0.1.0+12
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
-        value: 0.1.0+10
+        value: 0.1.0+11
       - key: FACE_STUDIO_MOBILE_APK_URL
         sync: false
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
