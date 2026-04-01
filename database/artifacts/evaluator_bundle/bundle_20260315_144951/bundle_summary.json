@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-03-15 14:49:51",
+  "base_dir": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition",
+  "db_path": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\facestudio.db",
+  "api_base": "http://127.0.0.1:8787",
+  "stats": {
+    "users": 4,
+    "face_events": 15766,
+    "activity_events": 161,
+    "attendance_entries": 1200,
+    "pending_approvals": 0,
+    "db_size_mb": 5.7578,
+    "api_host": "127.0.0.1",
+    "api_port": 8787,
+    "backup_scheduler_running": false,
+    "last_backup_at": null
+  },
+  "anomalies": [
+    "Invalid similarity scores: 59"
+  ],
+  "artifacts": {
+    "csv_exports": {
+      "users": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\csv_exports\\users_export.csv",
+      "face_events": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\csv_exports\\face_events_export.csv",
+      "activity_events": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\csv_exports\\activity_events_export.csv",
+      "attendance": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\csv_exports\\attendance_export.csv"
+    },
+    "project_report": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\reports\\project_report.html",
+    "enterprise_evidence_zip": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\evidence\\enterprise_evidence.zip",
+    "viva_report": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\api\\viva_run_20260315_144951.json",
+    "api_docs": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\database\\artifacts\\evaluator_bundle\\bundle_20260315_144951\\api\\api_docs.json"
+  }
+}

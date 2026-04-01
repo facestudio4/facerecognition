@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: face-studio-api
+    env: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r config/requirements.txt
+    startCommand: python scripts/app_runner.py api --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    disk:
+      name: face-studio-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: APP_ENV
+        value: production
+      - key: APP_NAME
+        value: FaceRecognitionStudio
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: "8787"
+      - key: SQLITE_PATH
+        value: /var/data/facestudio.db
+      - key: FACE_STUDIO_MOBILE_LATEST_VERSION
+        value: 0.1.0+16
+      - key: FACE_STUDIO_MOBILE_MIN_VERSION
+        value: 0.1.0+15
+      - key: FACE_STUDIO_MOBILE_APK_URL
+        sync: false
+      - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
+        value: A new version is available with performance and stability improvements.
+      - key: FACE_STUDIO_MOBILE_FORCE_UPDATE
+        value: "false"
+      - key: MOBILE_RECOGNITION_THRESHOLD
+        value: "0.48"
+      - key: MOBILE_RECOGNITION_MARGIN
+        value: "0.03"
+      - key: FACESTUDIO_SIGNUP_ALLOW_SMTP_FALLBACK
+        value: "1"
+      - key: FACESTUDIO_SMTP_HOST
+        sync: false
+      - key: FACESTUDIO_SMTP_USER
+        sync: false
+      - key: FACESTUDIO_SMTP_APP_PASSWORD
+        sync: false
+      - key: FACESTUDIO_SMTP_FROM
+        sync: false
+      - key: FACESTUDIO_SMTP_PORT
+        value: "587"
+      - key: FACESTUDIO_SMTP_TLS
+        value: "1"
+      - key: FACESTUDIO_SMTP_SSL
+        value: "0"
+      - key: FACESTUDIO_SMTP_TIMEOUT
+        value: "10"
+      - key: FACESTUDIO_SMTP_TOTAL_TIMEOUT
+        value: "9"

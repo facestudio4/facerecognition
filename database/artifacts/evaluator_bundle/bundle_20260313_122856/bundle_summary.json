@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-03-13 12:28:57",
+  "base_dir": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition",
+  "db_path": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\facestudio.db",
+  "api_base": "http://127.0.0.1:8787",
+  "stats": {
+    "users": 123,
+    "face_events": 15725,
+    "activity_events": 9037,
+    "attendance_entries": 1200,
+    "pending_approvals": 0,
+    "db_size_mb": 5.75,
+    "api_host": "127.0.0.1",
+    "api_port": 8787,
+    "backup_scheduler_running": false,
+    "last_backup_at": null
+  },
+  "anomalies": [
+    "Invalid similarity scores: 59"
+  ],
+  "artifacts": {
+    "csv_exports": {
+      "users": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\csv_exports\\users_export.csv",
+      "face_events": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\csv_exports\\face_events_export.csv",
+      "activity_events": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\csv_exports\\activity_events_export.csv",
+      "attendance": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\csv_exports\\attendance_export.csv"
+    },
+    "project_report": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\reports\\project_report.html",
+    "enterprise_evidence_zip": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\evidence\\enterprise_evidence.zip",
+    "viva_report": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\api\\viva_run_20260313_122857.json",
+    "api_docs": "C:\\Users\\shishir\\OneDrive\\Documents\\Python\\facerecognition\\evaluator_bundle\\bundle_20260313_122856\\api\\api_docs.json"
+  }
+}

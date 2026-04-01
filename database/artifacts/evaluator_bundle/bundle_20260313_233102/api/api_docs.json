@@ -1,0 +1,42 @@
+{
+  "name": "Face Studio API",
+  "base_url": "http://127.0.0.1:8787",
+  "auth": {
+    "api_key_header": "X-API-Key",
+    "bearer_header": "Authorization: Bearer <token>",
+    "token_issue": "http://127.0.0.1:8787/api/auth/token?subject=demo&ttl=120"
+  },
+  "public_endpoints": [
+    {
+      "path": "/api/health",
+      "method": "GET"
+    },
+    {
+      "path": "/api/docs",
+      "method": "GET"
+    }
+  ],
+  "secure_endpoints": [
+    {
+      "path": "/api/stats",
+      "method": "GET"
+    },
+    {
+      "path": "/api/users?limit=200",
+      "method": "GET"
+    },
+    {
+      "path": "/api/activity?limit=200",
+      "method": "GET"
+    },
+    {
+      "path": "/api/events/stream",
+      "method": "GET"
+    },
+    {
+      "path": "/api/auth/token?subject=demo&ttl=120",
+      "method": "GET",
+      "requires": "X-API-Key"
+    }
+  ]
+}

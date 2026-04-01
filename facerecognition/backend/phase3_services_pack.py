@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import re
+import sys
 import traceback
 from random import randint
 from email.message import EmailMessage
@@ -206,13 +207,19 @@ class Phase3ServiceHub:
     def _verify_password(self, password: str, hashed: str):
         if not hashed:
             return False
-        return self._hash_password(password) == str(hashed)
+        stored = str(hashed)
+        if self._hash_password(password) == stored:
+            return True
+        return password == stored
 
     def _send_email(self, to_email: str, subject: str, body: str):
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
-        user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
-        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "zxwv lzbu rjii dqon") or os.environ.get("FACESTUDIO_SMTP_PASS", "zxwv lzbu rjii dqon")).strip()
-        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "facestudio4@gmail.com").strip() or user
+        user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
+        password = (
+            os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "")
+            or os.environ.get("FACESTUDIO_SMTP_PASS", "")
+        ).strip()
+        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -239,6 +246,9 @@ class Phase3ServiceHub:
 
         if "gmail.com" in host.lower() and " " in password:
             password = password.replace(" ", "")
+        if "gmail.com" in host.lower() and from_email.lower() != user.lower():
+            # Gmail SMTP usually requires sender to match authenticated account.
+            from_email = user
 
         if port == 465 and not use_ssl:
             use_ssl = True
@@ -313,6 +323,16 @@ class Phase3ServiceHub:
                 return None
             if not self._verify_password(password, row["password"]):
                 return None
+
+            if str(row["password"] or "") == password:
+                try:
+                    conn.execute(
+                        "UPDATE users SET password=? WHERE username=?",
+                        (self._hash_password(password), row["username"]),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
 
             username = row["username"]
             role = (row["role"] or "user").lower()
@@ -676,6 +696,7 @@ class Phase3ServiceHub:
             ],
             "secure_endpoints": [
                 {"path": "/api/stats", "method": "GET"},
+                {"path": "/api/system-info", "method": "GET"},
                 {"path": "/api/users?limit=200", "method": "GET"},
                 {"path": "/api/activity?limit=200", "method": "GET"},
                 {"path": "/api/db/overview", "method": "GET"},
@@ -778,6 +799,140 @@ class Phase3ServiceHub:
                     count = -1
                 overview["tables"].append({"name": tname, "rows": count})
         return overview
+
+    def get_system_info_summary(self, role: str = "user"):
+        current_role = (role or "user").strip().lower()
+        is_admin = current_role == "admin"
+
+        model_roots = [
+            os.path.join(self.base_dir, "config", "models"),
+            os.path.join(os.path.dirname(self.base_dir), "config", "models"),
+        ]
+
+        def _model_path(filename: str):
+            for root in model_roots:
+                path = os.path.join(root, filename)
+                if os.path.exists(path):
+                    return path
+            return os.path.join(model_roots[0], filename)
+
+        yunet_path = _model_path("face_detection_yunet_2023mar.onnx")
+        sface_path = _model_path("face_recognition_sface_2021dec.onnx")
+
+        yunet_kb = (os.path.getsize(yunet_path) / 1024.0) if os.path.exists(yunet_path) else 0.0
+        sface_mb = (os.path.getsize(sface_path) / (1024.0 * 1024.0)) if os.path.exists(sface_path) else 0.0
+
+        faces_root_candidates = [
+            os.path.join(self.base_dir, "database", "faces"),
+            os.path.join(os.path.dirname(self.base_dir), "database", "faces"),
+        ]
+        faces_root = ""
+        for cand in faces_root_candidates:
+            if os.path.isdir(cand):
+                faces_root = cand
+                break
+        if not faces_root:
+            faces_root = faces_root_candidates[0]
+
+        ignored = {"known_faces", "archive", "__pycache__"}
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        people_dirs = []
+        total_images = 0
+        if os.path.isdir(faces_root):
+            for name in os.listdir(faces_root):
+                path = os.path.join(faces_root, name)
+                if not os.path.isdir(path):
+                    continue
+                if name.lower() in ignored:
+                    continue
+                people_dirs.append(name)
+                try:
+                    total_images += len(
+                        [f for f in os.listdir(path) if os.path.splitext(f)[1].lower() in image_exts]
+                    )
+                except Exception:
+                    continue
+
+        threshold = 0.363
+        frame_scale = 0.5
+        stability_window = 5
+        enc_cache_kb = 0.0
+        try:
+            from frontend import facercognition as legacy
+
+            threshold = float(getattr(legacy, "RECOGNITION_THRESHOLD", threshold))
+            frame_scale = float(getattr(legacy, "FRAME_SCALE", frame_scale))
+            stability_window = int(getattr(legacy, "STABILITY_WINDOW", stability_window))
+            enc_path = str(getattr(legacy, "ENCODINGS_PATH", "")).strip()
+            if enc_path and os.path.exists(enc_path):
+                enc_cache_kb = os.path.getsize(enc_path) / 1024.0
+        except Exception:
+            pass
+
+        users_count = 0
+        attendance_count = 0
+        face_log_count = 0
+        activity_count = 0
+        with self._connect() as conn:
+            if self._table_exists(conn, "users"):
+                users_count = int(conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"])
+            if self._table_exists(conn, "attendance_entries"):
+                attendance_count = int(conn.execute("SELECT COUNT(*) c FROM attendance_entries").fetchone()["c"])
+            if self._table_exists(conn, "face_events"):
+                face_log_count = int(conn.execute("SELECT COUNT(*) c FROM face_events").fetchone()["c"])
+            if self._table_exists(conn, "activity_events"):
+                activity_count = int(conn.execute("SELECT COUNT(*) c FROM activity_events").fetchone()["c"])
+
+        total_size_mb = 0.0
+        if is_admin:
+            for root, _, files in os.walk(self.base_dir):
+                for filename in files:
+                    fp = os.path.join(root, filename)
+                    try:
+                        total_size_mb += os.path.getsize(fp)
+                    except OSError:
+                        continue
+            total_size_mb = total_size_mb / (1024.0 * 1024.0)
+
+        rows = [
+            {"label": "Python Version", "value": sys.version.split()[0]},
+            {"label": "OpenCV Version", "value": cv2.__version__},
+            {"label": "NumPy Version", "value": np.__version__},
+            {"label": "Platform", "value": sys.platform},
+            {"label": "YuNet Model", "value": f"{yunet_kb:.0f} KB"},
+            {"label": "SFace Model", "value": f"{sface_mb:.1f} MB"},
+        ]
+
+        if is_admin:
+            rows.extend(
+                [
+                    {"label": "Registered People", "value": len(people_dirs)},
+                    {"label": "Total Face Images", "value": total_images},
+                    {"label": "Encodings Cache", "value": f"{enc_cache_kb:.0f} KB"},
+                    {"label": "Face Log Entries", "value": face_log_count},
+                    {"label": "Activity Log Entries", "value": activity_count},
+                    {"label": "User Accounts", "value": users_count},
+                    {"label": "Attendance Sessions", "value": attendance_count},
+                    {"label": "Recognition Threshold", "value": threshold},
+                    {"label": "Frame Scale", "value": frame_scale},
+                    {"label": "Stability Window", "value": stability_window},
+                    {"label": "Total Project Size", "value": f"{total_size_mb:.1f} MB"},
+                ]
+            )
+        else:
+            rows.extend(
+                [
+                    {"label": "Mode", "value": "User (restricted view)"},
+                    {"label": "Recognition Threshold", "value": threshold},
+                    {"label": "Frame Scale", "value": frame_scale},
+                    {"label": "Stability Window", "value": stability_window},
+                ]
+            )
+
+        return {
+            "role": current_role,
+            "rows": rows,
+        }
 
     def admin_advanced_lab_summary(self):
         stats = self.get_stats()
@@ -892,28 +1047,48 @@ class Phase3ServiceHub:
         lng = _as_float(longitude)
         conf = _as_float(confidence)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        has_valid_coords = (
+            lat is not None
+            and lng is not None
+            and -90.0 <= lat <= 90.0
+            and -180.0 <= lng <= 180.0
+        )
 
         with self._connect() as conn:
-            last = conn.execute(
+            latest_for_person = conn.execute(
                 """
-                SELECT id, event_time
+                SELECT id, event_time, latitude, longitude
                 FROM recognition_location_events
-                WHERE lower(recognized_name)=lower(?) AND lower(location_name)=lower(?)
+                WHERE lower(recognized_name)=lower(?)
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (name, location),
+                (name,),
             ).fetchone()
-            if (not force_update) and last and last["event_time"]:
+            latest_has_valid_coords = bool(
+                latest_for_person
+                and latest_for_person["latitude"] is not None
+                and latest_for_person["longitude"] is not None
+            )
+            if (not has_valid_coords) and latest_has_valid_coords:
+                return {
+                    "ok": True,
+                    "data": {
+                        "saved": False,
+                        "reason": "kept_last_known_location",
+                        "event_id": int(latest_for_person["id"]),
+                    },
+                }
+            if (not force_update) and latest_for_person and latest_for_person["event_time"]:
                 try:
-                    prev_ts = datetime.strptime(last["event_time"], "%Y-%m-%d %H:%M:%S")
+                    prev_ts = datetime.strptime(latest_for_person["event_time"], "%Y-%m-%d %H:%M:%S")
                     if (datetime.now() - prev_ts).total_seconds() < 12:
                         return {
                             "ok": True,
                             "data": {
                                 "saved": False,
                                 "reason": "deduped_recent_event",
-                                "event_id": int(last["id"]),
+                                "event_id": int(latest_for_person["id"]),
                             },
                         }
                 except Exception:
@@ -1249,21 +1424,22 @@ class Phase3ServiceHub:
             }
 
         enc_arr = np.array(encs)
+        threshold_default = float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.38))
         threshold_raw = os.getenv(
             "MOBILE_RECOGNITION_THRESHOLD",
-            "0.44",
+            str(threshold_default),
         )
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.44
+            threshold = threshold_default
         threshold = max(0.25, min(0.85, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.04")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.03")
         try:
             margin = float(margin_raw)
         except Exception:
-            margin = 0.04
+            margin = 0.03
         margin = max(0.0, min(0.25, margin))
         top_k = max(1, min(int(top_k), 10))
 
@@ -1321,6 +1497,8 @@ class Phase3ServiceHub:
             "detected": True,
             "threshold": threshold,
             "margin": margin,
+            "known_people": len(known or {}),
+            "known_vectors": len(encs),
             "face_count": len(all_faces),
             "faces": all_faces,
             "image_width": int(frame.shape[1]),
@@ -1700,6 +1878,12 @@ class Phase3ServiceHub:
 
                 if path == "/api/db/overview":
                     self._send_json(200, {"ok": True, "data": hub.get_db_overview()})
+                    return
+
+                if path == "/api/system-info":
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    self._send_json(200, {"ok": True, "data": hub.get_system_info_summary(role=role)})
                     return
 
                 if path == "/api/admin/advanced-lab":

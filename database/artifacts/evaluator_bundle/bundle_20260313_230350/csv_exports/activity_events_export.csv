@@ -1,0 +1,137 @@
+id,event_time,username,role,action,detail
+7085,2026-02-05 19:53:20,shishir,admin,Compare Faces,From desktop client
+7160,2026-01-27 22:18:47,shishir,admin,Generate Face,Batch execution
+7190,2025-12-09 07:48:20,shishir,admin,Login,From analytics panel
+7203,2026-02-19 17:44:41,shishir1,user,Password Changed,Batch execution
+7253,2026-01-06 18:34:50,shishir1,user,Settings Changed,User initiated
+7284,2026-01-05 03:05:44,Aadhya294,user,Password Changed,From desktop client
+7317,2025-12-03 10:53:30,shishir,admin,Logout,Manual trigger
+7352,2026-02-17 22:20:41,shishir1,user,Settings Changed,Manual trigger
+7399,2025-11-20 10:18:16,shishir,admin,Attendance Marked,Manual trigger
+7433,2026-02-01 05:25:32,SG SHISHIR,user,Settings Changed,User initiated
+7480,2026-01-24 11:06:35,Aadhya294,user,Login,Automated schedule
+7567,2026-01-04 16:29:34,SG SHISHIR,user,Settings Changed,From analytics panel
+7595,2025-12-18 05:51:43,shishir1,user,Model Retrain,Manual trigger
+7617,2026-01-26 15:40:10,Aadhya294,user,Attendance Marked,Batch execution
+7626,2026-02-11 20:53:51,Aadhya294,user,Generate Face,User initiated
+7629,2025-12-28 13:48:50,Aadhya294,user,Export CSV,Automated schedule
+7638,2026-02-17 09:32:51,Aadhya294,user,Logout,From analytics panel
+7669,2026-01-27 09:12:31,SG SHISHIR,user,Export CSV,From analytics panel
+7671,2026-02-10 20:30:39,SG SHISHIR,user,Logout,Batch execution
+7675,2026-02-16 10:41:57,shishir1,user,Password Changed,From desktop client
+7678,2025-11-16 06:08:29,shishir,admin,Settings Changed,Automated schedule
+7696,2026-03-08 14:26:28,Aadhya294,user,Password Changed,Batch execution
+7741,2026-01-17 02:11:27,shishir,admin,Attendance Marked,From analytics panel
+7758,2026-03-11 17:03:01,SG SHISHIR,user,Model Retrain,Automated schedule
+7852,2025-12-12 20:59:08,SG SHISHIR,user,Logout,From analytics panel
+7853,2026-01-08 19:42:33,shishir,admin,Settings Changed,Manual trigger
+7877,2025-12-21 23:52:23,SG SHISHIR,user,Generate Face,User initiated
+7891,2025-11-29 20:37:11,shishir,admin,Compare Faces,User initiated
+7913,2025-11-25 15:55:12,shishir1,user,Generate Face,From desktop client
+7936,2025-12-10 18:39:12,SG SHISHIR,user,Export CSV,Batch execution
+7948,2026-01-09 17:36:52,shishir,admin,Logout,Automated schedule
+7967,2026-02-16 10:02:57,Aadhya294,user,Model Retrain,Automated schedule
+7982,2026-03-10 13:35:33,shishir1,user,Model Retrain,Batch execution
+8055,2025-12-22 11:43:41,Aadhya294,user,Generate Face,Batch execution
+8176,2026-02-10 23:11:23,Aadhya294,user,Model Retrain,Batch execution
+8201,2026-02-17 05:51:57,SG SHISHIR,user,Compare Faces,Batch execution
+8216,2026-02-16 02:59:01,Aadhya294,user,Settings Changed,Batch execution
+8245,2025-12-18 09:42:20,Aadhya294,user,Export CSV,Batch execution
+8276,2026-03-10 16:44:12,shishir1,user,Compare Faces,From analytics panel
+8290,2026-01-01 22:24:46,SG SHISHIR,user,Logout,Batch execution
+8292,2025-11-25 12:31:22,Aadhya294,user,Model Retrain,From desktop client
+8297,2026-03-03 21:56:11,shishir,admin,Settings Changed,From desktop client
+8322,2026-01-05 16:39:17,shishir1,user,Export CSV,From desktop client
+8323,2025-12-19 23:51:55,shishir,admin,Settings Changed,Manual trigger
+8440,2025-11-28 12:25:12,Aadhya294,user,Attendance Marked,Manual trigger
+8443,2026-02-06 12:16:00,Aadhya294,user,Attendance Marked,From desktop client
+8446,2026-01-21 13:07:42,shishir1,user,Model Retrain,Batch execution
+8447,2025-11-22 12:37:20,shishir,admin,Model Retrain,Automated schedule
+8467,2026-01-21 09:38:27,SG SHISHIR,user,Generate Face,From analytics panel
+8504,2026-01-06 23:06:26,shishir,admin,Login,Manual trigger
+8534,2025-12-03 21:58:06,shishir,admin,Password Changed,Automated schedule
+8566,2025-11-16 20:01:08,Aadhya294,user,Compare Faces,Batch execution
+8617,2025-12-12 01:02:23,SG SHISHIR,user,Settings Changed,Batch execution
+8727,2026-02-23 00:39:33,shishir,admin,Export CSV,From desktop client
+8734,2025-11-21 15:00:31,SG SHISHIR,user,Password Changed,From desktop client
+8776,2025-11-30 11:03:40,Aadhya294,user,Login,From desktop client
+8786,2025-12-26 10:04:21,shishir1,user,Logout,User initiated
+8792,2026-02-24 08:03:54,Aadhya294,user,Export CSV,From analytics panel
+8795,2026-01-06 12:58:16,Aadhya294,user,Attendance Marked,From analytics panel
+8816,2026-01-05 05:44:47,Aadhya294,user,Password Changed,From desktop client
+8817,2026-03-06 08:42:11,SG SHISHIR,user,Attendance Marked,Automated schedule
+8847,2026-01-12 11:55:40,SG SHISHIR,user,Login,User initiated
+8861,2026-02-17 14:15:16,Aadhya294,user,Generate Face,Batch execution
+8876,2026-03-05 05:50:10,SG SHISHIR,user,Export CSV,User initiated
+8893,2026-02-04 11:33:51,SG SHISHIR,user,Settings Changed,From analytics panel
+8917,2026-01-07 02:55:18,shishir1,user,Model Retrain,From analytics panel
+8920,2025-12-28 06:44:08,SG SHISHIR,user,Logout,User initiated
+8938,2025-12-13 10:58:49,SG SHISHIR,user,Export CSV,From desktop client
+8959,2026-02-01 19:03:45,shishir,admin,Attendance Marked,Batch execution
+8978,2025-12-06 05:42:20,shishir,admin,Export CSV,User initiated
+9012,2026-03-13 11:44:10,system,service,API Started,http://127.0.0.1:8787
+9013,2026-03-13 11:44:21,system,service,API Stopped,Server stopped
+9014,2026-03-13 11:44:29,system,service,API Started,http://127.0.0.1:8787
+9015,2026-03-13 11:44:29,system,service,API Stopped,Server stopped
+9016,2026-03-13 11:44:58,system,service,API Started,http://127.0.0.1:8787
+9017,2026-03-13 11:44:58,system,service,API Stopped,Server stopped
+9018,2026-03-13 11:44:58,system,service,API Started,http://127.0.0.1:8787
+9019,2026-03-13 11:45:03,system,service,API Started,http://127.0.0.1:8787
+9020,2026-03-13 11:45:03,system,service,API Stopped,Server stopped
+9021,2026-03-13 11:45:10,system,service,API Started,http://127.0.0.1:8787
+9022,2026-03-13 11:45:11,system,service,API Stopped,Server stopped
+9023,2026-03-13 11:45:11,system,service,API Started,http://127.0.0.1:8787
+9024,2026-03-13 11:45:12,system,service,API Stopped,Server stopped
+9025,2026-03-13 11:45:12,system,service,API Started,http://127.0.0.1:8787
+9026,2026-03-13 11:45:13,system,service,API Stopped,Server stopped
+9027,2026-03-13 11:45:13,system,service,API Started,http://127.0.0.1:8787
+9028,2026-03-13 11:45:14,system,service,API Stopped,Server stopped
+9029,2026-03-13 11:45:23,system,service,API Stopped,Server stopped
+9030,2026-03-13 11:45:24,system,service,API Started,http://127.0.0.1:8787
+9031,2026-03-13 11:45:25,system,service,API Stopped,Server stopped
+9032,2026-03-13 11:45:25,system,service,API Started,http://127.0.0.1:8787
+9033,2026-03-13 11:45:31,system,service,API Stopped,Server stopped
+9034,2026-03-13 12:28:55,system,service,API Started,http://127.0.0.1:8787
+9035,2026-03-13 12:28:56,system,service,API Stopped,Server stopped
+9036,2026-03-13 12:28:56,system,service,API Started,http://127.0.0.1:8787
+9037,2026-03-13 12:28:57,system,service,API Started,http://127.0.0.1:8787
+9038,2026-03-13 12:28:57,system,service,API Stopped,Server stopped
+9039,2026-03-13 12:28:58,system,service,API Started,http://127.0.0.1:8787
+9040,2026-03-13 12:28:58,system,service,API Stopped,Server stopped
+9041,2026-03-13 12:30:52,system,service,API Stopped,Server stopped
+9042,2026-03-13 12:31:03,system,service,API Started,http://127.0.0.1:8787
+9043,2026-03-13 12:31:40,system,service,API Stopped,Server stopped
+9044,2026-03-13 12:31:42,system,service,Scheduler Started,Interval 1440 minutes
+9045,2026-03-13 12:31:46,system,service,Scheduler Stopped,Backup scheduler stopped
+9046,2026-03-13 12:31:47,system,service,Auto Backup,Created backup at C:\Users\shishir\OneDrive\Documents\Python\facerecognition\backups\phase3_auto_backup_20260313_123147.db
+9047,2026-03-13 12:31:55,system,service,API Key Rotated,New API key generated
+9048,2026-03-13 12:32:06,system,service,API Started,http://127.0.0.1:8787
+9049,2026-03-13 12:32:21,system,service,API Stopped,Server stopped
+9050,2026-03-13 12:32:33,system,service,API Started,http://127.0.0.1:8787
+9051,2026-03-13 12:32:48,system,service,API Stopped,Server stopped
+9052,2026-03-13 12:32:56,system,service,API Started,http://127.0.0.1:8787
+9053,2026-03-13 12:32:56,system,service,API Stopped,Server stopped
+9054,2026-03-13 12:32:59,system,service,API Started,http://127.0.0.1:8787
+9055,2026-03-13 12:33:00,system,service,API Stopped,Server stopped
+9056,2026-03-13 12:33:01,system,service,API Started,http://127.0.0.1:8787
+9057,2026-03-13 12:33:02,system,service,API Stopped,Server stopped
+9058,2026-03-13 12:33:02,system,service,API Started,http://127.0.0.1:8787
+9059,2026-03-13 12:33:03,system,service,API Stopped,Server stopped
+9060,2026-03-13 12:33:03,system,service,API Started,http://127.0.0.1:8787
+9061,2026-03-13 12:33:03,system,service,API Stopped,Server stopped
+9062,2026-03-13 12:33:04,system,service,API Started,http://127.0.0.1:8787
+9063,2026-03-13 12:33:05,system,service,API Stopped,Server stopped
+9064,2026-03-13 14:47:56,system,service,API Started,http://127.0.0.1:8787
+9065,2026-03-13 14:47:56,system,service,API Stopped,Server stopped
+9066,2026-03-13 14:47:56,system,service,API Started,http://127.0.0.1:8787
+9067,2026-03-13 14:48:09,system,service,API Stopped,Server stopped
+9068,2026-03-13 15:18:58,system,service,API Started,http://127.0.0.1:8787
+9069,2026-03-13 15:18:59,system,service,API Stopped,Server stopped
+9070,2026-03-13 15:18:59,system,service,API Started,http://127.0.0.1:8787
+9071,2026-03-13 15:19:05,system,service,API Stopped,Server stopped
+9072,2026-03-13 15:26:38,system,service,API Started,http://127.0.0.1:8787
+9073,2026-03-13 15:26:41,system,service,API Stopped,Server stopped
+9074,2026-03-13 16:40:22,user,user,Face Search,Searched face from webcam
+9075,2026-03-13 16:41:50,user,user,Live Face Counter,"Max 2 faces, total 1448"
+9076,2026-03-13 17:15:29,system,service,API Started,http://127.0.0.1:8787
+9077,2026-03-13 17:15:31,system,service,API Stopped,Server stopped
