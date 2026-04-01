@@ -1,0 +1,17 @@
+{
+  "search.exclude": {
+    "facerecognition/**": true,
+    "mobile_flutter_client/facerecognition/**": true,
+    "mobile_flutter_client/mobile_flutter_client/**": true
+  },
+  "files.exclude": {
+    "facerecognition/**": true,
+    "mobile_flutter_client/facerecognition/**": true,
+    "mobile_flutter_client/mobile_flutter_client/**": true
+  },
+  "dart.analysisExcludedFolders": [
+    "facerecognition",
+    "mobile_flutter_client/facerecognition",
+    "mobile_flutter_client/mobile_flutter_client"
+  ]
+}
