@@ -33,6 +33,13 @@ enum _MotionPreset {
   cinematic,
 }
 
+enum _RapidRarity {
+  common,
+  rare,
+  epic,
+  legendary,
+}
+
 final ValueNotifier<_MotionPreset> _motionPresetNotifier =
     ValueNotifier<_MotionPreset>(_MotionPreset.auto);
 
@@ -1116,30 +1123,18 @@ class _CinematicFaceHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tier = _motionTierFor(context);
-    final cinematic = tier == _MotionTier.cinematic;
-    final balanced = tier == _MotionTier.balanced;
     final headerTilt = tier == _MotionTier.cinematic
         ? 0.02
         : tier == _MotionTier.balanced
             ? 0.012
             : 0.0;
     Widget faceHero = _BlueFaceHero(
-      size: cinematic ? 62 : 56,
-      settleIn: false,
-      showOrbit: tier != _MotionTier.low,
-      showHalo: tier != _MotionTier.low,
-      glowScale: cinematic
-          ? 0.82
-          : balanced
-              ? 0.6
-              : 0.34,
-      depthScale: cinematic
-          ? 1.18
-          : balanced
-              ? 0.78
-              : 0,
-      cinematicSpecular: cinematic,
-      motionTier: tier,
+      size: 60,
+      showOrbit: true,
+      showHalo: true,
+      glowScale: 0.72,
+      depthScale: 1.25,
+      cinematicSpecular: true,
     );
     if (heroTag != null && tier != _MotionTier.low) {
       faceHero = Hero(tag: heroTag!, child: faceHero);
@@ -4268,7 +4263,7 @@ class _LoginPageState extends State<LoginPage> {
         TextField(
           controller: _signupPhoneController,
           decoration: const InputDecoration(
-              labelText: 'Phone', prefixIcon: Icon(Icons.phone)),
+              labelText: 'Phone (Optional)', prefixIcon: Icon(Icons.phone)),
         ),
         const SizedBox(height: 10),
         TextField(
@@ -4749,12 +4744,18 @@ class _ThreeDDeckCard extends StatefulWidget {
   final int index;
   final _MotionTier tier;
   final double cinematicIntensity;
+  final int styleSeed;
+  final int reactionNonce;
+  final _RapidRarity rarity;
 
   const _ThreeDDeckCard({
     required this.child,
     required this.index,
     required this.tier,
     this.cinematicIntensity = 1,
+    this.styleSeed = 0,
+    this.reactionNonce = 0,
+    this.rarity = _RapidRarity.common,
   });
 
   @override
@@ -4764,17 +4765,37 @@ class _ThreeDDeckCard extends StatefulWidget {
 class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
     with SingleTickerProviderStateMixin {
   late final AnimationController _floatController;
+  late final AnimationController _reactionController;
+  static const List<Color> _accentPalette = [
+    Color(0xFF68D4FF),
+    Color(0xFFB59BFF),
+    Color(0xFF67F2CC),
+    Color(0xFFFFC386),
+    Color(0xFF8AA8FF),
+    Color(0xFFFF88C7),
+  ];
+
+  double _unitFromHash(int salt) {
+    final x = (widget.index + 1) * 1103515245 + (widget.styleSeed + salt) * 12345;
+    final v = ((x ^ (x >> 16)) & 0x7fffffff) / 0x7fffffff;
+    return v.clamp(0.0, 1.0);
+  }
 
   @override
   void initState() {
     super.initState();
+    final tempoSeed = (((widget.index + 1) * 73) + (widget.styleSeed * 19)) % 1200;
     _floatController = AnimationController(
       vsync: this,
-      duration: Duration(milliseconds: 2400 + ((widget.index % 5) * 180)),
+      duration: Duration(milliseconds: 1800 + tempoSeed),
     );
     if (widget.tier == _MotionTier.cinematic) {
       _floatController.repeat(reverse: true);
     }
+    _reactionController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
   }
 
   @override
@@ -4789,11 +4810,17 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
           ..value = 0;
       }
     }
+    if (oldWidget.reactionNonce != widget.reactionNonce) {
+      _reactionController
+        ..stop()
+        ..forward(from: 0);
+    }
   }
 
   @override
   void dispose() {
     _floatController.dispose();
+    _reactionController.dispose();
     super.dispose();
   }
 
@@ -4801,6 +4828,11 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
   Widget build(BuildContext context) {
     final cinematicIntensity =
         widget.cinematicIntensity.clamp(0.6, 1.8).toDouble();
+    final profileA = _unitFromHash(7);
+    final profileB = _unitFromHash(23);
+    final profileC = _unitFromHash(59);
+    final variant = ((profileA * 1000).floor() + (profileB * 137).floor()) % 6;
+    final accent = _accentPalette[((profileC * 1000).floor()) % _accentPalette.length];
     final perspective = widget.tier == _MotionTier.low
         ? 0.0006
         : widget.tier == _MotionTier.balanced
@@ -4810,12 +4842,12 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
         ? 0.04
         : widget.tier == _MotionTier.balanced
             ? 0.095
-            : 0.14 * cinematicIntensity;
+            : (0.08 + (profileA * 0.1)) * cinematicIntensity;
     final introRotateY = widget.tier == _MotionTier.low
         ? -0.015
         : widget.tier == _MotionTier.balanced
             ? -0.03
-            : -0.052 * cinematicIntensity;
+            : ((profileB - 0.5) * 0.13) * cinematicIntensity;
     final maxTilt = widget.tier == _MotionTier.low
         ? 0.045
         : widget.tier == _MotionTier.balanced
@@ -4823,7 +4855,7 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
             : 0.12 * cinematicIntensity;
     return TweenAnimationBuilder<double>(
       tween: Tween<double>(begin: 0, end: 1),
-      duration: Duration(milliseconds: 260 + ((widget.index % 7) * 22)),
+      duration: Duration(milliseconds: 220 + (profileA * 240).round()),
       curve: Curves.easeOutCubic,
       builder: (context, t, child) {
         final depth = (1 - t);
@@ -4842,25 +4874,88 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
         );
       },
       child: AnimatedBuilder(
-        animation: _floatController,
+        animation: Listenable.merge([_floatController, _reactionController]),
         builder: (context, child) {
-          final wave = math.sin(_floatController.value * math.pi * 2);
-          final lift = widget.tier == _MotionTier.cinematic
-              ? wave * (3.0 * cinematicIntensity)
-              : 0.0;
+          final phaseA = profileA * math.pi * 2;
+          final phaseB = profileB * math.pi * 2;
+          final speedA = 1.0 + (profileA * 1.8);
+          final speedB = 0.8 + (profileC * 2.2);
+          final t = _floatController.value * math.pi * 2;
+          final wave = math.sin((t * speedA) + phaseA);
+          final waveB = math.cos((t * speedB) + phaseB);
+          final baseLift = widget.tier == _MotionTier.cinematic
+              ? 3.0 * cinematicIntensity
+              : widget.tier == _MotionTier.balanced
+                  ? 1.2
+                  : 0.0;
+          final lift = ((wave * (0.5 + profileA)) + (waveB * (0.2 + profileB))) *
+              (baseLift * (0.55 + profileC * 0.65));
+          final spinY = (wave * (0.012 + profileB * 0.05)) *
+              (widget.tier == _MotionTier.low
+                  ? 0.65
+                  : widget.tier == _MotionTier.balanced
+                      ? 1.0
+                      : cinematicIntensity);
+          final nodX = (waveB * (0.009 + profileC * 0.03)) *
+              (widget.tier == _MotionTier.low
+                  ? 0.55
+                  : widget.tier == _MotionTier.balanced
+                      ? 0.9
+                      : cinematicIntensity);
+          final pulseScale = 1.0 +
+              ((wave * (0.004 + profileA * 0.008)) +
+                      (waveB * (0.003 + profileB * 0.006))) *
+                  (widget.tier == _MotionTier.low ? 0.55 : 1.0) *
+                  cinematicIntensity;
+          final skewX = (profileB - 0.5) * 0.0009;
+          final skewY = (profileC - 0.5) * 0.0011;
           final shadowAlpha = widget.tier == _MotionTier.cinematic
-              ? (0.26 + (wave.abs() * 0.07 * cinematicIntensity))
+              ? (0.24 +
+                      (((wave.abs() + waveB.abs()) * 0.5) *
+                          0.09 *
+                          cinematicIntensity))
                   .clamp(0.2, 0.42)
               : 0.18;
-          return Transform.translate(
-            offset: Offset(0, -lift),
+          final r = Curves.easeOutCubic.transform(_reactionController.value);
+          final rx = ((_unitFromHash(widget.reactionNonce + 101) * 2) - 1);
+          final ry = ((_unitFromHash(widget.reactionNonce + 211) * 2) - 1);
+          final reactShift = switch (widget.rarity) {
+            _RapidRarity.common => Offset(0, -10 * math.sin(r * math.pi)),
+            _RapidRarity.rare => Offset(rx * 16 * (1 - r), ry * 10 * (1 - r)),
+            _RapidRarity.epic => Offset(rx * 28 * (1 - r), ry * 18 * (1 - r)),
+            _RapidRarity.legendary =>
+              Offset(rx * 56 * (1 - r), ry * 26 * (1 - r)),
+          };
+          final reactRoll = switch (widget.rarity) {
+            _RapidRarity.common => 0.0,
+            _RapidRarity.rare => (1 - r) * (math.pi * 0.7) * (rx.sign == 0 ? 1 : rx.sign),
+            _RapidRarity.epic => (1 - r) * (math.pi * 1.1) * (rx.sign == 0 ? 1 : rx.sign),
+            _RapidRarity.legendary => (1 - r) * (math.pi * 1.6) * (rx.sign == 0 ? 1 : rx.sign),
+          };
+          final reactScale = switch (widget.rarity) {
+            _RapidRarity.common => 1 + (0.03 * math.sin(r * math.pi)),
+            _RapidRarity.rare => 1 + (0.06 * math.sin(r * math.pi)),
+            _RapidRarity.epic => 1 + (0.1 * math.sin(r * math.pi)),
+            _RapidRarity.legendary => 1 + (0.14 * math.sin(r * math.pi)),
+          };
+          final shellTransform = Matrix4.identity()
+            ..setEntry(3, 2, perspective)
+            ..translate(reactShift.dx, -lift + reactShift.dy, 0.0)
+            ..rotateY(spinY)
+            ..rotateX(nodX)
+            ..rotateZ(reactRoll)
+            ..setEntry(0, 1, skewX)
+            ..setEntry(1, 0, skewY)
+            ..scale(pulseScale * reactScale, pulseScale * reactScale);
+          return Transform(
+            alignment: Alignment.center,
+            transform: shellTransform,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(14),
                 boxShadow: [
                   BoxShadow(
-                    color:
-                        const Color(0xFF69C8FF).withValues(alpha: shadowAlpha),
+                    color: accent.withValues(alpha: shadowAlpha),
                     blurRadius: widget.tier == _MotionTier.cinematic
                         ? 22 * cinematicIntensity
                         : 14,
@@ -4869,7 +4964,70 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
                   ),
                 ],
               ),
-              child: child,
+              child: Stack(
+                fit: StackFit.passthrough,
+                clipBehavior: Clip.none,
+                children: [
+                  child!,
+                  if (widget.rarity == _RapidRarity.epic &&
+                      _reactionController.value > 0)
+                    Positioned(
+                      right: -8 + ((1 - r) * 28),
+                      top: -6,
+                      child: Transform.rotate(
+                        angle: (1 - r) * math.pi,
+                        child: Container(
+                          width: 22 + (18 * r),
+                          height: 22 + (18 * (1 - r)),
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.22),
+                            borderRadius: BorderRadius.circular(12 * r),
+                            border: Border.all(
+                              color: accent.withValues(alpha: 0.9),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (widget.rarity == _RapidRarity.legendary &&
+                      _reactionController.value > 0)
+                    Positioned(
+                      left: -18 + ((r) * 230 * rx.sign),
+                      top: 8 + ((1 - r) * 18 * ry.sign),
+                      child: Transform.rotate(
+                        angle: rx * 0.8,
+                        child: Icon(
+                          (_unitFromHash(widget.reactionNonce + 333) > 0.5)
+                              ? Icons.flight
+                              : Icons.pets,
+                          color: const Color(0xFFFFD166),
+                          size: 20 + (8 * (1 - r)),
+                        ),
+                      ),
+                    ),
+                  IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: accent.withValues(
+                            alpha: widget.tier == _MotionTier.low ? 0.18 : 0.28,
+                          ),
+                        ),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            accent.withValues(alpha: 0.06),
+                            Colors.transparent,
+                            accent.withValues(alpha: 0.04),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -4877,6 +5035,71 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
           maxTilt: maxTilt,
           duration: const Duration(milliseconds: 140),
           child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
+class _RapidDeckFlipCard extends StatefulWidget {
+  final Widget front;
+  final Widget back;
+  final VoidCallback? onTapReact;
+
+  const _RapidDeckFlipCard({
+    required this.front,
+    required this.back,
+    this.onTapReact,
+  });
+
+  @override
+  State<_RapidDeckFlipCard> createState() => _RapidDeckFlipCardState();
+}
+
+class _RapidDeckFlipCardState extends State<_RapidDeckFlipCard> {
+  bool _flipped = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () {
+        widget.onTapReact?.call();
+      },
+      onDoubleTap: () {
+        setState(() {
+          _flipped = !_flipped;
+        });
+      },
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 320),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          final rotate = Tween<double>(begin: math.pi * 0.5, end: 0.0)
+              .animate(animation);
+          return AnimatedBuilder(
+            animation: rotate,
+            child: child,
+            builder: (context, c) {
+              final isUnder = (ValueKey(_flipped) != c?.key);
+              var tilt = (animation.value - 0.5).abs() - 0.5;
+              tilt *= isUnder ? -0.004 : 0.004;
+              final value = isUnder ? math.min(rotate.value, math.pi / 2) : rotate.value;
+              return Transform(
+                alignment: Alignment.center,
+                transform: Matrix4.identity()
+                  ..setEntry(3, 2, 0.002)
+                  ..rotateY(value)
+                  ..setEntry(3, 0, tilt),
+                child: c,
+              );
+            },
+          );
+        },
+        child: KeyedSubtree(
+          key: ValueKey<bool>(_flipped),
+          child: _flipped ? widget.back : widget.front,
         ),
       ),
     );
@@ -4972,6 +5195,12 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
   int _flipTick = 0;
   double _carouselPage = 0;
   double _cinematicIntensity = 1.0;
+  int _styleSeed = 0;
+  final Set<int> _favoriteIndexes = <int>{};
+  final Map<int, int> _reactionNonceByIndex = <int, int>{};
+  bool _favoritesOnly = false;
+  bool _spotlightAutoPlay = false;
+  Timer? _spotlightTimer;
 
   @override
   void initState() {
@@ -4986,10 +5215,60 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
     _carouselController
       ..removeListener(_handleCarousel)
       ..dispose();
+    _spotlightTimer?.cancel();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
     super.dispose();
+  }
+
+  void _toggleSpotlight(bool enabled, List<int> carouselIndexes) {
+    _spotlightTimer?.cancel();
+    _spotlightTimer = null;
+    if (!enabled || carouselIndexes.isEmpty) {
+      return;
+    }
+    _spotlightTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!_carouselController.hasClients || carouselIndexes.isEmpty) {
+        return;
+      }
+      final next = ((_carouselPage.round() + 1) % carouselIndexes.length);
+      _carouselController.animateToPage(
+        next,
+        duration: const Duration(milliseconds: 480),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  ({String label, Color color, _RapidRarity rarity}) _rarityForIndex(int index) {
+    final mod = (index + _styleSeed) % 100;
+    if (mod >= 96) {
+      return (
+        label: 'Legendary',
+        color: const Color(0xFFFFD166),
+        rarity: _RapidRarity.legendary
+      );
+    }
+    if (mod >= 84) {
+      return (
+        label: 'Epic',
+        color: const Color(0xFFC9A7FF),
+        rarity: _RapidRarity.epic
+      );
+    }
+    if (mod >= 60) {
+      return (
+        label: 'Rare',
+        color: const Color(0xFF85D8FF),
+        rarity: _RapidRarity.rare
+      );
+    }
+    return (
+      label: 'Common',
+      color: const Color(0xFF8CE3BD),
+      rarity: _RapidRarity.common
+    );
   }
 
   void _handleCarousel() {
@@ -5064,12 +5343,19 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
     final all = List<int>.generate(rapidDeckBuilders.length, (i) => i)
         .where(_matchesIndex)
         .where(_matchesRange)
+        .where((i) => !_favoritesOnly || _favoriteIndexes.contains(i))
         .toList(growable: false);
     final shown = all.take(_visibleLimit).toList(growable: false);
     final tier = _motionTierFor(context);
     final cinematicIntensity = _cinematicIntensity.clamp(0.6, 1.8).toDouble();
     final carouselIndexes =
         all.take(math.min(10, all.length)).toList(growable: false);
+    if (_spotlightAutoPlay && _spotlightTimer == null && carouselIndexes.isNotEmpty) {
+      _toggleSpotlight(true, carouselIndexes);
+    } else if ((!_spotlightAutoPlay || carouselIndexes.isEmpty) &&
+        _spotlightTimer != null) {
+      _toggleSpotlight(false, carouselIndexes);
+    }
 
     return Scaffold(
       appBar: AppBar(title: const Text('Rapid Deck')),
@@ -5160,6 +5446,9 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                             index: index,
                             tier: tier,
                             cinematicIntensity: cinematicIntensity,
+                            styleSeed: _styleSeed,
+                            reactionNonce: _reactionNonceByIndex[index] ?? 0,
+                            rarity: _rarityForIndex(index).rarity,
                             child: Card(
                               color: const Color(0xFF10223A),
                               child: Padding(
@@ -5213,6 +5502,75 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                     );
                   }
                 },
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _styleSeed = (_styleSeed + 1) % 1000;
+                          _flipTick += 1;
+                        });
+                      },
+                      icon: const Icon(Icons.auto_fix_high),
+                      label: const Text('Shuffle 3D Styles'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: carouselIndexes.isEmpty
+                        ? null
+                        : () {
+                            final now = DateTime.now();
+                            final target =
+                                (now.millisecond + now.second) % carouselIndexes.length;
+                            _carouselController.animateToPage(
+                              target,
+                              duration: const Duration(milliseconds: 420),
+                              curve: Curves.easeOutCubic,
+                            );
+                          },
+                    icon: const Icon(Icons.casino),
+                    label: const Text('Surprise'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilterChip(
+                    selected: _favoritesOnly,
+                    onSelected: (v) {
+                      setState(() {
+                        _favoritesOnly = v;
+                        _visibleLimit = 48;
+                      });
+                    },
+                    avatar: const Icon(Icons.star, size: 16),
+                    label: Text(
+                      _favoritesOnly
+                          ? 'Favorites Only (${_favoriteIndexes.length})'
+                          : 'Show Favorites (${_favoriteIndexes.length})',
+                    ),
+                  ),
+                  FilterChip(
+                    selected: _spotlightAutoPlay,
+                    onSelected: (v) {
+                      setState(() {
+                        _spotlightAutoPlay = v;
+                      });
+                      _toggleSpotlight(v, carouselIndexes);
+                    },
+                    avatar: const Icon(Icons.play_circle_fill, size: 16),
+                    label: Text(_spotlightAutoPlay
+                        ? 'Spotlight Auto-Play On'
+                        : 'Spotlight Auto-Play'),
+                  ),
+                ],
               ),
               const SizedBox(height: 10),
               if (tier == _MotionTier.cinematic) ...[
@@ -5306,36 +5664,160 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                   children: [
                     ...shown.map((index) {
                       final label = (index + 1).toString().padLeft(3, '0');
+                      final rarity = _rarityForIndex(index);
+                      final isFav = _favoriteIndexes.contains(index);
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _ThreeDDeckCard(
                           index: index,
                           tier: tier,
                           cinematicIntensity: cinematicIntensity,
+                          styleSeed: _styleSeed,
+                          reactionNonce: _reactionNonceByIndex[index] ?? 0,
+                          rarity: rarity.rarity,
                           child: Card(
                             color: const Color(0xFF0E1B31),
                             child: Padding(
                               padding: const EdgeInsets.all(10),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
+                              child: _RapidDeckFlipCard(
+                                onTapReact: () {
+                                  setState(() {
+                                    _reactionNonceByIndex[index] =
+                                        (_reactionNonceByIndex[index] ?? 0) + 1;
+                                  });
+                                },
+                                front: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Icon(Icons.auto_awesome,
+                                            color: Color(0xFF90E7FF)),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            'Rapid Scenario $label',
+                                            style: const TextStyle(
+                                              color: Color(0xFFEAF4FF),
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 8, vertical: 3),
+                                          decoration: BoxDecoration(
+                                            borderRadius:
+                                                BorderRadius.circular(999),
+                                            color: rarity.color
+                                                .withValues(alpha: 0.2),
+                                            border: Border.all(
+                                              color: rarity.color
+                                                  .withValues(alpha: 0.7),
+                                            ),
+                                          ),
+                                          child: Text(
+                                            rarity.label,
+                                            style: TextStyle(
+                                              color: rarity.color,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          onPressed: () {
+                                            setState(() {
+                                              if (isFav) {
+                                                _favoriteIndexes.remove(index);
+                                              } else {
+                                                _favoriteIndexes.add(index);
+                                              }
+                                            });
+                                          },
+                                          icon: Icon(
+                                            isFav
+                                                ? Icons.star
+                                                : Icons.star_border_rounded,
+                                            color: isFav
+                                                ? const Color(0xFFFFD166)
+                                                : const Color(0xFF9FB8D8),
+                                          ),
+                                          tooltip: isFav
+                                              ? 'Remove from favorites'
+                                              : 'Add to favorites',
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    rapidDeckBuilders[index](),
+                                    const SizedBox(height: 6),
+                                    const Text(
+                                      'Tap for rarity reaction • Double tap to flip',
+                                      style: TextStyle(
+                                        color: Color(0xFF9CB7D8),
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                back: Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(12),
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: [
+                                        const Color(0xFF1A2C4A),
+                                        rarity.color.withValues(alpha: 0.3),
+                                      ],
+                                    ),
+                                    border: Border.all(
+                                      color: rarity.color.withValues(alpha: 0.6),
+                                    ),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      const Icon(Icons.auto_awesome,
-                                          color: Color(0xFF90E7FF)),
-                                      const SizedBox(width: 8),
                                       Text(
-                                        'Rapid Scenario $label',
+                                        'Scenario $label Mission Brief',
                                         style: const TextStyle(
                                           color: Color(0xFFEAF4FF),
-                                          fontWeight: FontWeight.w700,
+                                          fontWeight: FontWeight.w800,
+                                          fontSize: 15,
                                         ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        'Rarity: ${rarity.label}\n3D Style Variant: ${((index + _styleSeed) % 6) + 1}\nAction Cluster: ${(index % 8) + 1}\nPulse Score: ${((index * 13) % 97) + 3}',
+                                        style: const TextStyle(
+                                          color: Color(0xFFD2E5FF),
+                                          height: 1.35,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const Icon(Icons.touch_app,
+                                              color: Color(0xFFBFD8FF),
+                                              size: 16),
+                                          const SizedBox(width: 6),
+                                          const Expanded(
+                                            child: Text(
+                                              'Tap again to return to live card view',
+                                              style: TextStyle(
+                                                color: Color(0xFFBFD8FF),
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  rapidDeckBuilders[index](),
-                                ],
+                                ),
                               ),
                             ),
                           ),
