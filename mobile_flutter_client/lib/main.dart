@@ -3908,16 +3908,14 @@ class _AuthGateState extends State<AuthGate> {
       final currentN = _parseVersionNumber(currentVersion);
       final latestN = _parseVersionNumber(latestVersion);
       final minimumN = _parseVersionNumber(minimumVersion);
-      final needsUpdate = latestN > 0 && currentN != latestN;
+      final needsUpdate = latestN > 0 && currentN < latestN;
       final mustUpdate = minimumN > 0 && currentN < minimumN;
-      final sameVersionForced =
-          forceUpdate && latestN > 0 && currentN == latestN;
+      final currentIsLatestOrNewer = latestN > 0 && currentN >= latestN;
+      final effectiveForceUpdate =
+          (forceUpdate || mustUpdate) && !currentIsLatestOrNewer;
       final urlChanged = updateUrl != lastNotifiedUrl;
-      final shouldPrompt = forceUpdate ||
-          mustUpdate ||
-          needsUpdate ||
-          sameVersionForced ||
-          urlChanged;
+      final shouldPrompt =
+          needsUpdate || mustUpdate || (urlChanged && !currentIsLatestOrNewer);
       if (!shouldPrompt) {
         if (lastNotifiedVersion.isNotEmpty) {
           await prefs.remove('fs_last_update_notified_version');
@@ -3930,7 +3928,7 @@ class _AuthGateState extends State<AuthGate> {
       final notifiedCooldownActive = lastNotifiedVersion == latestVersion &&
           lastNotifiedUrl == updateUrl &&
           (nowMs - lastNotifiedAt) < 21600000;
-      if (!mustUpdate && !forceUpdate && notifiedCooldownActive) {
+      if (!effectiveForceUpdate && !mustUpdate && notifiedCooldownActive) {
         return;
       }
 
@@ -3938,13 +3936,13 @@ class _AuthGateState extends State<AuthGate> {
         latestVersion: latestVersion,
         notes: notes,
         updateUrl: updateUrl,
-        forceUpdate: forceUpdate || mustUpdate,
+        forceUpdate: effectiveForceUpdate,
       );
       await _showInAppUpdatePrompt(
         latestVersion: latestVersion,
         notes: notes,
         updateUrl: updateUrl,
-        forceUpdate: forceUpdate || mustUpdate,
+        forceUpdate: effectiveForceUpdate,
       );
       await prefs.setString('fs_last_update_notified_version', latestVersion);
       await prefs.setString('fs_last_update_notified_url', updateUrl);
