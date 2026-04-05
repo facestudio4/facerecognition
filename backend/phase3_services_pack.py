@@ -13,6 +13,7 @@ import hmac
 import re
 import sys
 import traceback
+import ssl
 from random import randint
 from email.message import EmailMessage
 from datetime import datetime, timedelta
@@ -343,8 +344,8 @@ class Phase3ServiceHub:
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
-        timeout_text = os.environ.get("FACESTUDIO_SMTP_TIMEOUT", "10").strip()
-        total_timeout_text = os.environ.get("FACESTUDIO_SMTP_TOTAL_TIMEOUT", "9").strip()
+        timeout_text = os.environ.get("FACESTUDIO_SMTP_TIMEOUT", "15").strip()
+        total_timeout_text = os.environ.get("FACESTUDIO_SMTP_TOTAL_TIMEOUT", "18").strip()
 
         if not host or not user or not password or not from_email:
             return {"ok": False, "error": "SMTP is not configured"}
@@ -357,12 +358,12 @@ class Phase3ServiceHub:
         try:
             smtp_timeout = max(3, min(int(timeout_text), 30))
         except Exception:
-            smtp_timeout = 10
+            smtp_timeout = 15
 
         try:
             total_timeout = max(4, min(int(total_timeout_text), 40))
         except Exception:
-            total_timeout = 9
+            total_timeout = 18
 
         if "gmail.com" in host.lower() and " " in password:
             password = password.replace(" ", "")
@@ -400,7 +401,7 @@ class Phase3ServiceHub:
                 with smtp_client as smtp:
                     smtp.ehlo()
                     if tls_mode and not ssl_mode:
-                        smtp.starttls()
+                        smtp.starttls(context=ssl.create_default_context())
                         smtp.ehlo()
                     smtp.login(user, password)
                     smtp.send_message(message)
@@ -1216,11 +1217,17 @@ class Phase3ServiceHub:
         force_update: bool = False,
     ):
         name = (recognized_name or "").strip()
-        location = (location_name or "").strip()
         if not name or name.lower() == "unknown":
             return {"ok": False, "error": "recognized_name is required"}
-        if not location:
-            return {"ok": False, "error": "location_name is required"}
+
+        location = (location_name or "").strip()
+        invalid_location_labels = {
+            "detecting location...",
+            "location fetch failed",
+            "location permission denied",
+            "location service is off",
+            "unknown location",
+        }
 
         def _as_float(value):
             if value is None:
@@ -1238,7 +1245,7 @@ class Phase3ServiceHub:
         with self._connect() as conn:
             latest_for_person = conn.execute(
                 """
-                SELECT id, event_time, location_name
+                SELECT id, event_time, location_name, latitude, longitude
                 FROM recognition_location_events
                 WHERE lower(recognized_name)=lower(?)
                 ORDER BY id DESC
@@ -1246,6 +1253,38 @@ class Phase3ServiceHub:
                 """,
                 (name,),
             ).fetchone()
+
+            prev_location = ""
+            prev_lat = None
+            prev_lng = None
+            if latest_for_person:
+                prev_location = str(latest_for_person["location_name"] or "").strip()
+                prev_lat = _as_float(latest_for_person["latitude"])
+                prev_lng = _as_float(latest_for_person["longitude"])
+
+            location_lc = location.lower()
+            if not location or location_lc in invalid_location_labels:
+                if lat is None and lng is None and prev_location:
+                    return {
+                        "ok": True,
+                        "data": {
+                            "saved": False,
+                            "reason": "kept_last_known_location",
+                            "event_id": int(latest_for_person["id"]) if latest_for_person else 0,
+                        },
+                    }
+                if lat is not None and lng is not None:
+                    location = f"Lat {lat:.5f}, Lng {lng:.5f}"
+                elif prev_location:
+                    location = prev_location
+                else:
+                    return {"ok": False, "error": "location_name is required"}
+
+            if lat is None and prev_lat is not None:
+                lat = prev_lat
+            if lng is None and prev_lng is not None:
+                lng = prev_lng
+
             if (
                 (not force_update)
                 and latest_for_person
@@ -1763,14 +1802,29 @@ class Phase3ServiceHub:
         }
 
         track = tracking if isinstance(tracking, dict) else {}
-        location_name = str(track.get("location_name", "")).strip()
+        location_name = str(
+            track.get("location_name")
+            or track.get("location_label")
+            or track.get("location")
+            or track.get("label")
+            or ""
+        ).strip()
+        latitude = track.get("latitude", track.get("lat"))
+        longitude = track.get("longitude", track.get("lng"))
+        if not location_name:
+            try:
+                lat_num = float(latitude)
+                lng_num = float(longitude)
+                location_name = f"Lat {lat_num:.5f}, Lng {lng_num:.5f}"
+            except Exception:
+                location_name = ""
         requested_by = str(track.get("requested_by", "mobile")).strip() or "mobile"
         if location_name and str(global_best.get("name", "")).strip() and str(global_best.get("name", "")).lower() != "unknown":
             saved = self.save_recognition_location_event(
                 recognized_name=str(global_best.get("name", "")).strip(),
                 location_name=location_name,
-                latitude=track.get("latitude"),
-                longitude=track.get("longitude"),
+                latitude=latitude,
+                longitude=longitude,
                 confidence=global_best.get("score"),
                 source="mobile_identify",
                 requested_by=requested_by,
@@ -1780,6 +1834,11 @@ class Phase3ServiceHub:
                 result["location_tracking"] = saved.get("data", {})
             else:
                 result["location_tracking"] = {"saved": False, "error": saved.get("error", "unknown")}
+        elif str(global_best.get("name", "")).strip() and str(global_best.get("name", "")).lower() != "unknown":
+            result["location_tracking"] = {
+                "saved": False,
+                "reason": "missing_location_context",
+            }
 
         return result
 

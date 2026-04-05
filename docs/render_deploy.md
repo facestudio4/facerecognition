@@ -34,6 +34,25 @@ Optional (email OTP/reset):
 - `FACESTUDIO_SMTP_TIMEOUT`
 - `FACESTUDIO_SMTP_TOTAL_TIMEOUT`
 
+Main values to set on Render:
+
+```env
+APP_ENV=production
+API_HOST=0.0.0.0
+SQLITE_PATH=/var/data/facestudio.db
+
+FACESTUDIO_SMTP_HOST=smtp.gmail.com
+FACESTUDIO_SMTP_USER=<your-gmail-address>
+FACESTUDIO_SMTP_APP_PASSWORD=<your-16-char-google-app-password>
+FACESTUDIO_SMTP_FROM=<your-gmail-address>
+FACESTUDIO_SMTP_PORT=587
+FACESTUDIO_SMTP_TLS=1
+FACESTUDIO_SMTP_SSL=0
+FACESTUDIO_SMTP_TIMEOUT=15
+FACESTUDIO_SMTP_TOTAL_TIMEOUT=18
+FACESTUDIO_SIGNUP_ALLOW_SMTP_FALLBACK=1
+```
+
 ## 3. Start command used on Render
 
 `python scripts/app_runner.py api --host 0.0.0.0 --port $PORT`

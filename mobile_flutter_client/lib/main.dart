@@ -1446,7 +1446,7 @@ class _BlueFaceHero extends StatefulWidget {
     this.glowScale = 1,
     this.depthScale = 1,
     this.cinematicSpecular = true,
-    this.ultraClear = false,
+    this.ultraClear = true,
     this.motionTier,
   });
 
@@ -2220,22 +2220,47 @@ class _RayFaceCorePainter extends CustomPainter {
         profile!.image.width.toDouble(),
         profile!.image.height.toDouble(),
       );
+      final maskPath = Path()..addOval(faceRect);
+      canvas.save();
+      canvas.clipPath(maskPath);
+      if (preferFaceClarity) {
+        final baseTone = Paint()
+          ..shader = RadialGradient(
+            center: const Alignment(0, -0.06),
+            radius: 0.86,
+            colors: [
+              const Color(0xFFDFF7FF).withValues(alpha: 0.32),
+              const Color(0xFF97D8FF).withValues(alpha: 0.2),
+              const Color(0xFF205A9D).withValues(alpha: 0.16),
+            ],
+            stops: const [0.0, 0.64, 1.0],
+          ).createShader(faceRect);
+        canvas.drawRect(faceRect, baseTone);
+      }
       final imagePaint = Paint()
         ..filterQuality =
             preferFaceClarity ? FilterQuality.high : FilterQuality.low
         ..blendMode = preferFaceClarity ? BlendMode.srcOver : BlendMode.lighten
         ..colorFilter = ColorFilter.mode(
-          Colors.white.withValues(alpha: preferFaceClarity ? 0.96 : 0.78),
+          Colors.white.withValues(alpha: preferFaceClarity ? 0.92 : 0.78),
           BlendMode.modulate,
         );
       canvas.drawImageRect(profile!.image, srcRect, faceRect, imagePaint);
+      if (preferFaceClarity) {
+        final contour = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..color = const Color(0xFF8ED4FF).withValues(alpha: 0.38);
+        canvas.drawOval(faceRect.deflate(size.width * 0.01), contour);
+      }
+      canvas.restore();
     }
 
     final segments =
         profile?.scaledSegments(c, rx, ry) ?? _faceFeatureSegments(c, rx, ry);
     final segCount = segments.length;
     final segStride = profile != null
-        ? (preferFaceClarity ? 2 : (shineScale < 0.68 ? 5 : 3))
+        ? (preferFaceClarity ? 1 : (shineScale < 0.68 ? 5 : 3))
         : 1;
     for (int i = 0; i < segCount; i += segStride) {
       final a = segments[i][0];
@@ -2320,7 +2345,7 @@ class _RayFaceCorePainter extends CustomPainter {
 
     if (profile != null) {
       final points = profile!.scaledPoints(c, rx, ry);
-      final pointStride = preferFaceClarity ? 6 : (shineScale < 0.68 ? 9 : 5);
+      final pointStride = preferFaceClarity ? 4 : (shineScale < 0.68 ? 9 : 5);
       for (int i = 0; i < points.length; i += pointStride) {
         final p = points[i];
         final flicker =
@@ -3499,7 +3524,7 @@ class BackendApi {
             'password': password,
           }),
         )
-        .timeout(_kNetworkTimeout);
+        .timeout(_kAuthTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
@@ -3513,7 +3538,7 @@ class BackendApi {
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'email': email, 'code': code, 'ttl': 180}),
         )
-        .timeout(_kNetworkTimeout);
+        .timeout(_kAuthTimeout);
     if (res.statusCode != 200) {
       return null;
     }
@@ -3538,7 +3563,7 @@ class BackendApi {
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'identifier': identifier}),
         )
-        .timeout(_kNetworkTimeout);
+        .timeout(_kAuthTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
@@ -3777,6 +3802,7 @@ class BackendApi {
     double? longitude,
     double? confidence,
     String source = 'mobile_manual',
+    bool forceUpdate = false,
   }) async {
     final ok = await ensureToken();
     if (!ok) {
@@ -3799,6 +3825,7 @@ class BackendApi {
         'confidence': confidence,
         'source': source,
         'requested_by': _username.isEmpty ? 'mobile' : _username,
+        'force_update': forceUpdate,
       }),
     );
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -5441,6 +5468,38 @@ const List<_KnownMapLocation> _worldMapLocations = [
   _KnownMapLocation(name: 'Dubai, UAE', latitude: 25.2048, longitude: 55.2708),
 ];
 
+final ValueNotifier<double> _globalMotionRealism = ValueNotifier<double>(0.72);
+
+String _realismPresetLabel(double value) {
+  if (value < 0.45) {
+    return 'Fast';
+  }
+  if (value < 0.75) {
+    return 'Balanced';
+  }
+  return 'Cinematic';
+}
+
+class _MotionCoverSpec {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final List<Color> colors;
+
+  const _MotionCoverSpec({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.colors,
+  });
+}
+
+enum _MotionVisualStyle {
+  neon,
+  aurora,
+  steel,
+}
+
 class MotionStudioPage extends StatefulWidget {
   const MotionStudioPage({super.key});
 
@@ -5450,6 +5509,7 @@ class MotionStudioPage extends StatefulWidget {
 
 class _MotionStudioPageState extends State<MotionStudioPage>
     with SingleTickerProviderStateMixin {
+  late final TabController _motionTabController;
   late final AnimationController _cubeFloatController;
   final PageController _flowController = PageController(viewportFraction: 0.72);
   final ScrollController _timelineController = ScrollController();
@@ -5457,15 +5517,52 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   double _cubeRx = -0.34;
   double _cubeRy = 0.38;
   double _coverPage = 0;
+  int _coverFocus = 0;
+  int _motionTabIndex = 0;
+  int _timelineFocusIndex = 0;
+  _MotionVisualStyle _visualStyle = _MotionVisualStyle.neon;
+  double _realism = _globalMotionRealism.value;
+  double _coverDepthBoost = 1.0;
   Offset _gridCamera = const Offset(0, 0);
+  static const double _timelineItemExtent = 102;
 
-  static const List<String> _coverItems = [
-    'Depth Cards',
-    'Security Sweep',
-    'Presence Radar',
-    'Motion Replay',
-    'Timeline Pulse',
-    'Camera Orbit',
+  static const List<_MotionCoverSpec> _coverItems = [
+    _MotionCoverSpec(
+      title: 'Depth Cards',
+      subtitle: 'Layered visibility stack with perspective weighting',
+      icon: Icons.layers,
+      colors: [Color(0xFF5BC4FF), Color(0xFF395CFF)],
+    ),
+    _MotionCoverSpec(
+      title: 'Security Sweep',
+      subtitle: 'Threat-scan sweep with directional confidence track',
+      icon: Icons.security,
+      colors: [Color(0xFF58E9D5), Color(0xFF1F9EAE)],
+    ),
+    _MotionCoverSpec(
+      title: 'Presence Radar',
+      subtitle: 'Proximity and confidence pulse map',
+      icon: Icons.radar,
+      colors: [Color(0xFF9BB2FF), Color(0xFF5966CF)],
+    ),
+    _MotionCoverSpec(
+      title: 'Motion Replay',
+      subtitle: 'Frame-to-frame continuity and trajectory loop',
+      icon: Icons.movie_filter,
+      colors: [Color(0xFF7DE1FF), Color(0xFF2A6EA6)],
+    ),
+    _MotionCoverSpec(
+      title: 'Timeline Pulse',
+      subtitle: 'Event ordering with phase transitions',
+      icon: Icons.timeline,
+      colors: [Color(0xFFFFD48E), Color(0xFFA46B30)],
+    ),
+    _MotionCoverSpec(
+      title: 'Camera Orbit',
+      subtitle: 'Orbit angle presets for cinematic verification',
+      icon: Icons.videocam,
+      colors: [Color(0xFF98FFD8), Color(0xFF2E8C6C)],
+    ),
   ];
 
   static const List<Map<String, String>> _timelineMilestones = [
@@ -5498,21 +5595,40 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   @override
   void initState() {
     super.initState();
+    _motionTabController = TabController(length: 4, vsync: this)
+      ..addListener(_handleMotionTabChanged);
     _cubeFloatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 4200),
     )..repeat(reverse: true);
     _flowController.addListener(_handleFlow);
+    _timelineController.addListener(_handleTimelineScroll);
   }
 
   @override
   void dispose() {
+    _motionTabController
+      ..removeListener(_handleMotionTabChanged)
+      ..dispose();
     _cubeFloatController.dispose();
     _flowController
       ..removeListener(_handleFlow)
       ..dispose();
+    _timelineController.removeListener(_handleTimelineScroll);
     _timelineController.dispose();
     super.dispose();
+  }
+
+  void _handleMotionTabChanged() {
+    if (!mounted) {
+      return;
+    }
+    final next = _motionTabController.index;
+    if (next != _motionTabIndex) {
+      setState(() {
+        _motionTabIndex = next;
+      });
+    }
   }
 
   void _handleFlow() {
@@ -5520,11 +5636,201 @@ class _MotionStudioPageState extends State<MotionStudioPage>
       return;
     }
     final page = _flowController.page ?? _flowController.initialPage.toDouble();
-    if ((page - _coverPage).abs() > 0.001) {
+    final focus = page.round().clamp(0, _coverItems.length - 1);
+    if ((page - _coverPage).abs() > 0.001 || focus != _coverFocus) {
       setState(() {
         _coverPage = page;
+        _coverFocus = focus;
       });
     }
+  }
+
+  void _jumpToCover(int index) {
+    final safe = index.clamp(0, _coverItems.length - 1);
+    _flowController.animateToPage(
+      safe,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _stepCover(int delta) {
+    _jumpToCover((_coverFocus + delta).clamp(0, _coverItems.length - 1));
+  }
+
+  void _handleTimelineScroll() {
+    if (!_timelineController.hasClients || !mounted) {
+      return;
+    }
+    final maxIndex = _timelineMilestones.length - 1;
+    final i = (_timelineController.offset / _timelineItemExtent)
+        .round()
+        .clamp(0, maxIndex);
+    if (i != _timelineFocusIndex) {
+      setState(() {
+        _timelineFocusIndex = i;
+      });
+    }
+  }
+
+  void _focusTimeline(int index, {bool animated = true}) {
+    if (_timelineMilestones.isEmpty) {
+      return;
+    }
+    final safe = index.clamp(0, _timelineMilestones.length - 1);
+    if (safe != _timelineFocusIndex && mounted) {
+      setState(() {
+        _timelineFocusIndex = safe;
+      });
+    }
+    if (!_timelineController.hasClients) {
+      return;
+    }
+    final target = (safe * _timelineItemExtent)
+        .toDouble()
+        .clamp(
+          0.0,
+          _timelineController.position.maxScrollExtent,
+        )
+        .toDouble();
+    if (animated) {
+      _timelineController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _timelineController.jumpTo(target);
+    }
+  }
+
+  String _tabLabel(int index) {
+    switch (index) {
+      case 0:
+        return 'Cube';
+      case 1:
+        return 'CoverFlow';
+      case 2:
+        return 'Parallax Grid';
+      default:
+        return 'Timeline';
+    }
+  }
+
+  String _tabUsage(int index) {
+    switch (index) {
+      case 0:
+        return 'Drag the cube surface to rotate all axes and inspect depth from any angle.';
+      case 1:
+        return 'Swipe cards left or right, tap a side card to center it, or use the bottom arrows for precise navigation.';
+      case 2:
+        return 'Drag anywhere in the grid to move the camera and observe per-layer parallax shift in real time.';
+      default:
+        return 'Scroll milestones vertically or drag the timeline scrubber to jump to a specific processing stage.';
+    }
+  }
+
+  String _styleLabel(_MotionVisualStyle style) {
+    switch (style) {
+      case _MotionVisualStyle.neon:
+        return 'Neon';
+      case _MotionVisualStyle.aurora:
+        return 'Aurora';
+      case _MotionVisualStyle.steel:
+        return 'Steel';
+    }
+  }
+
+  List<Color> _coverStyleColors(_MotionCoverSpec spec) {
+    switch (_visualStyle) {
+      case _MotionVisualStyle.neon:
+        return [
+          spec.colors.first.withValues(alpha: 0.96),
+          spec.colors.last.withValues(alpha: 0.92),
+        ];
+      case _MotionVisualStyle.aurora:
+        return [
+          Color.alphaBlend(
+            const Color(0xFF7AF8D8).withValues(alpha: 0.32),
+            spec.colors.first,
+          ),
+          Color.alphaBlend(
+            const Color(0xFF88B8FF).withValues(alpha: 0.42),
+            spec.colors.last,
+          ),
+        ];
+      case _MotionVisualStyle.steel:
+        return [
+          Color.alphaBlend(
+            const Color(0xFF9CB2D0).withValues(alpha: 0.4),
+            spec.colors.first,
+          ),
+          Color.alphaBlend(
+            const Color(0xFF3E556E).withValues(alpha: 0.5),
+            spec.colors.last,
+          ),
+        ];
+    }
+  }
+
+  List<Color> _timelineActiveColors() {
+    switch (_visualStyle) {
+      case _MotionVisualStyle.neon:
+        return const [Color(0xFF1B3D64), Color(0xFF123B4F)];
+      case _MotionVisualStyle.aurora:
+        return const [Color(0xFF214466), Color(0xFF215546)];
+      case _MotionVisualStyle.steel:
+        return const [Color(0xFF2A3645), Color(0xFF212D3A)];
+    }
+  }
+
+  List<Color> _timelineIdleColors() {
+    switch (_visualStyle) {
+      case _MotionVisualStyle.neon:
+        return const [Color(0xFF112640), Color(0xFF0F2036)];
+      case _MotionVisualStyle.aurora:
+        return const [Color(0xFF142D44), Color(0xFF17343B)];
+      case _MotionVisualStyle.steel:
+        return const [Color(0xFF172334), Color(0xFF19212D)];
+    }
+  }
+
+  Color _timelineAccent() {
+    switch (_visualStyle) {
+      case _MotionVisualStyle.neon:
+        return const Color(0xFF9EEBFF);
+      case _MotionVisualStyle.aurora:
+        return const Color(0xFFA5FFE1);
+      case _MotionVisualStyle.steel:
+        return const Color(0xFFD8E6FF);
+    }
+  }
+
+  Widget _styleChips() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      children: _MotionVisualStyle.values.map((style) {
+        final selected = _visualStyle == style;
+        return ChoiceChip(
+          label: Text(_styleLabel(style)),
+          selected: selected,
+          onSelected: (_) {
+            setState(() {
+              _visualStyle = style;
+            });
+          },
+        );
+      }).toList(),
+    );
+  }
+
+  void _setRealism(double value) {
+    final v = value.clamp(0.2, 1.0).toDouble();
+    setState(() {
+      _realism = v;
+    });
+    _globalMotionRealism.value = v;
   }
 
   Widget _buildCubeLab(_MotionTier tier) {
@@ -5602,43 +5908,383 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   }
 
   Widget _buildCoverFlowLab(_MotionTier tier) {
-    return SizedBox(
-      height: 250,
-      child: PageView.builder(
-        controller: _flowController,
-        itemCount: _coverItems.length,
-        itemBuilder: (context, i) {
-          final delta = (i - _coverPage).toDouble();
-          final absDelta = delta.abs().clamp(0.0, 1.8);
-          final scale = 1 - (absDelta * 0.16);
-          final rot = delta * (tier == _MotionTier.cinematic ? 0.55 : 0.34);
-          final z = (1 - absDelta) * (tier == _MotionTier.cinematic ? 34 : 18);
-          return Transform(
-            alignment: Alignment.center,
-            transform: Matrix4.identity()
-              ..setEntry(3, 2, tier == _MotionTier.cinematic ? 0.0022 : 0.0014)
-              ..translate(0.0, absDelta * 18, z)
-              ..rotateY(rot)
-              ..scale(scale, scale),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Card(
-                color: const Color(0xFF12233B),
-                child: Center(
-                  child: Text(
-                    _coverItems[i],
-                    style: const TextStyle(
-                      color: Color(0xFFE5F3FF),
-                      fontWeight: FontWeight.w700,
-                      fontSize: 16,
-                    ),
+    final maxDepth = tier == _MotionTier.cinematic
+        ? 1.45
+        : tier == _MotionTier.balanced
+            ? 1.25
+            : 1.12;
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF11243A),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+                color: const Color(0xFF7DD8FF).withValues(alpha: 0.24)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.swipe, color: Color(0xFF8FE1FF)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Swipe cards, tap any card to center, or use arrows for single-step navigation',
+                  style: TextStyle(
+                    color: const Color(0xFFDDF3FF)
+                        .withValues(alpha: tier == _MotionTier.low ? 0.86 : 1),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12.5,
                   ),
                 ),
               ),
+              const SizedBox(width: 8),
+              Text(
+                '${_coverFocus + 1}/${_coverItems.length}',
+                style: const TextStyle(
+                  color: Color(0xFF8FE8FF),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          margin: EdgeInsets.zero,
+          color: const Color(0xFF102235),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.palette_outlined,
+                    color: Color(0xFF9CEAFF), size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: _styleChips()),
+              ],
             ),
-          );
-        },
-      ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          margin: EdgeInsets.zero,
+          color: const Color(0xFF102235),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+            child: Row(
+              children: [
+                const Icon(Icons.layers, color: Color(0xFF9CEAFF), size: 18),
+                const SizedBox(width: 8),
+                const Text(
+                  'Depth',
+                  style: TextStyle(
+                    color: Color(0xFFCFEAFF),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Slider(
+                    value: _coverDepthBoost,
+                    min: 0.75,
+                    max: maxDepth,
+                    divisions: 14,
+                    onChanged: (v) {
+                      setState(() {
+                        _coverDepthBoost = v;
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _coverDepthBoost.toStringAsFixed(2),
+                  style: const TextStyle(
+                    color: Color(0xFF8FE8FF),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 252,
+          child: PageView.builder(
+            controller: _flowController,
+            physics: const BouncingScrollPhysics(),
+            itemCount: _coverItems.length,
+            itemBuilder: (context, i) {
+              final spec = _coverItems[i];
+              return AnimatedBuilder(
+                animation: _cubeFloatController,
+                builder: (context, _) {
+                  final delta = (i - _coverPage).toDouble();
+                  final absDelta = delta.abs().clamp(0.0, 1.8);
+                  final inertiaPow = 1.02 + (_realism * 0.34);
+                  final lagDelta =
+                      (delta < 0 ? -1.0 : 1.0) * math.pow(absDelta, inertiaPow);
+                  final focus = (1 - (absDelta * 0.45)).clamp(0.0, 1.0);
+                  final scale = (1 - (absDelta * 0.14)).clamp(0.75, 1.0);
+                  final rot = lagDelta *
+                      (tier == _MotionTier.cinematic ? 0.62 : 0.42) *
+                      _coverDepthBoost *
+                      (0.88 + (_realism * 0.2));
+                  final z = (1 - absDelta) *
+                      (tier == _MotionTier.cinematic ? 42 : 24) *
+                      _coverDepthBoost;
+                  final styleColors = _coverStyleColors(spec);
+                  final sweep = ((_cubeFloatController.value *
+                              (0.96 - (_realism * 0.54))) +
+                          (i * 0.12) +
+                          (delta * 0.1)) %
+                      1.0;
+                  final sweepAlign = -1.24 + (sweep * 2.48);
+                  final sheenShift = math.sin((((_cubeFloatController.value *
+                                      (1.0 - (_realism * 0.5))) +
+                                  (i * 0.08)) *
+                              math.pi *
+                              2) +
+                          (delta * 0.22)) *
+                      0.05;
+                  return Transform(
+                    alignment: Alignment.center,
+                    transform: Matrix4.identity()
+                      ..setEntry(3, 2,
+                          tier == _MotionTier.cinematic ? 0.0027 : 0.00175)
+                      ..translate(lagDelta * 8, absDelta * 20, z)
+                      ..rotateY(rot)
+                      ..scale(scale, scale),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: GestureDetector(
+                        onTap: () => _jumpToCover(i),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutCubic,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(18),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: styleColors,
+                            ),
+                            border: Border.all(
+                              color: const Color(0xFFE7FAFF)
+                                  .withValues(alpha: 0.24 + (focus * 0.34)),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: styleColors.first
+                                    .withValues(alpha: 0.24 + (focus * 0.26)),
+                                blurRadius: 26,
+                                spreadRadius: 1.2,
+                                offset: const Offset(0, 12),
+                              ),
+                            ],
+                          ),
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              Positioned(
+                                right: -22,
+                                top: -18,
+                                child: Container(
+                                  width: 110,
+                                  height: 110,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Colors.white.withValues(
+                                        alpha: 0.12 + (focus * 0.12)),
+                                  ),
+                                ),
+                              ),
+                              Positioned(
+                                left: 14,
+                                top: 14,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 5),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(999),
+                                    color: const Color(0xFF08182C)
+                                        .withValues(alpha: 0.24),
+                                  ),
+                                  child: Text(
+                                    'Scene ${i + 1}',
+                                    style: const TextStyle(
+                                      color: Color(0xFFE8F7FF),
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(18),
+                                      gradient: LinearGradient(
+                                        begin: Alignment(-0.9, -1 + sheenShift),
+                                        end: Alignment(0.85, 1),
+                                        colors: [
+                                          Colors.white.withValues(
+                                              alpha: 0.18 + (focus * 0.07)),
+                                          Colors.white.withValues(alpha: 0.05),
+                                          Colors.black.withValues(alpha: 0.18),
+                                        ],
+                                        stops: const [0.0, 0.46, 1.0],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: Align(
+                                    alignment: Alignment(sweepAlign, -0.24),
+                                    child: Transform.rotate(
+                                      angle: -0.6 + (delta * -0.03),
+                                      child: Container(
+                                        width: 84,
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(48),
+                                          gradient: LinearGradient(
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                            colors: [
+                                              Colors.white
+                                                  .withValues(alpha: 0.0),
+                                              Colors.white.withValues(
+                                                  alpha: 0.32 + (focus * 0.14)),
+                                              Colors.white
+                                                  .withValues(alpha: 0.0),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Positioned(
+                                left: 26,
+                                right: 26,
+                                bottom: -20,
+                                child: IgnorePointer(
+                                  child: Opacity(
+                                    opacity: (0.22 + (focus * 0.18)) *
+                                        (1 - (_realism * 0.28)),
+                                    child: Transform.scale(
+                                      scaleX: (1.0 - (absDelta * 0.12)) +
+                                          (_realism * 0.08),
+                                      child: Container(
+                                        height: 18 + (_realism * 6),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                          gradient: RadialGradient(
+                                            colors: [
+                                              Colors.white.withValues(
+                                                  alpha: 0.24 *
+                                                      (1 - (_realism * 0.25))),
+                                              Colors.transparent,
+                                            ],
+                                            stops: const [0.0, 1.0],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(18, 42, 18, 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(spec.icon,
+                                        size: 42,
+                                        color: const Color(0xFF021427)
+                                            .withValues(alpha: 0.86)),
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      spec.title,
+                                      style: const TextStyle(
+                                        color: Color(0xFF061C34),
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 18,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      spec.subtitle,
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Color(0xFF0D2A47),
+                                        fontWeight: FontWeight.w600,
+                                        height: 1.24,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            IconButton(
+              onPressed: _coverFocus > 0 ? () => _stepCover(-1) : null,
+              icon: const Icon(Icons.chevron_left_rounded),
+            ),
+            Expanded(
+              child: Wrap(
+                spacing: 6,
+                alignment: WrapAlignment.center,
+                children: List.generate(_coverItems.length, (i) {
+                  final active = i == _coverFocus;
+                  return GestureDetector(
+                    onTap: () => _jumpToCover(i),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      width: active ? 24 : 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(99),
+                        color: active
+                            ? const Color(0xFF8EE8FF)
+                            : const Color(0xFF8EE8FF).withValues(alpha: 0.28),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+            IconButton(
+              onPressed: _coverFocus < _coverItems.length - 1
+                  ? () => _stepCover(1)
+                  : null,
+              icon: const Icon(Icons.chevron_right_rounded),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -5709,134 +6355,286 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   }
 
   Widget _buildTimelineLab(_MotionTier tier) {
-    return SizedBox(
-      height: 320,
-      child: Scrollbar(
-        controller: _timelineController,
-        thumbVisibility: true,
-        child: ListView.builder(
-          controller: _timelineController,
-          physics: const BouncingScrollPhysics(),
-          itemCount: _timelineMilestones.length,
-          itemBuilder: (context, i) {
-            final m = _timelineMilestones[i];
-            final delay = i * (tier == _MotionTier.cinematic ? 60 : 36);
-            return _AnimatedFadeSlide(
-              delayMs: delay,
-              beginOffset: const Offset(0.06, 0),
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF112640),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: const Color(0xFF8DDFFF).withValues(alpha: 0.28)),
+    final maxIndex = _timelineMilestones.length - 1;
+    final progress = maxIndex <= 0 ? 1.0 : _timelineFocusIndex / maxIndex;
+    final accent = _timelineAccent();
+    final activeColors = _timelineActiveColors();
+    final idleColors = _timelineIdleColors();
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF11243A),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+                color: const Color(0xFF88DBFF).withValues(alpha: 0.26)),
+          ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.tune, color: Color(0xFF9AE7FF)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Use slider or scroll to scrub through pipeline milestones',
+                      style: TextStyle(
+                        color: const Color(0xFFE7F7FF).withValues(
+                            alpha: tier == _MotionTier.low ? 0.86 : 1),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12.5,
+                      ),
+                    ),
                   ),
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor:
-                          const Color(0xFF79DEFF).withValues(alpha: 0.22),
-                      child: Text(
-                        '${i + 1}',
-                        style: const TextStyle(
-                          color: Color(0xFFDFF5FF),
-                          fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  Text(
+                    '${_timelineFocusIndex + 1}/${_timelineMilestones.length}',
+                    style: const TextStyle(
+                      color: Color(0xFF8FE8FF),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(99),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 6,
+                  backgroundColor: const Color(0xFF233A57),
+                  valueColor: AlwaysStoppedAnimation<Color>(accent),
+                ),
+              ),
+              Slider(
+                min: 0,
+                max: maxIndex.toDouble(),
+                divisions: maxIndex <= 0 ? 1 : maxIndex,
+                value: _timelineFocusIndex.toDouble(),
+                onChanged: (v) {
+                  _focusTimeline(v.round(), animated: false);
+                },
+                onChangeEnd: (v) {
+                  _focusTimeline(v.round());
+                },
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        Expanded(
+          child: Scrollbar(
+            controller: _timelineController,
+            thumbVisibility: true,
+            child: ListView.builder(
+              controller: _timelineController,
+              physics: const BouncingScrollPhysics(),
+              itemExtent: _timelineItemExtent,
+              itemCount: _timelineMilestones.length,
+              itemBuilder: (context, i) {
+                final m = _timelineMilestones[i];
+                final active = i == _timelineFocusIndex;
+                final delay = i * (tier == _MotionTier.cinematic ? 48 : 26);
+                return _AnimatedFadeSlide(
+                  delayMs: delay,
+                  beginOffset: const Offset(0.06, 0),
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () => _focusTimeline(i),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(14),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: active ? activeColors : idleColors,
+                            ),
+                            border: Border.all(
+                              color: active
+                                  ? accent
+                                  : accent.withValues(alpha: 0.28),
+                              width: active ? 1.35 : 1,
+                            ),
+                            boxShadow: active
+                                ? [
+                                    BoxShadow(
+                                      color: accent.withValues(alpha: 0.24),
+                                      blurRadius: 20,
+                                      spreadRadius: 0.4,
+                                      offset: const Offset(0, 8),
+                                    ),
+                                  ]
+                                : null,
+                          ),
+                          child: ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: active
+                                  ? accent.withValues(alpha: 0.4)
+                                  : accent.withValues(alpha: 0.22),
+                              child: Text(
+                                '${i + 1}',
+                                style: const TextStyle(
+                                  color: Color(0xFFDFF5FF),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            title: Text(
+                              m['title']!,
+                              style: TextStyle(
+                                color: const Color(0xFFE6F4FF),
+                                fontWeight:
+                                    active ? FontWeight.w800 : FontWeight.w700,
+                              ),
+                            ),
+                            subtitle: Text(
+                              m['detail']!,
+                              style: const TextStyle(color: Color(0xFFBFD5EE)),
+                            ),
+                            trailing: Icon(
+                              active
+                                  ? Icons.play_circle_fill_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              color: active ? accent : const Color(0xFF5D86B1),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                    title: Text(
-                      m['title']!,
-                      style: const TextStyle(
-                        color: Color(0xFFE6F4FF),
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    subtitle: Text(
-                      m['detail']!,
-                      style: const TextStyle(color: Color(0xFFBFD5EE)),
-                    ),
                   ),
-                ),
-              ),
-            );
-          },
+                );
+              },
+            ),
+          ),
         ),
-      ),
+      ],
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final tier = _motionTierFor(context);
-    return DefaultTabController(
-      length: 4,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('3D Motion Studio'),
-          bottom: const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Cube'),
-              Tab(text: 'CoverFlow'),
-              Tab(text: 'Parallax Grid'),
-              Tab(text: 'Timeline'),
-            ],
-          ),
-        ),
-        body: Column(
-          children: [
-            const SizedBox(height: 10),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: _CinematicFaceHeader(
-                title: 'Interactive Motion Lab',
-                subtitle:
-                    'Use drag and swipe to test depth and cinematic behavior',
-                tags: [
-                  _HeaderTag(
-                    icon: Icons.auto_awesome_motion,
-                    label: tier == _MotionTier.cinematic
-                        ? 'Cinematic'
-                        : tier == _MotionTier.balanced
-                            ? 'Balanced'
-                            : 'Reduced',
-                    tint: const Color(0xFF8DE2FF),
-                  ),
-                  const _HeaderTag(
-                    icon: Icons.view_in_ar,
-                    label: 'Real-time 3D',
-                    tint: Color(0xFF91F0CA),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: TabBarView(
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _buildCubeLab(tier),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _buildCoverFlowLab(tier),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _buildParallaxGridLab(tier),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _buildTimelineLab(tier),
-                  ),
-                ],
-              ),
-            ),
+    final labs = [
+      _buildCubeLab(tier),
+      _buildCoverFlowLab(tier),
+      _buildParallaxGridLab(tier),
+      _buildTimelineLab(tier),
+    ];
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('3D Motion Studio'),
+        bottom: TabBar(
+          controller: _motionTabController,
+          isScrollable: true,
+          onTap: (i) {
+            if (i != _motionTabIndex) {
+              setState(() {
+                _motionTabIndex = i;
+              });
+            }
+          },
+          tabs: const [
+            Tab(text: 'Cube'),
+            Tab(text: 'CoverFlow'),
+            Tab(text: 'Parallax Grid'),
+            Tab(text: 'Timeline'),
           ],
         ),
+      ),
+      body: Column(
+        children: [
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: _CinematicFaceHeader(
+              title: 'Interactive Motion Lab',
+              subtitle: _tabUsage(_motionTabIndex),
+              tags: [
+                _HeaderTag(
+                  icon: Icons.auto_awesome_motion,
+                  label: tier == _MotionTier.cinematic
+                      ? 'Cinematic'
+                      : tier == _MotionTier.balanced
+                          ? 'Balanced'
+                          : 'Reduced',
+                  tint: const Color(0xFF8DE2FF),
+                ),
+                _HeaderTag(
+                  icon: Icons.touch_app,
+                  label: _tabLabel(_motionTabIndex),
+                  tint: const Color(0xFF91F0CA),
+                ),
+                _HeaderTag(
+                  icon: Icons.palette,
+                  label: _styleLabel(_visualStyle),
+                  tint: const Color(0xFFFFD89B),
+                ),
+                _HeaderTag(
+                  icon: Icons.auto_awesome,
+                  label: _realismPresetLabel(_realism),
+                  tint: const Color(0xFFB1D2FF),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Card(
+              margin: EdgeInsets.zero,
+              color: const Color(0xFF102235),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+                child: Row(
+                  children: [
+                    const Icon(Icons.auto_awesome,
+                        size: 18, color: Color(0xFF9ED8FF)),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Realism',
+                      style: TextStyle(
+                        color: Color(0xFFCFEAFF),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Slider(
+                        value: _realism,
+                        min: 0.2,
+                        max: 1.0,
+                        divisions: 16,
+                        onChanged: _setRealism,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _realismPresetLabel(_realism),
+                      style: const TextStyle(
+                        color: Color(0xFF9DEBFF),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: IndexedStack(index: _motionTabIndex, children: labs),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -5864,7 +6662,7 @@ class FeatureForgePage extends StatelessWidget {
             child: _CinematicFaceHeader(
               title: 'What Feature Forge 3D Does',
               subtitle:
-                  'Feature Forge is the scenario deck for generation and analytics modules. For interactive 3D camera labs, use 3D Motion Studio.',
+                  'Feature Forge 3D is for testing many generation, analytics, and operations scenarios fast. Use 3D Motion Studio for camera motion experiments.',
               tags: const [
                 _HeaderTag(
                   icon: Icons.dashboard_customize,
@@ -5893,6 +6691,40 @@ class FeatureForgePage extends StatelessWidget {
                 },
                 icon: const Icon(Icons.view_in_ar),
                 label: const Text('Open 3D Motion Studio'),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF132742),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: const Color(0xFF87DEFF).withValues(alpha: 0.24),
+                ),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Motive',
+                    style: TextStyle(
+                      color: Color(0xFFDFF5FF),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  Text(
+                    'Use this page to launch many cards quickly and stress-test tool modules under diverse scenarios. It is a high-volume scenario launcher, not a camera-motion sandbox.',
+                    style: TextStyle(
+                      color: Color(0xFFBDD8F0),
+                      height: 1.3,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -6067,21 +6899,21 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
 }
 
 enum _RapidDeckFxMode {
+  roll,
   shape,
   animal,
   plane,
-  roll,
 }
 
 _RapidDeckFxMode _fxModeForCard(int index, _RapidRarity rarity) {
-  final rarityOffset = _rarityOffsetForRapidRarity(rarity);
-  final modes = [
-    _RapidDeckFxMode.shape,
-    _RapidDeckFxMode.animal,
-    _RapidDeckFxMode.plane,
-    _RapidDeckFxMode.roll,
-  ];
-  return modes[(index + rarityOffset) % modes.length];
+  return switch (rarity) {
+    _RapidRarity.common => _RapidDeckFxMode.roll,
+    _RapidRarity.legendary => _RapidDeckFxMode.plane,
+    _RapidRarity.rare =>
+      index.isEven ? _RapidDeckFxMode.shape : _RapidDeckFxMode.animal,
+    _RapidRarity.epic =>
+      index.isEven ? _RapidDeckFxMode.animal : _RapidDeckFxMode.shape,
+  };
 }
 
 int _rarityOffsetForRapidRarity(_RapidRarity rarity) {
@@ -6096,6 +6928,16 @@ int _rarityOffsetForRapidRarity(_RapidRarity rarity) {
 int _modeSlotForCard(int index, _RapidRarity rarity) {
   final rarityOffset = _rarityOffsetForRapidRarity(rarity);
   return (index + rarityOffset) ~/ _RapidDeckFxMode.values.length;
+}
+
+double _rapidSeed01(int index, int salt) {
+  final v = math.sin(((index + 1) * 12.9898) + (salt * 78.233)) * 43758.5453;
+  return v - v.floorToDouble();
+}
+
+int _rapidIndex(int index, int salt, int modulo) {
+  final seed = ((index + 1) * 73) + (salt * 29);
+  return seed % modulo;
 }
 
 enum _RapidRollVariant {
@@ -6116,6 +6958,14 @@ enum _RapidShapeVariant {
   shield,
   ticket,
   capsule,
+  trapezoid,
+  kite,
+  clover,
+  rhombus,
+  arrow,
+  badge,
+  heart,
+  leaf,
 }
 
 enum _RapidAnimalVariant {
@@ -6125,6 +6975,16 @@ enum _RapidAnimalVariant {
   wolf,
   panther,
   lynx,
+  horse,
+  deer,
+  rabbit,
+  bear,
+  tiger,
+  lion,
+  goat,
+  camel,
+  zebra,
+  elephant,
 }
 
 enum _RapidFlightVariant {
@@ -6136,34 +6996,34 @@ enum _RapidFlightVariant {
   west,
   north,
   south,
+  highArcRight,
+  highArcLeft,
+  lowSkimRight,
+  lowSkimLeft,
 }
 
 _RapidRollVariant _rollVariantForCard(int index, _RapidRarity rarity) {
-  final offset = _rarityOffsetForRapidRarity(rarity);
-  final slot = _modeSlotForCard(index, rarity);
+  final offset = _rarityOffsetForRapidRarity(rarity) * 2;
   return _RapidRollVariant
-      .values[((slot * 5) + offset) % _RapidRollVariant.values.length];
+      .values[_rapidIndex(index + offset, 7, _RapidRollVariant.values.length)];
 }
 
 _RapidShapeVariant _shapeVariantForCard(int index, _RapidRarity rarity) {
   final offset = _rarityOffsetForRapidRarity(rarity) * 2;
-  final slot = _modeSlotForCard(index, rarity);
-  return _RapidShapeVariant
-      .values[((slot * 3) + offset) % _RapidShapeVariant.values.length];
+  return _RapidShapeVariant.values[
+      _rapidIndex(index + offset, 11, _RapidShapeVariant.values.length)];
 }
 
 _RapidAnimalVariant _animalVariantForCard(int index, _RapidRarity rarity) {
-  final offset = _rarityOffsetForRapidRarity(rarity);
-  final slot = _modeSlotForCard(index, rarity);
-  return _RapidAnimalVariant
-      .values[((slot * 5) + offset) % _RapidAnimalVariant.values.length];
+  final offset = _rarityOffsetForRapidRarity(rarity) * 3;
+  return _RapidAnimalVariant.values[
+      _rapidIndex(index + offset, 17, _RapidAnimalVariant.values.length)];
 }
 
 _RapidFlightVariant _flightVariantForCard(int index, _RapidRarity rarity) {
   final offset = _rarityOffsetForRapidRarity(rarity) * 2;
-  final slot = _modeSlotForCard(index, rarity);
-  return _RapidFlightVariant
-      .values[((slot * 3) + offset) % _RapidFlightVariant.values.length];
+  return _RapidFlightVariant.values[
+      _rapidIndex(index + offset, 23, _RapidFlightVariant.values.length)];
 }
 
 String _rollVariantLabel(_RapidRollVariant variant) {
@@ -6187,6 +7047,14 @@ String _shapeVariantLabel(_RapidShapeVariant variant) {
     _RapidShapeVariant.shield => 'Shield Form',
     _RapidShapeVariant.ticket => 'Ticket Form',
     _RapidShapeVariant.capsule => 'Capsule Form',
+    _RapidShapeVariant.trapezoid => 'Trapezoid Form',
+    _RapidShapeVariant.kite => 'Kite Form',
+    _RapidShapeVariant.clover => 'Clover Form',
+    _RapidShapeVariant.rhombus => 'Rhombus Form',
+    _RapidShapeVariant.arrow => 'Arrow Form',
+    _RapidShapeVariant.badge => 'Badge Form',
+    _RapidShapeVariant.heart => 'Heart Form',
+    _RapidShapeVariant.leaf => 'Leaf Form',
   };
 }
 
@@ -6198,6 +7066,16 @@ String _animalVariantLabel(_RapidAnimalVariant variant) {
     _RapidAnimalVariant.wolf => 'Wolf Silhouette',
     _RapidAnimalVariant.panther => 'Panther Silhouette',
     _RapidAnimalVariant.lynx => 'Lynx Silhouette',
+    _RapidAnimalVariant.horse => 'Horse Silhouette',
+    _RapidAnimalVariant.deer => 'Deer Silhouette',
+    _RapidAnimalVariant.rabbit => 'Rabbit Silhouette',
+    _RapidAnimalVariant.bear => 'Bear Silhouette',
+    _RapidAnimalVariant.tiger => 'Tiger Silhouette',
+    _RapidAnimalVariant.lion => 'Lion Silhouette',
+    _RapidAnimalVariant.goat => 'Goat Silhouette',
+    _RapidAnimalVariant.camel => 'Camel Silhouette',
+    _RapidAnimalVariant.zebra => 'Zebra Silhouette',
+    _RapidAnimalVariant.elephant => 'Elephant Silhouette',
   };
 }
 
@@ -6211,6 +7089,10 @@ String _flightVariantLabel(_RapidFlightVariant variant) {
     _RapidFlightVariant.west => 'West',
     _RapidFlightVariant.north => 'North',
     _RapidFlightVariant.south => 'South',
+    _RapidFlightVariant.highArcRight => 'High Arc Right',
+    _RapidFlightVariant.highArcLeft => 'High Arc Left',
+    _RapidFlightVariant.lowSkimRight => 'Low Skim Right',
+    _RapidFlightVariant.lowSkimLeft => 'Low Skim Left',
   };
 }
 
@@ -6224,6 +7106,10 @@ Offset _flightDirectionForVariant(_RapidFlightVariant variant) {
     _RapidFlightVariant.west => const Offset(-1, -0.1),
     _RapidFlightVariant.north => const Offset(0.05, -1),
     _RapidFlightVariant.south => const Offset(0.05, 1),
+    _RapidFlightVariant.highArcRight => const Offset(0.84, -1.0),
+    _RapidFlightVariant.highArcLeft => const Offset(-0.84, -1.0),
+    _RapidFlightVariant.lowSkimRight => const Offset(1.0, 0.22),
+    _RapidFlightVariant.lowSkimLeft => const Offset(-1.0, 0.22),
   };
 }
 
@@ -6253,9 +7139,11 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
   @override
   void initState() {
     super.initState();
+    final realism = _globalMotionRealism.value;
+    final durationMs = (3600 + (realism * 1600)).round();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2100),
+      duration: Duration(milliseconds: durationMs),
     )..forward();
   }
 
@@ -6283,13 +7171,21 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
     final animalVariant = _animalVariantForCard(widget.index, widget.rarity);
     final flightVariant = _flightVariantForCard(widget.index, widget.rarity);
     final rollVariant = _rollVariantForCard(widget.index, widget.rarity);
+    final seedA = _rapidSeed01(widget.index, 31);
+    final seedB = _rapidSeed01(widget.index, 67);
+    final seedC = _rapidSeed01(widget.index, 97);
+    final variantSeed = _rapidSeed01(widget.index, 131);
+    final cardCode = widget.index + 1;
 
     return Material(
       color: Colors.transparent,
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, _) {
-          final t = Curves.easeInOutCubic.transform(_controller.value);
+          final realism = _globalMotionRealism.value;
+          final inertiaScale = 0.82 + (realism * 0.5);
+          final specSpeed = 1.04 - (realism * 0.58);
+          final t = Curves.easeInOutQuart.transform(_controller.value);
           final pulse = Curves.easeInOutCubic
               .transform((1 - ((t - 0.5).abs() * 2)).clamp(0.0, 1.0));
           double rotX = 0;
@@ -6298,7 +7194,13 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
           double tx = 0;
           double ty = 0;
           double clipMorph = 0;
+          double rollProgress = 0;
+          bool rollBackwards = false;
           double cardScale = 1 + (0.15 * pulse);
+          double depthZ = 0;
+          double ambientPitch = 0;
+          double ambientYaw = 0;
+          double specularSweep = (t + (variantSeed * 0.4)) % 1.0;
           double planeFoldProgress = 0;
           bool frontFacing = true;
           IconData centerIcon = widget.icon;
@@ -6308,43 +7210,68 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
 
           switch (widget.mode) {
             case _RapidDeckFxMode.roll:
-              final roll = Curves.easeInOutCubic.transform(t);
-              final eased = Curves.easeInOutCubic.transform(roll);
+              final roll =
+                  Curves.easeInOutCubic.transform((t / 0.84).clamp(0.0, 1.0));
+              final settle = Curves.easeOutCubic
+                  .transform(((t - 0.84) / 0.16).clamp(0.0, 1.0));
+              final eased = (roll * (1 - settle)).clamp(0.0, 1.0);
+              final dir = switch (rollVariant) {
+                _RapidRollVariant.horizontalFront => 1.0,
+                _RapidRollVariant.horizontalBack => -1.0,
+                _RapidRollVariant.verticalFront => 1.0,
+                _RapidRollVariant.verticalBack => -1.0,
+                _RapidRollVariant.diagonalFront => 1.0,
+                _RapidRollVariant.diagonalBack => -1.0,
+              };
+              rollBackwards = dir < 0;
               switch (rollVariant) {
                 case _RapidRollVariant.horizontalFront:
-                  rotX = eased * (math.pi * 2);
+                  rotX = eased * (math.pi * (0.84 + (seedA * 0.26)));
                   break;
                 case _RapidRollVariant.horizontalBack:
-                  rotX = -eased * (math.pi * 2);
+                  rotX = -eased * (math.pi * (0.84 + (seedA * 0.26)));
                   break;
                 case _RapidRollVariant.verticalFront:
-                  rotY = eased * (math.pi * 2);
+                  rotY = eased * (math.pi * (0.84 + (seedB * 0.24)));
                   break;
                 case _RapidRollVariant.verticalBack:
-                  rotY = -eased * (math.pi * 2);
+                  rotY = -eased * (math.pi * (0.84 + (seedB * 0.24)));
                   break;
                 case _RapidRollVariant.diagonalFront:
-                  rotX = eased * (math.pi * 1.45);
-                  rotY = eased * (math.pi * 1.35);
-                  rotZ = eased * (math.pi * 0.22);
+                  rotX = eased * (math.pi * (0.62 + (seedA * 0.2)));
+                  rotY = eased * (math.pi * (0.58 + (seedB * 0.2)));
+                  rotZ = eased * (math.pi * (0.12 + (seedC * 0.1)));
                   break;
                 case _RapidRollVariant.diagonalBack:
-                  rotX = -eased * (math.pi * 1.45);
-                  rotY = -eased * (math.pi * 1.35);
-                  rotZ = -eased * (math.pi * 0.22);
+                  rotX = -eased * (math.pi * (0.62 + (seedA * 0.2)));
+                  rotY = -eased * (math.pi * (0.58 + (seedB * 0.2)));
+                  rotZ = -eased * (math.pi * (0.12 + (seedC * 0.1)));
                   break;
               }
-              ty = -math.sin(eased * math.pi) * 14;
+              tx = (rollBackwards ? -1 : 1) * 18 * eased;
+              ty = -6 - (math.sin(eased * math.pi) * 10);
+              cardScale = 1 + (0.06 * eased);
+              depthZ = 16 * eased * inertiaScale;
+              ambientYaw = (rollBackwards ? -1 : 1) *
+                  (0.04 + (seedA * 0.04)) *
+                  eased *
+                  inertiaScale;
+              specularSweep = ((eased * (0.86 - (realism * 0.34)) * specSpeed) +
+                      (variantSeed * 0.16))
+                  .clamp(0.0, 1.0);
+              rollProgress = eased;
               final primary = rotY.abs() > rotX.abs() ? rotY : rotX;
               frontFacing = math.cos(primary) >= 0;
               centerIcon = frontFacing
                   ? Icons.crop_portrait_rounded
                   : Icons.flip_to_back_rounded;
-              variantLabel = _rollVariantLabel(rollVariant);
+              variantLabel =
+                  'Paper Roll - ${_rollVariantLabel(rollVariant)} - #$cardCode';
               steps = const [
                 'Hold card flat',
-                'Start edge roll',
-                'Pass through full turn',
+                'Start paper curl',
+                'Roll sheet slowly',
+                'Open and settle',
                 'Settle to origin',
               ];
               stepIndex = (roll * (steps.length - 1))
@@ -6353,21 +7280,33 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
               break;
             case _RapidDeckFxMode.shape:
               clipMorph = pulse;
-              final wobble = math.sin(t * math.pi * 2);
-              rotX = wobble * 0.22 * pulse;
-              rotY = math.sin((t * math.pi * 2) + (widget.index * 0.7)) *
-                  0.28 *
+              final wobble = math.sin((t * math.pi * 2) + (seedA * 3.2));
+              rotX = wobble * (0.18 + (seedA * 0.08)) * pulse;
+              rotY = math.sin((t * math.pi * 2.4) + (seedB * 5.2)) *
+                  (0.2 + (seedB * 0.12)) *
                   pulse;
-              rotZ = math.sin((t * math.pi * 2) + (widget.index * 0.35)) *
-                  0.11 *
+              rotZ = math.sin((t * math.pi * 2.1) + (seedC * 4.7)) *
+                  (0.08 + (seedC * 0.06)) *
                   pulse;
-              ty = -18 * pulse;
+              ty = -14 * pulse;
+              depthZ = 20 * pulse * inertiaScale;
+              ambientPitch = math.sin((t * math.pi * 2) + (seedB * 4.8)) *
+                  0.06 *
+                  pulse *
+                  inertiaScale;
+              ambientYaw = math.sin((t * math.pi * 2) + (seedA * 4.1)) *
+                  0.05 *
+                  pulse *
+                  inertiaScale;
+              specularSweep =
+                  ((t * (0.54 * specSpeed)) + (variantSeed * 0.3)) % 1.0;
               centerIcon = Icons.category_rounded;
-              variantLabel = _shapeVariantLabel(shapeVariant);
+              variantLabel =
+                  '${_shapeVariantLabel(shapeVariant)} - S-$cardCode';
               steps = const [
                 'Card frame stabilized',
                 'Silhouette carved',
-                'Shape rotation pass',
+                '3D shape morph pass',
                 'Return to base card',
               ];
               stepIndex =
@@ -6375,21 +7314,38 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
               break;
             case _RapidDeckFxMode.animal:
               clipMorph = pulse;
-              final stride = math.sin(t * math.pi * 3.2);
-              tx = stride * 8 * pulse;
-              ty = -12 * pulse + (math.sin(t * math.pi * 2).abs() * 5 * pulse);
-              rotY = math.sin((t * math.pi * 2) + (widget.index * 0.45)) *
-                  0.24 *
+              final stride = math.sin((t * math.pi * 2.2) + (seedA * 6));
+              tx = stride * (6 + (seedB * 6)) * pulse;
+              ty = -9 * pulse +
+                  (math.sin((t * math.pi * 2.1) + seedC).abs() * 6 * pulse);
+              rotX = math.sin((t * math.pi * 1.8) + (seedA * 3.1)) *
+                  (0.12 + (seedA * 0.08)) *
                   pulse;
-              rotZ = math.sin((t * math.pi * 2.3) + (widget.index * 0.3)) *
-                  0.08 *
+              rotY = math.sin((t * math.pi * 2.2) + (seedB * 4.5)) *
+                  (0.2 + (seedB * 0.12)) *
                   pulse;
+              rotZ = math.sin((t * math.pi * 1.9) + (seedC * 3.4)) *
+                  (0.07 + (seedC * 0.05)) *
+                  pulse;
+              cardScale = 1 + (0.08 * pulse);
+              depthZ = 24 * pulse * inertiaScale;
+              ambientPitch = math.sin((t * math.pi * 2.4) + (seedC * 3.2)) *
+                  0.07 *
+                  pulse *
+                  inertiaScale;
+              ambientYaw = math.sin((t * math.pi * 2.2) + (seedA * 4.6)) *
+                  0.06 *
+                  pulse *
+                  inertiaScale;
+              specularSweep =
+                  ((t * (0.7 * specSpeed)) + (variantSeed * 0.26)) % 1.0;
               centerIcon = Icons.pets_rounded;
-              variantLabel = _animalVariantLabel(animalVariant);
+              variantLabel =
+                  '${_animalVariantLabel(animalVariant)} - A-$cardCode';
               steps = const [
                 'Body silhouette traced',
                 'Head and tail formed',
-                'Animal motion pass',
+                '3D animal motion pass',
                 'Return to base card',
               ];
               stepIndex =
@@ -6397,52 +7353,74 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
               break;
             case _RapidDeckFxMode.plane:
               final fold =
-                  Curves.easeOutCubic.transform((t / 0.45).clamp(0.0, 1.0));
+                  Curves.easeInOutCubic.transform((t / 0.68).clamp(0.0, 1.0));
               final fly = Curves.easeOutCubic
-                  .transform(((t - 0.45) / 0.3).clamp(0.0, 1.0));
+                  .transform(((t - 0.68) / 0.2).clamp(0.0, 1.0));
               final ret = Curves.easeInOutCubic
-                  .transform(((t - 0.75) / 0.25).clamp(0.0, 1.0));
+                  .transform(((t - 0.88) / 0.12).clamp(0.0, 1.0));
               final dir = _flightDirectionForVariant(flightVariant);
               clipMorph = (fold * (1 - ret)).clamp(0.0, 1.0);
               final travel = (fly * (1 - ret)).clamp(0.0, 1.0);
-              tx = dir.dx * 210 * travel;
-              ty = (dir.dy * 145 * travel) - (28 * travel);
-              rotY = dir.dx * 0.56 * clipMorph;
-              rotX = -dir.dy * 0.42 * clipMorph;
-              rotZ = (dir.dx * 0.22 + dir.dy * 0.09) * travel;
-              cardScale = 1 + (0.12 * clipMorph);
+              tx = dir.dx * (132 + (seedA * 42)) * travel;
+              ty = (dir.dy * (98 + (seedB * 32)) * travel) - (20 * travel);
+              rotY = dir.dx * (0.38 + (0.22 * clipMorph));
+              rotX = -dir.dy * (0.28 + (0.22 * clipMorph));
+              rotZ = (dir.dx * 0.16 + dir.dy * 0.08) * (0.2 + (0.8 * travel));
+              cardScale = 1 + (0.1 * clipMorph);
+              depthZ = ((28 * travel) + (10 * clipMorph)) * inertiaScale;
+              ambientPitch = -dir.dy * 0.08 * clipMorph * inertiaScale;
+              ambientYaw = dir.dx * 0.08 * clipMorph * inertiaScale;
+              specularSweep = ((t * (0.86 * specSpeed)) + (variantSeed * 0.36))
+                  .clamp(0.0, 1.0);
               planeFoldProgress = fold;
-              centerIcon = t < 0.6
+              centerIcon = t < 0.78
                   ? Icons.flight_land_rounded
                   : Icons.flight_takeoff_rounded;
-              variantLabel = '${_flightVariantLabel(flightVariant)} Flight';
+              variantLabel =
+                  '${_flightVariantLabel(flightVariant)} Flight - P-$cardCode';
               steps = const [
-                'Fold wing one',
-                'Fold wing two',
+                'Fold center line',
+                'Fold left wing',
+                'Fold right wing',
                 'Lock nose',
                 'Launch and glide',
                 'Return to deck',
               ];
-              if (t < 0.18) {
+              if (t < 0.12) {
                 stepIndex = 0;
-              } else if (t < 0.34) {
+              } else if (t < 0.24) {
                 stepIndex = 1;
-              } else if (t < 0.5) {
+              } else if (t < 0.38) {
                 stepIndex = 2;
-              } else if (t < 0.75) {
+              } else if (t < 0.52) {
                 stepIndex = 3;
-              } else {
+              } else if (t < 0.88) {
                 stepIndex = 4;
+              } else {
+                stepIndex = 5;
               }
               break;
           }
 
+          ty += math.sin((t * math.pi * 2) + (seedC * 2.2)) *
+              (1.4 + (realism * 1.2));
+
           final cardTransform = Matrix4.identity()
-            ..setEntry(3, 2, 0.00185)
-            ..translate(tx, ty, 0.0)
-            ..rotateX(rotX)
-            ..rotateY(rotY)
+            ..setEntry(3, 2, 0.0019 + (realism * 0.0008))
+            ..translate(tx, ty, depthZ)
+            ..rotateX(rotX + ambientPitch)
+            ..rotateY(rotY + ambientYaw)
             ..rotateZ(rotZ);
+
+          final shadowOpacity =
+              ((0.17 + ((depthZ.abs() / 36) * 0.2) + (pulse * 0.05)) *
+                      (1 - (realism * 0.22)))
+                  .clamp(0.12, 0.4);
+          final shadowWidth = 226 + (depthZ.abs() * 0.68) + (realism * 22);
+          final shadowHeight = 50 + (depthZ.abs() * 0.2) + (realism * 12);
+          final shadowOffsetY = 96 + (ty * 0.12) + (depthZ * 0.22);
+          final sweepAlign = -1.2 + (specularSweep * 2.4);
+          final shadowMidStop = (0.46 + (realism * 0.28)).clamp(0.42, 0.82);
 
           Widget centerVisual() {
             if (widget.mode == _RapidDeckFxMode.roll) {
@@ -6480,106 +7458,182 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
             );
           }
 
-          return Transform.scale(
-            scale: cardScale,
-            child: Transform(
-              alignment: Alignment.center,
-              transform: cardTransform,
-              child: PhysicalShape(
-                clipper: _RapidPreviewClipper(
-                  mode: widget.mode,
-                  shapeVariant: shapeVariant,
-                  animalVariant: animalVariant,
-                  morph: clipMorph,
-                ),
-                color: base,
-                shadowColor: accent.withValues(alpha: 0.35),
-                elevation: 18,
-                clipBehavior: Clip.antiAlias,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [base, base.withValues(alpha: 0.84)],
+          return Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              Transform.translate(
+                offset: Offset(tx * 0.36, shadowOffsetY),
+                child: Transform.rotate(
+                  angle: rotZ * 0.24,
+                  child: Container(
+                    width: shadowWidth,
+                    height: shadowHeight,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(999),
+                      gradient: RadialGradient(
+                        colors: [
+                          Colors.black.withValues(alpha: shadowOpacity * 0.9),
+                          Colors.black.withValues(alpha: shadowOpacity * 0.28),
+                          Colors.transparent,
+                        ],
+                        stops: [0.0, shadowMidStop, 1.0],
+                      ),
                     ),
                   ),
-                  child: Stack(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(18),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+                ),
+              ),
+              Transform.scale(
+                scale: cardScale,
+                child: Transform(
+                  alignment: Alignment.center,
+                  transform: cardTransform,
+                  child: PhysicalShape(
+                    clipper: _RapidPreviewClipper(
+                      mode: widget.mode,
+                      shapeVariant: shapeVariant,
+                      animalVariant: animalVariant,
+                      variantSeed: variantSeed,
+                      morph: clipMorph,
+                      rollProgress: rollProgress,
+                      rollBackwards: rollBackwards,
+                    ),
+                    color: base,
+                    shadowColor: accent.withValues(alpha: 0.35),
+                    elevation: 22,
+                    clipBehavior: Clip.antiAlias,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [base, base.withValues(alpha: 0.84)],
+                        ),
+                      ),
+                      child: Stack(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.all(18),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Icon(widget.icon, color: accent, size: 22),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    widget.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Color(0xFFEFF7FF),
-                                      fontWeight: FontWeight.w800,
+                                Row(
+                                  children: [
+                                    Icon(widget.icon, color: accent, size: 22),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        widget.title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: Color(0xFFEFF7FF),
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
                                     ),
+                                  ],
+                                ),
+                                const Spacer(),
+                                Center(child: centerVisual()),
+                                const Spacer(),
+                                Text(
+                                  variantLabel,
+                                  style: TextStyle(
+                                    color: accent.withValues(alpha: 0.95),
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Step ${stepIndex + 1}/${steps.length} · ${steps[stepIndex]}',
+                                  style: TextStyle(
+                                    color: accent.withValues(alpha: 0.86),
+                                    fontWeight: FontWeight.w700,
                                   ),
                                 ),
                               ],
                             ),
-                            const Spacer(),
-                            Center(child: centerVisual()),
-                            const Spacer(),
-                            Text(
-                              variantLabel,
-                              style: TextStyle(
-                                color: accent.withValues(alpha: 0.95),
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Step ${stepIndex + 1}/${steps.length} · ${steps[stepIndex]}',
-                              style: TextStyle(
-                                color: accent.withValues(alpha: 0.86),
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (widget.mode == _RapidDeckFxMode.plane &&
-                          planeFoldProgress > 0 &&
-                          planeFoldProgress < 1)
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: CustomPaint(
-                              painter: _PlaneFoldPainter(
-                                progress: planeFoldProgress,
-                                color: accent.withValues(alpha: 0.9),
+                          ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: [
+                                      Colors.white.withValues(alpha: 0.14),
+                                      Colors.white.withValues(alpha: 0.02),
+                                      Colors.black.withValues(alpha: 0.16),
+                                    ],
+                                    stops: const [0.0, 0.5, 1.0],
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          child: CustomPaint(
-                            painter: _RapidPreviewStrokePainter(
-                              mode: widget.mode,
-                              shapeVariant: shapeVariant,
-                              animalVariant: animalVariant,
-                              morph: clipMorph,
-                              color: accent.withValues(alpha: 0.52),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: Align(
+                                alignment: Alignment(sweepAlign, -0.24),
+                                child: Transform.rotate(
+                                  angle: -0.58 + (variantSeed * 0.2),
+                                  child: Container(
+                                    width: 90,
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(40),
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          Colors.white.withValues(alpha: 0.0),
+                                          Colors.white.withValues(alpha: 0.34),
+                                          Colors.white.withValues(alpha: 0.0),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
-                        ),
+                          if (widget.mode == _RapidDeckFxMode.plane &&
+                              planeFoldProgress > 0 &&
+                              planeFoldProgress < 1)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _PlaneFoldPainter(
+                                    progress: planeFoldProgress,
+                                    color: accent.withValues(alpha: 0.9),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _RapidPreviewStrokePainter(
+                                  mode: widget.mode,
+                                  shapeVariant: shapeVariant,
+                                  animalVariant: animalVariant,
+                                  variantSeed: variantSeed,
+                                  morph: clipMorph,
+                                  rollProgress: rollProgress,
+                                  rollBackwards: rollBackwards,
+                                  color: accent.withValues(alpha: 0.52),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           );
         },
       ),
@@ -6591,13 +7645,19 @@ class _RapidPreviewClipper extends CustomClipper<Path> {
   final _RapidDeckFxMode mode;
   final _RapidShapeVariant shapeVariant;
   final _RapidAnimalVariant animalVariant;
+  final double variantSeed;
   final double morph;
+  final double rollProgress;
+  final bool rollBackwards;
 
   const _RapidPreviewClipper({
     required this.mode,
     required this.shapeVariant,
     required this.animalVariant,
+    required this.variantSeed,
     required this.morph,
+    required this.rollProgress,
+    required this.rollBackwards,
   });
 
   @override
@@ -6607,7 +7667,10 @@ class _RapidPreviewClipper extends CustomClipper<Path> {
       mode: mode,
       shapeVariant: shapeVariant,
       animalVariant: animalVariant,
+      variantSeed: variantSeed,
       morph: morph,
+      rollProgress: rollProgress,
+      rollBackwards: rollBackwards,
     );
   }
 
@@ -6616,7 +7679,10 @@ class _RapidPreviewClipper extends CustomClipper<Path> {
     return oldClipper.mode != mode ||
         oldClipper.shapeVariant != shapeVariant ||
         oldClipper.animalVariant != animalVariant ||
-        oldClipper.morph != morph;
+        oldClipper.variantSeed != variantSeed ||
+        oldClipper.morph != morph ||
+        oldClipper.rollProgress != rollProgress ||
+        oldClipper.rollBackwards != rollBackwards;
   }
 }
 
@@ -6624,14 +7690,20 @@ class _RapidPreviewStrokePainter extends CustomPainter {
   final _RapidDeckFxMode mode;
   final _RapidShapeVariant shapeVariant;
   final _RapidAnimalVariant animalVariant;
+  final double variantSeed;
   final double morph;
+  final double rollProgress;
+  final bool rollBackwards;
   final Color color;
 
   const _RapidPreviewStrokePainter({
     required this.mode,
     required this.shapeVariant,
     required this.animalVariant,
+    required this.variantSeed,
     required this.morph,
+    required this.rollProgress,
+    required this.rollBackwards,
     required this.color,
   });
 
@@ -6642,7 +7714,10 @@ class _RapidPreviewStrokePainter extends CustomPainter {
       mode: mode,
       shapeVariant: shapeVariant,
       animalVariant: animalVariant,
+      variantSeed: variantSeed,
       morph: morph,
+      rollProgress: rollProgress,
+      rollBackwards: rollBackwards,
     );
     final stroke = Paint()
       ..style = PaintingStyle.stroke
@@ -6656,7 +7731,10 @@ class _RapidPreviewStrokePainter extends CustomPainter {
     return oldDelegate.mode != mode ||
         oldDelegate.shapeVariant != shapeVariant ||
         oldDelegate.animalVariant != animalVariant ||
+        oldDelegate.variantSeed != variantSeed ||
         oldDelegate.morph != morph ||
+        oldDelegate.rollProgress != rollProgress ||
+        oldDelegate.rollBackwards != rollBackwards ||
         oldDelegate.color != color;
   }
 }
@@ -6666,19 +7744,29 @@ Path _rapidPreviewPath(
   required _RapidDeckFxMode mode,
   required _RapidShapeVariant shapeVariant,
   required _RapidAnimalVariant animalVariant,
+  required double variantSeed,
   required double morph,
+  required double rollProgress,
+  required bool rollBackwards,
 }) {
+  if (mode == _RapidDeckFxMode.roll) {
+    final amount = rollProgress.clamp(0.0, 1.0);
+    if (amount < 0.05) {
+      return _roundedCardPath(size);
+    }
+    return _paperRollPath(size, amount, rollBackwards, variantSeed);
+  }
   final amount = morph.clamp(0.0, 1.0);
-  if (mode == _RapidDeckFxMode.roll || amount < 0.06) {
+  if (amount < 0.06) {
     return _roundedCardPath(size);
   }
   switch (mode) {
     case _RapidDeckFxMode.shape:
-      return _shapePath(size, shapeVariant);
+      return _shapePath(size, shapeVariant, variantSeed);
     case _RapidDeckFxMode.animal:
-      return _animalPath(size, animalVariant);
+      return _animalPath(size, animalVariant, variantSeed);
     case _RapidDeckFxMode.plane:
-      return _planeCardPath(size, amount);
+      return _planeCardPath(size, amount, variantSeed);
     case _RapidDeckFxMode.roll:
       return _roundedCardPath(size);
   }
@@ -6698,25 +7786,107 @@ double _lerpDouble(double a, double b, double t) {
   return a + ((b - a) * t);
 }
 
-Path _shapePath(Size size, _RapidShapeVariant variant) {
+Path _transformPathBySeed(Path path, Size size, double variantSeed) {
+  final scaleX = 0.93 + (variantSeed * 0.13);
+  final scaleY = 0.92 + ((1 - variantSeed) * 0.14);
+  final rotate = (variantSeed - 0.5) * 0.22;
+  final skew = (variantSeed - 0.5) * 0.12;
+  final matrix = Matrix4.identity()
+    ..translate(size.width * 0.5, size.height * 0.5)
+    ..rotateZ(rotate)
+    ..setEntry(0, 1, skew)
+    ..scale(scaleX, scaleY)
+    ..translate(-size.width * 0.5, -size.height * 0.5);
+  return path.transform(matrix.storage);
+}
+
+Path _paperRollPath(
+  Size size,
+  double progress,
+  bool reverse,
+  double variantSeed,
+) {
+  final p = progress.clamp(0.0, 1.0);
+  if (p <= 0.01) {
+    return _roundedCardPath(size);
+  }
   final w = size.width;
   final h = size.height;
+  final top = h * (0.09 + (0.05 * p));
+  final bottom = h * (0.92 - (0.05 * p));
+  final spread = (0.52 + (variantSeed * 0.18)) * p;
+  final leftEdge = w * 0.08;
+  final rightEdge = w * 0.92;
+  final coreStart = reverse ? leftEdge + (w * spread) : leftEdge;
+  final coreEnd = reverse ? rightEdge : rightEdge - (w * spread);
+  final rollRadius = (w * (0.08 + (0.16 * p) + (variantSeed * 0.03)))
+      .clamp(w * 0.07, w * 0.27);
+  final yMid = (top + bottom) * 0.5;
+  final curlLift = (variantSeed - 0.5) * h * 0.08;
+
+  final path = Path();
+  if (!reverse) {
+    final rollCenter = Offset(coreEnd + (rollRadius * 0.46), yMid + curlLift);
+    path.moveTo(coreStart, top);
+    path.lineTo(coreEnd, top);
+    path.quadraticBezierTo(
+      rollCenter.dx,
+      top + (rollRadius * 0.22),
+      rollCenter.dx,
+      yMid,
+    );
+    path.quadraticBezierTo(
+      rollCenter.dx,
+      bottom - (rollRadius * 0.22),
+      coreEnd,
+      bottom,
+    );
+    path.lineTo(coreStart, bottom);
+  } else {
+    final rollCenter = Offset(coreStart - (rollRadius * 0.46), yMid + curlLift);
+    path.moveTo(coreEnd, top);
+    path.lineTo(coreStart, top);
+    path.quadraticBezierTo(
+      rollCenter.dx,
+      top + (rollRadius * 0.22),
+      rollCenter.dx,
+      yMid,
+    );
+    path.quadraticBezierTo(
+      rollCenter.dx,
+      bottom - (rollRadius * 0.22),
+      coreStart,
+      bottom,
+    );
+    path.lineTo(coreEnd, bottom);
+  }
+  path.close();
+  return path;
+}
+
+Path _shapePath(Size size, _RapidShapeVariant variant, double variantSeed) {
+  final w = size.width;
+  final h = size.height;
+  final depthLift = (variantSeed - 0.5) * h * 0.06;
+  Path base;
   switch (variant) {
     case _RapidShapeVariant.diamond:
-      return _polygonPathAbsolute([
+      base = _polygonPathAbsolute([
         Offset(w * 0.5, 0),
         Offset(w, h * 0.5),
         Offset(w * 0.5, h),
         Offset(0, h * 0.5),
       ]);
+      break;
     case _RapidShapeVariant.triangle:
-      return _polygonPathAbsolute([
+      base = _polygonPathAbsolute([
         Offset(w * 0.5, 0),
         Offset(w, h),
         Offset(0, h),
       ]);
+      break;
     case _RapidShapeVariant.hexagon:
-      return _polygonPathAbsolute([
+      base = _polygonPathAbsolute([
         Offset(w * 0.18, 0),
         Offset(w * 0.82, 0),
         Offset(w, h * 0.5),
@@ -6724,8 +7894,9 @@ Path _shapePath(Size size, _RapidShapeVariant variant) {
         Offset(w * 0.18, h),
         Offset(0, h * 0.5),
       ]);
+      break;
     case _RapidShapeVariant.octagon:
-      return _polygonPathAbsolute([
+      base = _polygonPathAbsolute([
         Offset(w * 0.24, 0),
         Offset(w * 0.76, 0),
         Offset(w, h * 0.24),
@@ -6735,6 +7906,7 @@ Path _shapePath(Size size, _RapidShapeVariant variant) {
         Offset(0, h * 0.76),
         Offset(0, h * 0.24),
       ]);
+      break;
     case _RapidShapeVariant.star:
       final cx = w * 0.5;
       final cy = h * 0.5;
@@ -6753,9 +7925,10 @@ Path _shapePath(Size size, _RapidShapeVariant variant) {
         }
       }
       path.close();
-      return path;
+      base = path;
+      break;
     case _RapidShapeVariant.shield:
-      final path = Path()
+      base = Path()
         ..moveTo(w * 0.2, 0)
         ..lineTo(w * 0.8, 0)
         ..quadraticBezierTo(w * 0.94, h * 0.2, w * 0.88, h * 0.44)
@@ -6763,10 +7936,10 @@ Path _shapePath(Size size, _RapidShapeVariant variant) {
         ..quadraticBezierTo(w * 0.2, h * 0.82, w * 0.12, h * 0.44)
         ..quadraticBezierTo(w * 0.06, h * 0.2, w * 0.2, 0)
         ..close();
-      return path;
+      break;
     case _RapidShapeVariant.ticket:
       final notch = h * 0.14;
-      final path = Path()
+      base = Path()
         ..moveTo(w * 0.12, 0)
         ..lineTo(w * 0.88, 0)
         ..quadraticBezierTo(w, 0, w, h * 0.12)
@@ -6781,75 +7954,327 @@ Path _shapePath(Size size, _RapidShapeVariant variant) {
         ..lineTo(0, h * 0.12)
         ..quadraticBezierTo(0, 0, w * 0.12, 0)
         ..close();
-      return path;
+      break;
     case _RapidShapeVariant.capsule:
-      return Path()
+      base = Path()
         ..addRRect(
           RRect.fromRectAndRadius(
             Rect.fromLTWH(0, h * 0.04, w, h * 0.92),
             Radius.circular(h * 0.46),
           ),
         );
+      break;
+    case _RapidShapeVariant.trapezoid:
+      base = _polygonPathAbsolute([
+        Offset(w * 0.2, h * 0.03),
+        Offset(w * 0.8, h * 0.03),
+        Offset(w, h * 0.96),
+        Offset(0, h * 0.96),
+      ]);
+      break;
+    case _RapidShapeVariant.kite:
+      base = _polygonPathAbsolute([
+        Offset(w * 0.5, 0),
+        Offset(w * 0.88, h * 0.43),
+        Offset(w * 0.5, h),
+        Offset(w * 0.12, h * 0.43),
+      ]);
+      break;
+    case _RapidShapeVariant.clover:
+      base = Path()
+        ..addOval(Rect.fromCircle(
+            center: Offset(w * 0.36, h * 0.34), radius: w * 0.22))
+        ..addOval(Rect.fromCircle(
+            center: Offset(w * 0.64, h * 0.34), radius: w * 0.22))
+        ..addOval(Rect.fromCircle(
+            center: Offset(w * 0.36, h * 0.66), radius: w * 0.22))
+        ..addOval(Rect.fromCircle(
+            center: Offset(w * 0.64, h * 0.66), radius: w * 0.22));
+      break;
+    case _RapidShapeVariant.rhombus:
+      base = _polygonPathAbsolute([
+        Offset(w * 0.52, 0),
+        Offset(w, h * 0.35),
+        Offset(w * 0.48, h),
+        Offset(0, h * 0.65),
+      ]);
+      break;
+    case _RapidShapeVariant.arrow:
+      base = Path()
+        ..moveTo(w * 0.1, h * 0.34)
+        ..lineTo(w * 0.58, h * 0.34)
+        ..lineTo(w * 0.58, h * 0.16)
+        ..lineTo(w * 0.94, h * 0.5)
+        ..lineTo(w * 0.58, h * 0.84)
+        ..lineTo(w * 0.58, h * 0.66)
+        ..lineTo(w * 0.1, h * 0.66)
+        ..close();
+      break;
+    case _RapidShapeVariant.badge:
+      base = Path()
+        ..moveTo(w * 0.2, 0)
+        ..lineTo(w * 0.8, 0)
+        ..lineTo(w, h * 0.22)
+        ..lineTo(w, h * 0.78)
+        ..lineTo(w * 0.8, h)
+        ..lineTo(w * 0.2, h)
+        ..lineTo(0, h * 0.78)
+        ..lineTo(0, h * 0.22)
+        ..close();
+      break;
+    case _RapidShapeVariant.heart:
+      base = Path()
+        ..moveTo(w * 0.5, h * 0.94)
+        ..quadraticBezierTo(w * 0.03, h * 0.58, w * 0.22, h * 0.3)
+        ..quadraticBezierTo(w * 0.33, h * 0.12, w * 0.5, h * 0.26)
+        ..quadraticBezierTo(w * 0.67, h * 0.12, w * 0.78, h * 0.3)
+        ..quadraticBezierTo(w * 0.97, h * 0.58, w * 0.5, h * 0.94)
+        ..close();
+      break;
+    case _RapidShapeVariant.leaf:
+      base = Path()
+        ..moveTo(w * 0.12, h * 0.58)
+        ..quadraticBezierTo(w * 0.3, h * 0.12, w * 0.8, h * 0.16)
+        ..quadraticBezierTo(w * 0.94, h * 0.56, w * 0.58, h * 0.9)
+        ..quadraticBezierTo(w * 0.28, h * 0.98, w * 0.12, h * 0.58)
+        ..close();
+      break;
   }
+  final shifted = base.shift(Offset(0, depthLift));
+  return _transformPathBySeed(shifted, size, variantSeed);
 }
 
-Path _animalPath(Size size, _RapidAnimalVariant variant) {
+Path _animalPath(Size size, _RapidAnimalVariant variant, double variantSeed) {
+  final seed = ((variantSeed + _rapidSeed01(size.width.round(), 41)) * 0.5)
+      .clamp(0.0, 1.0);
+  Path path;
   switch (variant) {
     case _RapidAnimalVariant.dog:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
-        snout: 1,
-        ear: 0.55,
-        tail: 0.35,
-        back: 0.1,
-        belly: 0.12,
+        snout: 0.98,
+        ear: 0.54,
+        tail: 0.36,
+        back: 0.14,
+        belly: 0.1,
+        leg: 0.64,
+        neck: 0.58,
+        bulk: 0.66,
+        seed: seed,
       );
+      break;
     case _RapidAnimalVariant.cat:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
-        snout: 0.45,
+        snout: 0.46,
         ear: 1,
-        tail: 1,
-        back: 0.2,
+        tail: 0.98,
+        back: 0.21,
         belly: 0.04,
+        leg: 0.58,
+        neck: 0.5,
+        bulk: 0.52,
+        seed: seed,
       );
+      break;
     case _RapidAnimalVariant.fox:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
         snout: 0.95,
         ear: 0.9,
         tail: 1,
         back: 0.16,
         belly: 0.08,
+        leg: 0.62,
+        neck: 0.52,
+        bulk: 0.56,
+        seed: seed,
       );
+      break;
     case _RapidAnimalVariant.wolf:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
         snout: 1,
         ear: 0.7,
         tail: 0.6,
         back: 0.2,
         belly: 0.16,
+        leg: 0.66,
+        neck: 0.6,
+        bulk: 0.68,
+        seed: seed,
       );
+      break;
     case _RapidAnimalVariant.panther:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
         snout: 0.62,
         ear: 0.35,
         tail: 0.9,
         back: 0.32,
         belly: 0.03,
+        leg: 0.58,
+        neck: 0.48,
+        bulk: 0.5,
+        seed: seed,
       );
+      break;
     case _RapidAnimalVariant.lynx:
-      return _quadrupedPath(
+      path = _quadrupedPath(
         size,
         snout: 0.58,
         ear: 0.86,
         tail: 0.2,
         back: 0.2,
         belly: 0.06,
+        leg: 0.58,
+        neck: 0.5,
+        bulk: 0.52,
+        seed: seed,
       );
+      break;
+    case _RapidAnimalVariant.horse:
+      path = _quadrupedPath(
+        size,
+        snout: 0.88,
+        ear: 0.64,
+        tail: 0.78,
+        back: 0.12,
+        belly: 0.16,
+        leg: 0.86,
+        neck: 0.88,
+        bulk: 0.72,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.deer:
+      path = _quadrupedPath(
+        size,
+        snout: 0.8,
+        ear: 0.78,
+        tail: 0.36,
+        back: 0.1,
+        belly: 0.12,
+        leg: 0.82,
+        neck: 0.8,
+        bulk: 0.6,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.rabbit:
+      path = _quadrupedPath(
+        size,
+        snout: 0.34,
+        ear: 1.0,
+        tail: 0.24,
+        back: 0.36,
+        belly: 0.01,
+        leg: 0.52,
+        neck: 0.42,
+        bulk: 0.44,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.bear:
+      path = _quadrupedPath(
+        size,
+        snout: 0.56,
+        ear: 0.26,
+        tail: 0.12,
+        back: 0.22,
+        belly: 0.22,
+        leg: 0.62,
+        neck: 0.46,
+        bulk: 0.86,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.tiger:
+      path = _quadrupedPath(
+        size,
+        snout: 0.6,
+        ear: 0.36,
+        tail: 0.94,
+        back: 0.28,
+        belly: 0.02,
+        leg: 0.62,
+        neck: 0.48,
+        bulk: 0.56,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.lion:
+      path = _quadrupedPath(
+        size,
+        snout: 0.64,
+        ear: 0.3,
+        tail: 0.82,
+        back: 0.26,
+        belly: 0.04,
+        leg: 0.64,
+        neck: 0.62,
+        bulk: 0.68,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.goat:
+      path = _quadrupedPath(
+        size,
+        snout: 0.54,
+        ear: 0.7,
+        tail: 0.2,
+        back: 0.16,
+        belly: 0.07,
+        leg: 0.72,
+        neck: 0.64,
+        bulk: 0.58,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.camel:
+      path = _quadrupedPath(
+        size,
+        snout: 0.66,
+        ear: 0.42,
+        tail: 0.2,
+        back: 0.52,
+        belly: 0.12,
+        leg: 0.78,
+        neck: 0.78,
+        bulk: 0.74,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.zebra:
+      path = _quadrupedPath(
+        size,
+        snout: 0.82,
+        ear: 0.64,
+        tail: 0.7,
+        back: 0.12,
+        belly: 0.13,
+        leg: 0.82,
+        neck: 0.8,
+        bulk: 0.64,
+        seed: seed,
+      );
+      break;
+    case _RapidAnimalVariant.elephant:
+      path = _quadrupedPath(
+        size,
+        snout: 1.15,
+        ear: 0.12,
+        tail: 0.16,
+        back: 0.24,
+        belly: 0.24,
+        leg: 0.66,
+        neck: 0.38,
+        bulk: 0.92,
+        seed: seed,
+      );
+      break;
   }
+  return _transformPathBySeed(path, size, variantSeed);
 }
 
 Path _quadrupedPath(
@@ -6859,31 +8284,39 @@ Path _quadrupedPath(
   required double tail,
   required double back,
   required double belly,
+  required double leg,
+  required double neck,
+  required double bulk,
+  required double seed,
 }) {
   final w = size.width;
   final h = size.height;
-  final headTopY = h * (0.34 - (ear * 0.03));
+  final wobbleX = (seed - 0.5) * w * 0.04;
+  final bodyTop = h * (0.35 - (back * 0.05) - ((bulk - 0.5) * 0.04));
+  final headTopY = h * (0.34 - (ear * 0.03) - (neck * 0.02));
   final earPeakY = h * (0.18 - (ear * 0.05));
-  final backY = h * (0.33 - (back * 0.04));
+  final backY = bodyTop;
   final tailY = h * (0.42 - (tail * 0.08));
   final chestY = h * (0.58 + (belly * 0.03));
+  final legBottom = h * (0.9 + ((leg - 0.6) * 0.08));
   final path = Path()
     ..moveTo(w * 0.08, h * 0.55)
-    ..quadraticBezierTo(
-        w * (0.09 + (0.02 * snout)), h * 0.45, w * 0.16, h * 0.4)
+    ..quadraticBezierTo(w * (0.09 + (0.02 * snout)), h * 0.45,
+        w * (0.16 + (neck * 0.04)), h * 0.4)
     ..quadraticBezierTo(w * 0.19, headTopY, w * 0.25, headTopY)
-    ..lineTo(w * 0.29, earPeakY)
+    ..lineTo(w * (0.29 + (ear * 0.02)), earPeakY)
     ..lineTo(w * 0.34, headTopY + (h * 0.02))
-    ..quadraticBezierTo(w * 0.55, backY, w * 0.72, h * 0.39)
+    ..quadraticBezierTo(
+        w * (0.55 + ((bulk - 0.5) * 0.06)), backY, w * 0.72, h * 0.39)
     ..quadraticBezierTo(w * 0.86, tailY, w * 0.92, h * 0.48)
     ..quadraticBezierTo(
         w * 0.98, h * (0.56 + (tail * 0.04)), w * 0.87, h * 0.61)
-    ..lineTo(w * 0.83, h * 0.92)
-    ..lineTo(w * 0.74, h * 0.92)
+    ..lineTo(w * (0.83 + (wobbleX / w)), legBottom)
+    ..lineTo(w * (0.74 + (wobbleX / w)), legBottom)
     ..lineTo(w * 0.71, h * 0.67)
     ..quadraticBezierTo(w * 0.56, h * (0.72 + (belly * 0.04)), w * 0.48, chestY)
-    ..lineTo(w * 0.44, h * 0.92)
-    ..lineTo(w * 0.35, h * 0.92)
+    ..lineTo(w * (0.44 - (wobbleX / w)), legBottom)
+    ..lineTo(w * (0.35 - (wobbleX / w)), legBottom)
     ..lineTo(w * 0.35, h * 0.62)
     ..quadraticBezierTo(w * 0.24, h * 0.62, w * 0.15, h * 0.58)
     ..quadraticBezierTo(w * 0.1, h * 0.57, w * 0.08, h * 0.55)
@@ -6891,11 +8324,14 @@ Path _quadrupedPath(
   return path;
 }
 
-Path _planeCardPath(Size size, double morph) {
+Path _planeCardPath(Size size, double morph, double variantSeed) {
   final t = ((morph - 0.08) / 0.92).clamp(0.0, 1.0);
   if (t <= 0.01) {
     return _roundedCardPath(size);
   }
+  final noseLift = 0.05 + (variantSeed * 0.08);
+  final wingDepth = 0.76 + (variantSeed * 0.08);
+  final tailTaper = 0.28 + (variantSeed * 0.1);
   final rectPoints = [
     const Offset(0.08, 0.12),
     const Offset(0.92, 0.12),
@@ -6906,13 +8342,13 @@ Path _planeCardPath(Size size, double morph) {
     const Offset(0.08, 0.3),
   ];
   final planePoints = [
-    const Offset(0.1, 0.64),
-    const Offset(0.74, 0.46),
-    const Offset(0.9, 0.38),
-    const Offset(0.78, 0.56),
-    const Offset(0.56, 0.78),
-    const Offset(0.47, 0.68),
-    const Offset(0.3, 0.79),
+    Offset(0.1, 0.66 - (noseLift * 0.22)),
+    Offset(0.74, 0.46 - (noseLift * 0.2)),
+    Offset(0.9, 0.34 + (tailTaper * 0.08)),
+    Offset(0.78, 0.54),
+    Offset(0.56, wingDepth),
+    Offset(0.47, 0.68 + (tailTaper * 0.04)),
+    Offset(0.3, wingDepth + (tailTaper * 0.03)),
   ];
   final points = <Offset>[];
   for (int i = 0; i < rectPoints.length; i++) {
@@ -6925,7 +8361,7 @@ Path _planeCardPath(Size size, double morph) {
       ),
     );
   }
-  return _polygonPathAbsolute(points);
+  return _transformPathBySeed(_polygonPathAbsolute(points), size, variantSeed);
 }
 
 Path _polygonPathAbsolute(List<Offset> points) {
@@ -7226,6 +8662,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
   int _rangeFilter = 0;
   int _flipTick = 0;
   double _carouselPage = 0;
+  double _realism = _globalMotionRealism.value;
 
   @override
   void initState() {
@@ -7295,6 +8732,14 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
       duration: const Duration(milliseconds: 260),
       curve: Curves.easeOutCubic,
     );
+  }
+
+  void _setRealism(double value) {
+    final v = value.clamp(0.2, 1.0).toDouble();
+    setState(() {
+      _realism = v;
+    });
+    _globalMotionRealism.value = v;
   }
 
   bool _matchesIndex(int index) {
@@ -7519,7 +8964,52 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                     label: 'Range $_rangeLabel',
                     tint: const Color(0xFF9FC3FF),
                   ),
+                  _HeaderTag(
+                    icon: Icons.auto_awesome,
+                    label: _realismPresetLabel(_realism),
+                    tint: const Color(0xFFB1D2FF),
+                  ),
                 ],
+              ),
+              const SizedBox(height: 10),
+              Card(
+                margin: EdgeInsets.zero,
+                color: const Color(0xFF102235),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.auto_awesome,
+                          size: 18, color: Color(0xFF9ED8FF)),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Realism',
+                        style: TextStyle(
+                          color: Color(0xFFCFEAFF),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Slider(
+                          value: _realism,
+                          min: 0.2,
+                          max: 1.0,
+                          divisions: 16,
+                          onChanged: _setRealism,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _realismPresetLabel(_realism),
+                        style: const TextStyle(
+                          color: Color(0xFF9DEBFF),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -8504,9 +9994,45 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       final faceCount =
           int.tryParse((data?['face_count'] ?? faces.length).toString()) ??
               faces.length;
-      final saved = tracking['saved'] == true;
-      final deduped =
+      bool saved = tracking['saved'] == true;
+      bool deduped =
           (tracking['reason'] ?? '').toString() == 'deduped_recent_event';
+
+      if (name.toLowerCase() != 'unknown' && !saved && !deduped) {
+        String fallbackLocation = _currentLocationLabel.trim();
+        final lat = _currentLat;
+        final lng = _currentLng;
+        if (fallbackLocation.isEmpty && lat != null && lng != null) {
+          fallbackLocation =
+              'Lat ${lat.toStringAsFixed(5)}, Lng ${lng.toStringAsFixed(5)}';
+        }
+        if (fallbackLocation.isNotEmpty) {
+          try {
+            final fallbackRes = await buildBackendApi().saveRecognitionLocation(
+              recognizedName: name,
+              locationName: fallbackLocation,
+              latitude: lat,
+              longitude: lng,
+              confidence: score,
+              source: 'mobile_live_fallback',
+              forceUpdate: true,
+            );
+            final fallbackData = Map<String, dynamic>.from(
+              (fallbackRes['data'] as Map?) ?? const {},
+            );
+            final fallbackSaved = fallbackRes['ok'] == true &&
+                (fallbackData['saved'] == true ||
+                    (fallbackData['reason'] ?? '').toString() ==
+                        'deduped_recent_event');
+            if (fallbackSaved) {
+              saved = true;
+              deduped = (fallbackData['reason'] ?? '').toString() ==
+                  'deduped_recent_event';
+            }
+          } catch (_) {}
+        }
+      }
+
       final saveInfo = name.toLowerCase() == 'unknown'
           ? 'No save: unknown face'
           : saved

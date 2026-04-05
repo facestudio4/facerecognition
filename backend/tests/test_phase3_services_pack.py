@@ -174,6 +174,24 @@ class Phase3ServicesPackTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows[0]['latitude']), 19.0760, places=4)
         self.assertAlmostEqual(float(rows[0]['longitude']), 72.8777, places=4)
 
+    def test_recognition_location_uses_coordinates_when_label_missing(self):
+        hub = Phase3ServiceHub(self.base_dir, self.db_path)
+        result = hub.save_recognition_location_event(
+            recognized_name='alice',
+            location_name='',
+            latitude=23.0225,
+            longitude=72.5714,
+            confidence=0.87,
+            requested_by='alice',
+        )
+        self.assertTrue(result.get('ok'))
+
+        rows = hub.search_recognition_locations(name='alice', limit=10)
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertTrue(str(rows[0]['location_name']).startswith('Lat 23.02250, Lng 72.57140'))
+        self.assertAlmostEqual(float(rows[0]['latitude']), 23.0225, places=4)
+        self.assertAlmostEqual(float(rows[0]['longitude']), 72.5714, places=4)
+
     def test_signup_email_verification_flow(self):
         hub = Phase3ServiceHub(self.base_dir, self.db_path)
         sent = []
