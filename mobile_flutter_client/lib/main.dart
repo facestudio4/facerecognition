@@ -372,8 +372,17 @@ class _FaceReferenceProfile {
 }
 
 int _parseVersionNumber(String value) {
+  var raw = value.trim();
+  if (raw.isEmpty) {
+    return 0;
+  }
+  raw = raw.replaceFirst(RegExp(r'^[vV]'), '');
+  final direct = int.tryParse(raw);
+  if (direct != null) {
+    return direct;
+  }
   final match =
-      RegExp(r'^(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?$').firstMatch(value.trim());
+      RegExp(r'^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\+(\d+))?$').firstMatch(raw);
   if (match == null) {
     return 0;
   }
@@ -1334,12 +1343,12 @@ class _CinematicFaceHeader extends StatelessWidget {
     Widget faceHero = _BlueFaceHero(
       size: 60,
       settleIn: true,
-      showOrbit: false,
-      showHalo: false,
-      glowScale: 0.0,
-      depthScale: 0.0,
-      cinematicSpecular: false,
-      ultraClear: true,
+      showOrbit: true,
+      showHalo: true,
+      glowScale: tier == _MotionTier.low ? 0.44 : 0.72,
+      depthScale: tier == _MotionTier.low ? 0.82 : 1.25,
+      cinematicSpecular: tier != _MotionTier.low,
+      ultraClear: ultraClearFace,
       motionTier: tier,
     );
     if (heroTag != null && tier != _MotionTier.low) {
@@ -1508,12 +1517,27 @@ class _BlueFaceHeroState extends State<_BlueFaceHero>
             final low = tier == _MotionTier.low;
             final balanced = tier == _MotionTier.balanced;
             final compactSettled = widget.settleIn && widget.size <= 64;
-            // Force matte: no shine, no glow, no orbit/halo
-            final effectiveDepthScale = 0.0;
-            final effectiveGlowScale = 0.0;
-            final effectiveShowOrbit = false;
-            final effectiveShowHalo = false;
-            final pulse = 0.0;
+            final motionFactor = low
+                ? 0.46
+                : balanced
+                    ? 0.8
+                    : 1.0;
+            final baseDepthScale = widget.depthScale.clamp(0.0, 2.2);
+            final baseGlowScale = widget.glowScale.clamp(0.0, 2.0);
+            final effectiveDepthScale = compactSettled
+                ? baseDepthScale * 0.62
+                : baseDepthScale * motionFactor;
+            final effectiveGlowScale = compactSettled
+                ? baseGlowScale * 0.56
+                : baseGlowScale * motionFactor;
+            final effectiveShowOrbit =
+                widget.showOrbit && effectiveGlowScale > 0.01;
+            final effectiveShowHalo =
+                widget.showHalo && effectiveGlowScale > 0.01;
+            final pulse = 1 +
+                (math.sin((t * math.pi * 2) + 0.9) *
+                    (compactSettled ? 0.026 : 0.064) *
+                    effectiveGlowScale);
             final depth = compactSettled
                 ? 0.0
                 : math.sin((t * math.pi * 2) + 1.2) *
@@ -3801,7 +3825,13 @@ class BackendApi {
   }
 
   Future<Map<String, dynamic>> getMobileAppUpdateInfo() async {
-    for (final base in _candidateBases()) {
+    final configuredBase = const String.fromEnvironment(
+      'FACE_STUDIO_BASE_URL',
+      defaultValue: 'https://facerecognition-4.onrender.com',
+    ).trim().replaceAll(RegExp(r'/$'), '');
+    final preferred = <String>[configuredBase, _base];
+    final seen = <String>{};
+    for (final base in preferred.where((u) => u.isNotEmpty && seen.add(u))) {
       try {
         final res = await http
             .get(Uri.parse('$base/api/mobile/app-update'))
@@ -3813,6 +3843,13 @@ class BackendApi {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         final data =
             (body['data'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+        final latestVersion = (data['latest_version'] ?? '').toString().trim();
+        final apkUrl = (data['apk_url'] ?? '').toString().trim();
+        if (latestVersion.isEmpty ||
+            apkUrl.isEmpty ||
+            _parseVersionNumber(latestVersion) <= 0) {
+          continue;
+        }
         return {'ok': true, 'data': data};
       } catch (_) {
         continue;
@@ -3928,7 +3965,10 @@ class _AuthGateState extends State<AuthGate> {
       final notifiedCooldownActive = lastNotifiedVersion == latestVersion &&
           lastNotifiedUrl == updateUrl &&
           (nowMs - lastNotifiedAt) < 21600000;
-      if (!effectiveForceUpdate && !mustUpdate && notifiedCooldownActive) {
+      if (!effectiveForceUpdate &&
+          !mustUpdate &&
+          !needsUpdate &&
+          notifiedCooldownActive) {
         return;
       }
 
@@ -5671,52 +5711,57 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   Widget _buildTimelineLab(_MotionTier tier) {
     return SizedBox(
       height: 320,
-      child: ListView.builder(
+      child: Scrollbar(
         controller: _timelineController,
-        itemCount: _timelineMilestones.length,
-        itemBuilder: (context, i) {
-          final m = _timelineMilestones[i];
-          final delay = i * (tier == _MotionTier.cinematic ? 60 : 36);
-          return _AnimatedFadeSlide(
-            delayMs: delay,
-            beginOffset: const Offset(0.06, 0),
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF112640),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: const Color(0xFF8DDFFF).withValues(alpha: 0.28)),
-                ),
-                child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor:
-                        const Color(0xFF79DEFF).withValues(alpha: 0.22),
-                    child: Text(
-                      '${i + 1}',
+        thumbVisibility: true,
+        child: ListView.builder(
+          controller: _timelineController,
+          physics: const BouncingScrollPhysics(),
+          itemCount: _timelineMilestones.length,
+          itemBuilder: (context, i) {
+            final m = _timelineMilestones[i];
+            final delay = i * (tier == _MotionTier.cinematic ? 60 : 36);
+            return _AnimatedFadeSlide(
+              delayMs: delay,
+              beginOffset: const Offset(0.06, 0),
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF112640),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: const Color(0xFF8DDFFF).withValues(alpha: 0.28)),
+                  ),
+                  child: ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor:
+                          const Color(0xFF79DEFF).withValues(alpha: 0.22),
+                      child: Text(
+                        '${i + 1}',
+                        style: const TextStyle(
+                          color: Color(0xFFDFF5FF),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    title: Text(
+                      m['title']!,
                       style: const TextStyle(
-                        color: Color(0xFFDFF5FF),
+                        color: Color(0xFFE6F4FF),
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                  ),
-                  title: Text(
-                    m['title']!,
-                    style: const TextStyle(
-                      color: Color(0xFFE6F4FF),
-                      fontWeight: FontWeight.w700,
+                    subtitle: Text(
+                      m['detail']!,
+                      style: const TextStyle(color: Color(0xFFBFD5EE)),
                     ),
-                  ),
-                  subtitle: Text(
-                    m['detail']!,
-                    style: const TextStyle(color: Color(0xFFBFD5EE)),
                   ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -5769,6 +5814,7 @@ class _MotionStudioPageState extends State<MotionStudioPage>
             const SizedBox(height: 12),
             Expanded(
               child: TabBarView(
+                physics: const NeverScrollableScrollPhysics(),
                 children: [
                   Padding(
                     padding: const EdgeInsets.all(12),
@@ -5811,74 +5857,118 @@ class FeatureForgePage extends StatelessWidget {
     final cards = rapid_pack.rapidScenarios.take(120).toList(growable: false);
     return Scaffold(
       appBar: AppBar(title: const Text('Feature Forge 3D')),
-      body: GridView.builder(
-        padding: const EdgeInsets.all(12),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: 0.92,
-        ),
-        itemCount: cards.length,
-        itemBuilder: (context, i) {
-          final c = cards[i];
-          return Card(
-            color: const Color(0xFF13233A),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(c.icon, color: c.color),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          c.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: c.color,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    c.subtitle,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Color(0xFFB9D9EE)),
-                  ),
-                  const Spacer(),
-                  Align(
-                    alignment: Alignment.bottomRight,
-                    child: FilledButton.tonal(
-                      onPressed: () {
-                        showModalBottomSheet<void>(
-                          context: context,
-                          builder: (ctx) {
-                            return Padding(
-                              padding:
-                                  const EdgeInsets.fromLTRB(16, 14, 16, 20),
-                              child: rapid_pack.rapidDeckBuilders[c.id - 1](),
-                            );
-                          },
-                        );
-                      },
-                      child: const Text('Open'),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+            child: _CinematicFaceHeader(
+              title: 'What Feature Forge 3D Does',
+              subtitle:
+                  'Feature Forge is the scenario deck for generation and analytics modules. For interactive 3D camera labs, use 3D Motion Studio.',
+              tags: const [
+                _HeaderTag(
+                  icon: Icons.dashboard_customize,
+                  label: 'Scenario Deck',
+                  tint: Color(0xFF8DDFFF),
+                ),
+                _HeaderTag(
+                  icon: Icons.view_in_ar,
+                  label: 'Interactive Labs in Motion Studio',
+                  tint: Color(0xFF93F3CF),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const MotionStudioPage(),
                     ),
-                  ),
-                ],
+                  );
+                },
+                icon: const Icon(Icons.view_in_ar),
+                label: const Text('Open 3D Motion Studio'),
               ),
             ),
-          );
-        },
+          ),
+          Expanded(
+            child: GridView.builder(
+              padding: const EdgeInsets.all(12),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 10,
+                childAspectRatio: 0.92,
+              ),
+              itemCount: cards.length,
+              itemBuilder: (context, i) {
+                final c = cards[i];
+                return Card(
+                  color: const Color(0xFF13233A),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(c.icon, color: c.color),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                c.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: c.color,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          c.subtitle,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Color(0xFFB9D9EE)),
+                        ),
+                        const Spacer(),
+                        Align(
+                          alignment: Alignment.bottomRight,
+                          child: FilledButton.tonal(
+                            onPressed: () {
+                              showModalBottomSheet<void>(
+                                context: context,
+                                builder: (ctx) {
+                                  return Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                        16, 14, 16, 20),
+                                    child: rapid_pack
+                                        .rapidDeckBuilders[c.id - 1](),
+                                  );
+                                },
+                              );
+                            },
+                            child: const Text('Open'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
