@@ -6067,23 +6067,164 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
 }
 
 enum _RapidDeckFxMode {
-  roll,
   shape,
   animal,
   plane,
+  roll,
 }
 
 _RapidDeckFxMode _fxModeForCard(int index, _RapidRarity rarity) {
-  switch (rarity) {
-    case _RapidRarity.common:
-      return _RapidDeckFxMode.roll;
-    case _RapidRarity.rare:
-      return _RapidDeckFxMode.shape;
-    case _RapidRarity.epic:
-      return index.isEven ? _RapidDeckFxMode.animal : _RapidDeckFxMode.shape;
-    case _RapidRarity.legendary:
-      return _RapidDeckFxMode.plane;
-  }
+  final rarityOffset = _rarityOffsetForRapidRarity(rarity);
+  final modes = [
+    _RapidDeckFxMode.shape,
+    _RapidDeckFxMode.animal,
+    _RapidDeckFxMode.plane,
+    _RapidDeckFxMode.roll,
+  ];
+  return modes[(index + rarityOffset) % modes.length];
+}
+
+int _rarityOffsetForRapidRarity(_RapidRarity rarity) {
+  return switch (rarity) {
+    _RapidRarity.common => 0,
+    _RapidRarity.rare => 1,
+    _RapidRarity.epic => 2,
+    _RapidRarity.legendary => 3,
+  };
+}
+
+int _modeSlotForCard(int index, _RapidRarity rarity) {
+  final rarityOffset = _rarityOffsetForRapidRarity(rarity);
+  return (index + rarityOffset) ~/ _RapidDeckFxMode.values.length;
+}
+
+enum _RapidRollVariant {
+  horizontalFront,
+  horizontalBack,
+  verticalFront,
+  verticalBack,
+  diagonalFront,
+  diagonalBack,
+}
+
+enum _RapidShapeVariant {
+  diamond,
+  triangle,
+  hexagon,
+  octagon,
+  star,
+  shield,
+  ticket,
+  capsule,
+}
+
+enum _RapidAnimalVariant {
+  dog,
+  cat,
+  fox,
+  wolf,
+  panther,
+  lynx,
+}
+
+enum _RapidFlightVariant {
+  northEast,
+  northWest,
+  southEast,
+  southWest,
+  east,
+  west,
+  north,
+  south,
+}
+
+_RapidRollVariant _rollVariantForCard(int index, _RapidRarity rarity) {
+  final offset = _rarityOffsetForRapidRarity(rarity);
+  final slot = _modeSlotForCard(index, rarity);
+  return _RapidRollVariant
+      .values[((slot * 5) + offset) % _RapidRollVariant.values.length];
+}
+
+_RapidShapeVariant _shapeVariantForCard(int index, _RapidRarity rarity) {
+  final offset = _rarityOffsetForRapidRarity(rarity) * 2;
+  final slot = _modeSlotForCard(index, rarity);
+  return _RapidShapeVariant
+      .values[((slot * 3) + offset) % _RapidShapeVariant.values.length];
+}
+
+_RapidAnimalVariant _animalVariantForCard(int index, _RapidRarity rarity) {
+  final offset = _rarityOffsetForRapidRarity(rarity);
+  final slot = _modeSlotForCard(index, rarity);
+  return _RapidAnimalVariant
+      .values[((slot * 5) + offset) % _RapidAnimalVariant.values.length];
+}
+
+_RapidFlightVariant _flightVariantForCard(int index, _RapidRarity rarity) {
+  final offset = _rarityOffsetForRapidRarity(rarity) * 2;
+  final slot = _modeSlotForCard(index, rarity);
+  return _RapidFlightVariant
+      .values[((slot * 3) + offset) % _RapidFlightVariant.values.length];
+}
+
+String _rollVariantLabel(_RapidRollVariant variant) {
+  return switch (variant) {
+    _RapidRollVariant.horizontalFront => 'Horizontal Front Roll',
+    _RapidRollVariant.horizontalBack => 'Horizontal Back Roll',
+    _RapidRollVariant.verticalFront => 'Vertical Front Roll',
+    _RapidRollVariant.verticalBack => 'Vertical Back Roll',
+    _RapidRollVariant.diagonalFront => 'Diagonal Front Roll',
+    _RapidRollVariant.diagonalBack => 'Diagonal Back Roll',
+  };
+}
+
+String _shapeVariantLabel(_RapidShapeVariant variant) {
+  return switch (variant) {
+    _RapidShapeVariant.diamond => 'Diamond Form',
+    _RapidShapeVariant.triangle => 'Triangle Form',
+    _RapidShapeVariant.hexagon => 'Hexagon Form',
+    _RapidShapeVariant.octagon => 'Octagon Form',
+    _RapidShapeVariant.star => 'Star Form',
+    _RapidShapeVariant.shield => 'Shield Form',
+    _RapidShapeVariant.ticket => 'Ticket Form',
+    _RapidShapeVariant.capsule => 'Capsule Form',
+  };
+}
+
+String _animalVariantLabel(_RapidAnimalVariant variant) {
+  return switch (variant) {
+    _RapidAnimalVariant.dog => 'Dog Silhouette',
+    _RapidAnimalVariant.cat => 'Cat Silhouette',
+    _RapidAnimalVariant.fox => 'Fox Silhouette',
+    _RapidAnimalVariant.wolf => 'Wolf Silhouette',
+    _RapidAnimalVariant.panther => 'Panther Silhouette',
+    _RapidAnimalVariant.lynx => 'Lynx Silhouette',
+  };
+}
+
+String _flightVariantLabel(_RapidFlightVariant variant) {
+  return switch (variant) {
+    _RapidFlightVariant.northEast => 'North-East',
+    _RapidFlightVariant.northWest => 'North-West',
+    _RapidFlightVariant.southEast => 'South-East',
+    _RapidFlightVariant.southWest => 'South-West',
+    _RapidFlightVariant.east => 'East',
+    _RapidFlightVariant.west => 'West',
+    _RapidFlightVariant.north => 'North',
+    _RapidFlightVariant.south => 'South',
+  };
+}
+
+Offset _flightDirectionForVariant(_RapidFlightVariant variant) {
+  return switch (variant) {
+    _RapidFlightVariant.northEast => const Offset(1, -0.78),
+    _RapidFlightVariant.northWest => const Offset(-1, -0.78),
+    _RapidFlightVariant.southEast => const Offset(0.92, 0.72),
+    _RapidFlightVariant.southWest => const Offset(-0.92, 0.72),
+    _RapidFlightVariant.east => const Offset(1, -0.1),
+    _RapidFlightVariant.west => const Offset(-1, -0.1),
+    _RapidFlightVariant.north => const Offset(0.05, -1),
+    _RapidFlightVariant.south => const Offset(0.05, 1),
+  };
 }
 
 class _RapidTransformPreview extends StatefulWidget {
@@ -6114,7 +6255,7 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1900),
+      duration: const Duration(milliseconds: 2100),
     )..forward();
   }
 
@@ -6138,167 +6279,305 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
       _RapidRarity.epic => const Color(0xFFA5FFE4),
       _RapidRarity.legendary => const Color(0xFFFFD98C),
     };
+    final shapeVariant = _shapeVariantForCard(widget.index, widget.rarity);
+    final animalVariant = _animalVariantForCard(widget.index, widget.rarity);
+    final flightVariant = _flightVariantForCard(widget.index, widget.rarity);
+    final rollVariant = _rollVariantForCard(widget.index, widget.rarity);
+
     return Material(
       color: Colors.transparent,
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, _) {
-          final p = Curves.easeInOutCubic.transform(_controller.value);
-          final expand = (p / 0.3).clamp(0.0, 1.0);
-          final morph = ((p - 0.18) / 0.82).clamp(0.0, 1.0);
-          final cardScale = 1 + (0.18 * Curves.easeOutCubic.transform(expand));
-          final cardOpacity = (1 - (morph * 0.86)).clamp(0.0, 1.0);
-          final steps = switch (widget.mode) {
-            _RapidDeckFxMode.roll => const [
-                'Hold card flat',
-                'Start rolling motion',
-                'Rotate around center',
-                'Lock into rolled form',
-              ],
-            _RapidDeckFxMode.shape => const [
-                'Flatten card surface',
-                'Fold to guide lines',
-                'Morph into geometric frame',
-                'Finalize target shape',
-              ],
-            _RapidDeckFxMode.animal => const [
-                'Compress card body',
-                'Lift front fold',
-                'Form walking silhouette',
-                'Walk cycle begins',
-              ],
-            _RapidDeckFxMode.plane => const [
-                'Fold page in half',
-                'Fold top corners inward',
-                'Bring tip to center',
-                'Sharpen center ridge',
-                'Fold body in half',
-                'Shape side wing',
-                'Mirror second wing',
-                'Finalize paper plane',
-              ],
-          };
-          final stepFloat = morph * (steps.length - 1);
-          final stepIndex = stepFloat.floor().clamp(0, steps.length - 1);
+          final t = Curves.easeInOutCubic.transform(_controller.value);
+          final pulse = Curves.easeInOutCubic
+              .transform((1 - ((t - 0.5).abs() * 2)).clamp(0.0, 1.0));
+          double rotX = 0;
+          double rotY = 0;
+          double rotZ = 0;
+          double tx = 0;
+          double ty = 0;
+          double clipMorph = 0;
+          double cardScale = 1 + (0.15 * pulse);
+          double planeFoldProgress = 0;
+          bool frontFacing = true;
+          IconData centerIcon = widget.icon;
+          String variantLabel = '';
+          List<String> steps = const ['Initialize', 'Transform', 'Return'];
+          int stepIndex = 0;
 
-          Widget morphWidget;
           switch (widget.mode) {
             case _RapidDeckFxMode.roll:
-              morphWidget = Transform.rotate(
-                angle: morph * math.pi * 1.8,
-                child: Icon(
-                  Icons.style_rounded,
-                  size: 74,
-                  color: accent.withValues(alpha: 0.95),
-                ),
-              );
+              final roll = Curves.easeInOutCubic.transform(t);
+              final eased = Curves.easeInOutCubic.transform(roll);
+              switch (rollVariant) {
+                case _RapidRollVariant.horizontalFront:
+                  rotX = eased * (math.pi * 2);
+                  break;
+                case _RapidRollVariant.horizontalBack:
+                  rotX = -eased * (math.pi * 2);
+                  break;
+                case _RapidRollVariant.verticalFront:
+                  rotY = eased * (math.pi * 2);
+                  break;
+                case _RapidRollVariant.verticalBack:
+                  rotY = -eased * (math.pi * 2);
+                  break;
+                case _RapidRollVariant.diagonalFront:
+                  rotX = eased * (math.pi * 1.45);
+                  rotY = eased * (math.pi * 1.35);
+                  rotZ = eased * (math.pi * 0.22);
+                  break;
+                case _RapidRollVariant.diagonalBack:
+                  rotX = -eased * (math.pi * 1.45);
+                  rotY = -eased * (math.pi * 1.35);
+                  rotZ = -eased * (math.pi * 0.22);
+                  break;
+              }
+              ty = -math.sin(eased * math.pi) * 14;
+              final primary = rotY.abs() > rotX.abs() ? rotY : rotX;
+              frontFacing = math.cos(primary) >= 0;
+              centerIcon = frontFacing
+                  ? Icons.crop_portrait_rounded
+                  : Icons.flip_to_back_rounded;
+              variantLabel = _rollVariantLabel(rollVariant);
+              steps = const [
+                'Hold card flat',
+                'Start edge roll',
+                'Pass through full turn',
+                'Settle to origin',
+              ];
+              stepIndex = (roll * (steps.length - 1))
+                  .floor()
+                  .clamp(0, steps.length - 1);
               break;
             case _RapidDeckFxMode.shape:
-              final styles = _MorphStyle.values;
-              final style =
-                  styles[(widget.index + (morph * 8).floor()) % styles.length];
-              morphWidget = ClipPath(
-                clipper: _MorphingClipper(style),
-                child: Container(
-                  width: 148,
-                  height: 112,
-                  color: accent.withValues(alpha: 0.9),
-                ),
-              );
+              clipMorph = pulse;
+              final wobble = math.sin(t * math.pi * 2);
+              rotX = wobble * 0.22 * pulse;
+              rotY = math.sin((t * math.pi * 2) + (widget.index * 0.7)) *
+                  0.28 *
+                  pulse;
+              rotZ = math.sin((t * math.pi * 2) + (widget.index * 0.35)) *
+                  0.11 *
+                  pulse;
+              ty = -18 * pulse;
+              centerIcon = Icons.category_rounded;
+              variantLabel = _shapeVariantLabel(shapeVariant);
+              steps = const [
+                'Card frame stabilized',
+                'Silhouette carved',
+                'Shape rotation pass',
+                'Return to base card',
+              ];
+              stepIndex =
+                  (t * (steps.length - 1)).floor().clamp(0, steps.length - 1);
               break;
             case _RapidDeckFxMode.animal:
-              morphWidget = Transform.translate(
-                offset: Offset(
-                  (1 - morph) * 14,
-                  math.sin(p * math.pi * 6) * 3,
-                ),
-                child: Icon(
-                  Icons.pets_rounded,
-                  size: 78,
-                  color: accent.withValues(alpha: 0.95),
-                ),
-              );
+              clipMorph = pulse;
+              final stride = math.sin(t * math.pi * 3.2);
+              tx = stride * 8 * pulse;
+              ty = -12 * pulse + (math.sin(t * math.pi * 2).abs() * 5 * pulse);
+              rotY = math.sin((t * math.pi * 2) + (widget.index * 0.45)) *
+                  0.24 *
+                  pulse;
+              rotZ = math.sin((t * math.pi * 2.3) + (widget.index * 0.3)) *
+                  0.08 *
+                  pulse;
+              centerIcon = Icons.pets_rounded;
+              variantLabel = _animalVariantLabel(animalVariant);
+              steps = const [
+                'Body silhouette traced',
+                'Head and tail formed',
+                'Animal motion pass',
+                'Return to base card',
+              ];
+              stepIndex =
+                  (t * (steps.length - 1)).floor().clamp(0, steps.length - 1);
               break;
             case _RapidDeckFxMode.plane:
-              morphWidget = SizedBox(
-                width: 220,
-                height: 150,
-                child: CustomPaint(
-                  painter: _PlaneFoldPainter(
-                    progress: morph,
-                    color: accent,
+              final fold =
+                  Curves.easeOutCubic.transform((t / 0.45).clamp(0.0, 1.0));
+              final fly = Curves.easeOutCubic
+                  .transform(((t - 0.45) / 0.3).clamp(0.0, 1.0));
+              final ret = Curves.easeInOutCubic
+                  .transform(((t - 0.75) / 0.25).clamp(0.0, 1.0));
+              final dir = _flightDirectionForVariant(flightVariant);
+              clipMorph = (fold * (1 - ret)).clamp(0.0, 1.0);
+              final travel = (fly * (1 - ret)).clamp(0.0, 1.0);
+              tx = dir.dx * 210 * travel;
+              ty = (dir.dy * 145 * travel) - (28 * travel);
+              rotY = dir.dx * 0.56 * clipMorph;
+              rotX = -dir.dy * 0.42 * clipMorph;
+              rotZ = (dir.dx * 0.22 + dir.dy * 0.09) * travel;
+              cardScale = 1 + (0.12 * clipMorph);
+              planeFoldProgress = fold;
+              centerIcon = t < 0.6
+                  ? Icons.flight_land_rounded
+                  : Icons.flight_takeoff_rounded;
+              variantLabel = '${_flightVariantLabel(flightVariant)} Flight';
+              steps = const [
+                'Fold wing one',
+                'Fold wing two',
+                'Lock nose',
+                'Launch and glide',
+                'Return to deck',
+              ];
+              if (t < 0.18) {
+                stepIndex = 0;
+              } else if (t < 0.34) {
+                stepIndex = 1;
+              } else if (t < 0.5) {
+                stepIndex = 2;
+              } else if (t < 0.75) {
+                stepIndex = 3;
+              } else {
+                stepIndex = 4;
+              }
+              break;
+          }
+
+          final cardTransform = Matrix4.identity()
+            ..setEntry(3, 2, 0.00185)
+            ..translate(tx, ty, 0.0)
+            ..rotateX(rotX)
+            ..rotateY(rotY)
+            ..rotateZ(rotZ);
+
+          Widget centerVisual() {
+            if (widget.mode == _RapidDeckFxMode.roll) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(centerIcon,
+                      size: 82, color: accent.withValues(alpha: 0.92)),
+                  const SizedBox(height: 8),
+                  Text(
+                    frontFacing ? 'Front Face' : 'Back Face',
+                    style: TextStyle(
+                      color: accent.withValues(alpha: 0.96),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              );
+            }
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(centerIcon,
+                    size: 82, color: accent.withValues(alpha: 0.92)),
+                const SizedBox(height: 8),
+                Text(
+                  variantLabel,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: accent.withValues(alpha: 0.94),
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-              );
-              break;
+              ],
+            );
           }
 
           return Transform.scale(
             scale: cardScale,
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18),
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [base, base.withValues(alpha: 0.84)],
+            child: Transform(
+              alignment: Alignment.center,
+              transform: cardTransform,
+              child: PhysicalShape(
+                clipper: _RapidPreviewClipper(
+                  mode: widget.mode,
+                  shapeVariant: shapeVariant,
+                  animalVariant: animalVariant,
+                  morph: clipMorph,
                 ),
-                border: Border.all(color: accent.withValues(alpha: 0.42)),
-                boxShadow: [
-                  BoxShadow(
-                    color: accent.withValues(alpha: 0.2),
-                    blurRadius: 24,
-                    spreadRadius: 1,
-                    offset: const Offset(0, 10),
+                color: base,
+                shadowColor: accent.withValues(alpha: 0.35),
+                elevation: 18,
+                clipBehavior: Clip.antiAlias,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [base, base.withValues(alpha: 0.84)],
+                    ),
                   ),
-                ],
-              ),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Opacity(
-                    opacity: cardOpacity,
-                    child: Padding(
-                      padding: const EdgeInsets.all(18),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(widget.icon, color: accent, size: 22),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  widget.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xFFEFF7FF),
-                                    fontWeight: FontWeight.w800,
+                  child: Stack(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(18),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(widget.icon, color: accent, size: 22),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    widget.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xFFEFF7FF),
+                                      fontWeight: FontWeight.w800,
+                                    ),
                                   ),
                                 ),
+                              ],
+                            ),
+                            const Spacer(),
+                            Center(child: centerVisual()),
+                            const Spacer(),
+                            Text(
+                              variantLabel,
+                              style: TextStyle(
+                                color: accent.withValues(alpha: 0.95),
+                                fontWeight: FontWeight.w800,
                               ),
-                            ],
-                          ),
-                          const Spacer(),
-                          Text(
-                            'Step ${stepIndex + 1}/${steps.length} · ${steps[stepIndex]}',
-                            style: TextStyle(
-                              color: accent.withValues(alpha: 0.92),
-                              fontWeight: FontWeight.w700,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Step ${stepIndex + 1}/${steps.length} · ${steps[stepIndex]}',
+                              style: TextStyle(
+                                color: accent.withValues(alpha: 0.86),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (widget.mode == _RapidDeckFxMode.plane &&
+                          planeFoldProgress > 0 &&
+                          planeFoldProgress < 1)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _PlaneFoldPainter(
+                                progress: planeFoldProgress,
+                                color: accent.withValues(alpha: 0.9),
+                              ),
                             ),
                           ),
-                        ],
+                        ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: CustomPaint(
+                            painter: _RapidPreviewStrokePainter(
+                              mode: widget.mode,
+                              shapeVariant: shapeVariant,
+                              animalVariant: animalVariant,
+                              morph: clipMorph,
+                              color: accent.withValues(alpha: 0.52),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                  Center(
-                    child: Opacity(
-                      opacity: morph.clamp(0.0, 1.0),
-                      child: morphWidget,
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           );
@@ -6306,6 +6585,356 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
       ),
     );
   }
+}
+
+class _RapidPreviewClipper extends CustomClipper<Path> {
+  final _RapidDeckFxMode mode;
+  final _RapidShapeVariant shapeVariant;
+  final _RapidAnimalVariant animalVariant;
+  final double morph;
+
+  const _RapidPreviewClipper({
+    required this.mode,
+    required this.shapeVariant,
+    required this.animalVariant,
+    required this.morph,
+  });
+
+  @override
+  Path getClip(Size size) {
+    return _rapidPreviewPath(
+      size,
+      mode: mode,
+      shapeVariant: shapeVariant,
+      animalVariant: animalVariant,
+      morph: morph,
+    );
+  }
+
+  @override
+  bool shouldReclip(covariant _RapidPreviewClipper oldClipper) {
+    return oldClipper.mode != mode ||
+        oldClipper.shapeVariant != shapeVariant ||
+        oldClipper.animalVariant != animalVariant ||
+        oldClipper.morph != morph;
+  }
+}
+
+class _RapidPreviewStrokePainter extends CustomPainter {
+  final _RapidDeckFxMode mode;
+  final _RapidShapeVariant shapeVariant;
+  final _RapidAnimalVariant animalVariant;
+  final double morph;
+  final Color color;
+
+  const _RapidPreviewStrokePainter({
+    required this.mode,
+    required this.shapeVariant,
+    required this.animalVariant,
+    required this.morph,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = _rapidPreviewPath(
+      size,
+      mode: mode,
+      shapeVariant: shapeVariant,
+      animalVariant: animalVariant,
+      morph: morph,
+    );
+    final stroke = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8
+      ..color = color;
+    canvas.drawPath(path, stroke);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RapidPreviewStrokePainter oldDelegate) {
+    return oldDelegate.mode != mode ||
+        oldDelegate.shapeVariant != shapeVariant ||
+        oldDelegate.animalVariant != animalVariant ||
+        oldDelegate.morph != morph ||
+        oldDelegate.color != color;
+  }
+}
+
+Path _rapidPreviewPath(
+  Size size, {
+  required _RapidDeckFxMode mode,
+  required _RapidShapeVariant shapeVariant,
+  required _RapidAnimalVariant animalVariant,
+  required double morph,
+}) {
+  final amount = morph.clamp(0.0, 1.0);
+  if (mode == _RapidDeckFxMode.roll || amount < 0.06) {
+    return _roundedCardPath(size);
+  }
+  switch (mode) {
+    case _RapidDeckFxMode.shape:
+      return _shapePath(size, shapeVariant);
+    case _RapidDeckFxMode.animal:
+      return _animalPath(size, animalVariant);
+    case _RapidDeckFxMode.plane:
+      return _planeCardPath(size, amount);
+    case _RapidDeckFxMode.roll:
+      return _roundedCardPath(size);
+  }
+}
+
+Path _roundedCardPath(Size size) {
+  return Path()
+    ..addRRect(
+      RRect.fromRectAndRadius(
+        Offset.zero & size,
+        const Radius.circular(18),
+      ),
+    );
+}
+
+double _lerpDouble(double a, double b, double t) {
+  return a + ((b - a) * t);
+}
+
+Path _shapePath(Size size, _RapidShapeVariant variant) {
+  final w = size.width;
+  final h = size.height;
+  switch (variant) {
+    case _RapidShapeVariant.diamond:
+      return _polygonPathAbsolute([
+        Offset(w * 0.5, 0),
+        Offset(w, h * 0.5),
+        Offset(w * 0.5, h),
+        Offset(0, h * 0.5),
+      ]);
+    case _RapidShapeVariant.triangle:
+      return _polygonPathAbsolute([
+        Offset(w * 0.5, 0),
+        Offset(w, h),
+        Offset(0, h),
+      ]);
+    case _RapidShapeVariant.hexagon:
+      return _polygonPathAbsolute([
+        Offset(w * 0.18, 0),
+        Offset(w * 0.82, 0),
+        Offset(w, h * 0.5),
+        Offset(w * 0.82, h),
+        Offset(w * 0.18, h),
+        Offset(0, h * 0.5),
+      ]);
+    case _RapidShapeVariant.octagon:
+      return _polygonPathAbsolute([
+        Offset(w * 0.24, 0),
+        Offset(w * 0.76, 0),
+        Offset(w, h * 0.24),
+        Offset(w, h * 0.76),
+        Offset(w * 0.76, h),
+        Offset(w * 0.24, h),
+        Offset(0, h * 0.76),
+        Offset(0, h * 0.24),
+      ]);
+    case _RapidShapeVariant.star:
+      final cx = w * 0.5;
+      final cy = h * 0.5;
+      final outer = math.min(w, h) * 0.52;
+      final inner = outer * 0.46;
+      final path = Path();
+      for (int i = 0; i < 10; i++) {
+        final r = i.isEven ? outer : inner;
+        final a = (-math.pi / 2) + (i * math.pi / 5);
+        final x = cx + (math.cos(a) * r);
+        final y = cy + (math.sin(a) * r);
+        if (i == 0) {
+          path.moveTo(x, y);
+        } else {
+          path.lineTo(x, y);
+        }
+      }
+      path.close();
+      return path;
+    case _RapidShapeVariant.shield:
+      final path = Path()
+        ..moveTo(w * 0.2, 0)
+        ..lineTo(w * 0.8, 0)
+        ..quadraticBezierTo(w * 0.94, h * 0.2, w * 0.88, h * 0.44)
+        ..quadraticBezierTo(w * 0.8, h * 0.82, w * 0.5, h)
+        ..quadraticBezierTo(w * 0.2, h * 0.82, w * 0.12, h * 0.44)
+        ..quadraticBezierTo(w * 0.06, h * 0.2, w * 0.2, 0)
+        ..close();
+      return path;
+    case _RapidShapeVariant.ticket:
+      final notch = h * 0.14;
+      final path = Path()
+        ..moveTo(w * 0.12, 0)
+        ..lineTo(w * 0.88, 0)
+        ..quadraticBezierTo(w, 0, w, h * 0.12)
+        ..lineTo(w, (h * 0.5) - notch)
+        ..quadraticBezierTo(w * 0.92, h * 0.5, w, (h * 0.5) + notch)
+        ..lineTo(w, h * 0.88)
+        ..quadraticBezierTo(w, h, w * 0.88, h)
+        ..lineTo(w * 0.12, h)
+        ..quadraticBezierTo(0, h, 0, h * 0.88)
+        ..lineTo(0, (h * 0.5) + notch)
+        ..quadraticBezierTo(w * 0.08, h * 0.5, 0, (h * 0.5) - notch)
+        ..lineTo(0, h * 0.12)
+        ..quadraticBezierTo(0, 0, w * 0.12, 0)
+        ..close();
+      return path;
+    case _RapidShapeVariant.capsule:
+      return Path()
+        ..addRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(0, h * 0.04, w, h * 0.92),
+            Radius.circular(h * 0.46),
+          ),
+        );
+  }
+}
+
+Path _animalPath(Size size, _RapidAnimalVariant variant) {
+  switch (variant) {
+    case _RapidAnimalVariant.dog:
+      return _quadrupedPath(
+        size,
+        snout: 1,
+        ear: 0.55,
+        tail: 0.35,
+        back: 0.1,
+        belly: 0.12,
+      );
+    case _RapidAnimalVariant.cat:
+      return _quadrupedPath(
+        size,
+        snout: 0.45,
+        ear: 1,
+        tail: 1,
+        back: 0.2,
+        belly: 0.04,
+      );
+    case _RapidAnimalVariant.fox:
+      return _quadrupedPath(
+        size,
+        snout: 0.95,
+        ear: 0.9,
+        tail: 1,
+        back: 0.16,
+        belly: 0.08,
+      );
+    case _RapidAnimalVariant.wolf:
+      return _quadrupedPath(
+        size,
+        snout: 1,
+        ear: 0.7,
+        tail: 0.6,
+        back: 0.2,
+        belly: 0.16,
+      );
+    case _RapidAnimalVariant.panther:
+      return _quadrupedPath(
+        size,
+        snout: 0.62,
+        ear: 0.35,
+        tail: 0.9,
+        back: 0.32,
+        belly: 0.03,
+      );
+    case _RapidAnimalVariant.lynx:
+      return _quadrupedPath(
+        size,
+        snout: 0.58,
+        ear: 0.86,
+        tail: 0.2,
+        back: 0.2,
+        belly: 0.06,
+      );
+  }
+}
+
+Path _quadrupedPath(
+  Size size, {
+  required double snout,
+  required double ear,
+  required double tail,
+  required double back,
+  required double belly,
+}) {
+  final w = size.width;
+  final h = size.height;
+  final headTopY = h * (0.34 - (ear * 0.03));
+  final earPeakY = h * (0.18 - (ear * 0.05));
+  final backY = h * (0.33 - (back * 0.04));
+  final tailY = h * (0.42 - (tail * 0.08));
+  final chestY = h * (0.58 + (belly * 0.03));
+  final path = Path()
+    ..moveTo(w * 0.08, h * 0.55)
+    ..quadraticBezierTo(
+        w * (0.09 + (0.02 * snout)), h * 0.45, w * 0.16, h * 0.4)
+    ..quadraticBezierTo(w * 0.19, headTopY, w * 0.25, headTopY)
+    ..lineTo(w * 0.29, earPeakY)
+    ..lineTo(w * 0.34, headTopY + (h * 0.02))
+    ..quadraticBezierTo(w * 0.55, backY, w * 0.72, h * 0.39)
+    ..quadraticBezierTo(w * 0.86, tailY, w * 0.92, h * 0.48)
+    ..quadraticBezierTo(
+        w * 0.98, h * (0.56 + (tail * 0.04)), w * 0.87, h * 0.61)
+    ..lineTo(w * 0.83, h * 0.92)
+    ..lineTo(w * 0.74, h * 0.92)
+    ..lineTo(w * 0.71, h * 0.67)
+    ..quadraticBezierTo(w * 0.56, h * (0.72 + (belly * 0.04)), w * 0.48, chestY)
+    ..lineTo(w * 0.44, h * 0.92)
+    ..lineTo(w * 0.35, h * 0.92)
+    ..lineTo(w * 0.35, h * 0.62)
+    ..quadraticBezierTo(w * 0.24, h * 0.62, w * 0.15, h * 0.58)
+    ..quadraticBezierTo(w * 0.1, h * 0.57, w * 0.08, h * 0.55)
+    ..close();
+  return path;
+}
+
+Path _planeCardPath(Size size, double morph) {
+  final t = ((morph - 0.08) / 0.92).clamp(0.0, 1.0);
+  if (t <= 0.01) {
+    return _roundedCardPath(size);
+  }
+  final rectPoints = [
+    const Offset(0.08, 0.12),
+    const Offset(0.92, 0.12),
+    const Offset(0.92, 0.3),
+    const Offset(0.92, 0.88),
+    const Offset(0.08, 0.88),
+    const Offset(0.08, 0.66),
+    const Offset(0.08, 0.3),
+  ];
+  final planePoints = [
+    const Offset(0.1, 0.64),
+    const Offset(0.74, 0.46),
+    const Offset(0.9, 0.38),
+    const Offset(0.78, 0.56),
+    const Offset(0.56, 0.78),
+    const Offset(0.47, 0.68),
+    const Offset(0.3, 0.79),
+  ];
+  final points = <Offset>[];
+  for (int i = 0; i < rectPoints.length; i++) {
+    final a = rectPoints[i];
+    final b = planePoints[i];
+    points.add(
+      Offset(
+        _lerpDouble(a.dx, b.dx, t) * size.width,
+        _lerpDouble(a.dy, b.dy, t) * size.height,
+      ),
+    );
+  }
+  return _polygonPathAbsolute(points);
+}
+
+Path _polygonPathAbsolute(List<Offset> points) {
+  final path = Path()..moveTo(points.first.dx, points.first.dy);
+  for (int i = 1; i < points.length; i++) {
+    path.lineTo(points[i].dx, points[i].dy);
+  }
+  path.close();
+  return path;
 }
 
 class _PlaneFoldPainter extends CustomPainter {
@@ -6507,80 +7136,6 @@ _RapidRarity _rarityForDeckIndex(int index) {
     return _RapidRarity.rare;
   }
   return _RapidRarity.common;
-}
-
-enum _MorphStyle {
-  roundedRect,
-  diamond,
-  triangle,
-  hex,
-  star,
-}
-
-class _MorphingClipper extends CustomClipper<Path> {
-  final _MorphStyle style;
-
-  _MorphingClipper(this.style);
-
-  @override
-  Path getClip(Size size) {
-    final w = size.width;
-    final h = size.height;
-    switch (style) {
-      case _MorphStyle.roundedRect:
-        return Path()
-          ..addRRect(RRect.fromRectAndRadius(
-            Rect.fromLTWH(0, 0, w, h),
-            const Radius.circular(14),
-          ));
-      case _MorphStyle.diamond:
-        return Path()
-          ..moveTo(w * 0.5, 0)
-          ..lineTo(w, h * 0.5)
-          ..lineTo(w * 0.5, h)
-          ..lineTo(0, h * 0.5)
-          ..close();
-      case _MorphStyle.triangle:
-        return Path()
-          ..moveTo(w * 0.5, 0)
-          ..lineTo(w, h)
-          ..lineTo(0, h)
-          ..close();
-      case _MorphStyle.hex:
-        return Path()
-          ..moveTo(w * 0.2, 0)
-          ..lineTo(w * 0.8, 0)
-          ..lineTo(w, h * 0.5)
-          ..lineTo(w * 0.8, h)
-          ..lineTo(w * 0.2, h)
-          ..lineTo(0, h * 0.5)
-          ..close();
-      case _MorphStyle.star:
-        final cx = w * 0.5;
-        final cy = h * 0.5;
-        final outer = math.min(w, h) * 0.5;
-        final inner = outer * 0.44;
-        final path = Path();
-        for (int i = 0; i < 10; i++) {
-          final r = i.isEven ? outer : inner;
-          final a = (-math.pi / 2) + (i * math.pi / 5);
-          final x = cx + (math.cos(a) * r);
-          final y = cy + (math.sin(a) * r);
-          if (i == 0) {
-            path.moveTo(x, y);
-          } else {
-            path.lineTo(x, y);
-          }
-        }
-        path.close();
-        return path;
-    }
-  }
-
-  @override
-  bool shouldReclip(covariant _MorphingClipper oldClipper) {
-    return oldClipper.style != style;
-  }
 }
 
 class _RapidDeckParallaxBackground extends StatelessWidget {

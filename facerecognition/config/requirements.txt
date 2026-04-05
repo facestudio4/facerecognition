@@ -1,5 +1,0 @@
-numpy
-opencv-contrib-python
-pillow
-requests
-kivy; platform_system == "Windows"

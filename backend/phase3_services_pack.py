@@ -337,12 +337,9 @@ class Phase3ServiceHub:
 
     def _send_email(self, to_email: str, subject: str, body: str):
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
-        user = os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-        password = (
-            os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "")
-            or os.environ.get("FACESTUDIO_SMTP_PASS", "")
-        ).strip()
-        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "").strip() or user
+        user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
+        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "mlyu ajgr zorl foog") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
+        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "shishirbhavsar4@gmail.com").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -369,9 +366,6 @@ class Phase3ServiceHub:
 
         if "gmail.com" in host.lower() and " " in password:
             password = password.replace(" ", "")
-        if "gmail.com" in host.lower() and from_email.lower() != user.lower():
-            # Gmail SMTP usually requires sender to match authenticated account.
-            from_email = user
 
         if port == 465 and not use_ssl:
             use_ssl = True
@@ -1240,17 +1234,11 @@ class Phase3ServiceHub:
         lng = _as_float(longitude)
         conf = _as_float(confidence)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        has_valid_coords = (
-            lat is not None
-            and lng is not None
-            and -90.0 <= lat <= 90.0
-            and -180.0 <= lng <= 180.0
-        )
 
         with self._connect() as conn:
             latest_for_person = conn.execute(
                 """
-                SELECT id, event_time, location_name, latitude, longitude
+                SELECT id, event_time, location_name
                 FROM recognition_location_events
                 WHERE lower(recognized_name)=lower(?)
                 ORDER BY id DESC
@@ -1258,20 +1246,6 @@ class Phase3ServiceHub:
                 """,
                 (name,),
             ).fetchone()
-            latest_has_valid_coords = bool(
-                latest_for_person
-                and latest_for_person["latitude"] is not None
-                and latest_for_person["longitude"] is not None
-            )
-            if (not has_valid_coords) and latest_has_valid_coords:
-                return {
-                    "ok": True,
-                    "data": {
-                        "saved": False,
-                        "reason": "kept_last_known_location",
-                        "event_id": int(latest_for_person["id"]),
-                    },
-                }
             if (
                 (not force_update)
                 and latest_for_person
@@ -1522,6 +1496,41 @@ class Phase3ServiceHub:
         self._sync_refresh_thread.start()
         return {"scheduled": True, "running": True, "error": ""}
 
+    def enroll_face_for_user(self, person_name: str, image_b64: str, username: str = ""):
+        person = self._sanitize_face_name(person_name or username or "user")
+        image_b64 = str(image_b64 or "").strip()
+        if not image_b64:
+            return {"ok": False, "error": "image_b64 required"}
+        entry = {
+            "person": person,
+            "filename": f"{int(time.time() * 1000)}.jpg",
+            "image_b64": image_b64,
+        }
+        return self.sync_known_faces([entry], clear_existing=False, refresh_after=True)
+
+    def _append_face_sample(self, person: str, frame):
+        if frame is None or frame.size == 0:
+            return
+        try:
+            faces_root = os.path.join(self.base_dir, "database", "faces")
+            os.makedirs(faces_root, exist_ok=True)
+            safe_person = self._sanitize_face_name(person)
+            person_dir = os.path.join(faces_root, safe_person)
+            os.makedirs(person_dir, exist_ok=True)
+            out_path = os.path.join(person_dir, f"auto_{int(time.time() * 1000)}.jpg")
+            cv2.imwrite(out_path, frame)
+            self._mobile_known_encodings = None
+            self._mobile_known_loaded_at = 0.0
+            try:
+                from frontend import facercognition as legacy
+                enc_path = getattr(legacy, "ENCODINGS_PATH", "")
+                if enc_path and os.path.exists(enc_path):
+                    os.remove(enc_path)
+            except Exception:
+                pass
+        except Exception:
+            return
+
     def sync_known_faces(self, entries, clear_existing: bool = False, refresh_after: bool = False):
         if not isinstance(entries, list) or not entries:
             raise ValueError("entries must be a non-empty list")
@@ -1713,6 +1722,18 @@ class Phase3ServiceHub:
             if best["score"] > float(global_best.get("score", 0.0)):
                 global_best = best
                 global_top = top
+
+            if best.get("name") and best.get("name") != "Unknown":
+                try:
+                    x1 = max(int(fx), 0)
+                    y1 = max(int(fy), 0)
+                    x2 = min(int(fx + fw), frame.shape[1])
+                    y2 = min(int(fy + fh), frame.shape[0])
+                    crop = frame[y1:y2, x1:x2]
+                    if crop is not None and crop.size > 0:
+                        self._append_face_sample(best.get("name", "face"), crop)
+                except Exception:
+                    pass
 
             all_faces.append(
                 {
@@ -2376,6 +2397,19 @@ class Phase3ServiceHub:
                                 "matches": [],
                             }
                             self._send_json(200, {"ok": False, "error": "identify_failed", "data": fallback})
+                        return
+
+                    if path == "/api/mobile/face/enroll":
+                        token_payload = self._token_payload()
+                        username = str(token_payload.get("sub", "")) if token_payload else ""
+                        person = str(payload.get("person", "")).strip() or username
+                        image_b64 = str(payload.get("image_b64", "")).strip()
+                        if not image_b64:
+                            self._send_json(400, {"ok": False, "error": "image_b64 required"})
+                            return
+                        result = hub.enroll_face_for_user(person_name=person, image_b64=image_b64, username=username)
+                        code = 200 if result.get("ok") else 400
+                        self._send_json(code, result)
                         return
 
                     if path == "/api/mobile/generate":

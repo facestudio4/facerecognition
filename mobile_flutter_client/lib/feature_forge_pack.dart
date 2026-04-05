@@ -14464,7 +14464,7 @@ class _FeatureForgePageState extends State<FeatureForgePage>
     final q = _search.text.trim().toLowerCase();
     final base = featureForgeNodes.where((n) {
       final domainOk = _domain == 'All' || n.domain == _domain;
-      final text = (n.id + ' ' + n.title + ' ' + n.detail + ' ' + n.domain)
+      final text = ('${n.id} ${n.title} ${n.detail} ${n.domain}')
           .toLowerCase();
       final qOk = q.isEmpty || text.contains(q);
       return domainOk && qOk;
@@ -14520,7 +14520,7 @@ class _FeatureForgePageState extends State<FeatureForgePage>
                               value: _deckMode,
                               onChanged: (v) => setState(() => _deckMode = v))
                         ]),
-                        Text('Depth ' + _depth.toStringAsFixed(2),
+                        Text('Depth ${_depth.toStringAsFixed(2)}',
                             style: const TextStyle(color: Color(0xFFAFC4E7))),
                         Slider(
                             value: _depth,
@@ -14528,7 +14528,7 @@ class _FeatureForgePageState extends State<FeatureForgePage>
                             max: 0.6,
                             divisions: 58,
                             onChanged: (v) => setState(() => _depth = v)),
-                        Text('Visible modules: ' + rows.length.toString(),
+                        Text('Visible modules: ${rows.length}',
                             style: const TextStyle(color: Color(0xFFB9D5F7))),
                       ]))),
           const SizedBox(height: 8),
@@ -14569,11 +14569,11 @@ class _FeatureForgePageState extends State<FeatureForgePage>
                           leading: CircleAvatar(
                               backgroundColor: Color(n.colorValue),
                               child: Text(n.complexity.toString())),
-                          title: Text(n.id + '  ' + n.title,
+                          title: Text('${n.id}  ${n.title}',
                               style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w700)),
-                          subtitle: Text(n.domain + ' • ' + n.detail,
+                          subtitle: Text('${n.domain} • ${n.detail}',
                               maxLines: 2, overflow: TextOverflow.ellipsis),
                         ),
                       ),

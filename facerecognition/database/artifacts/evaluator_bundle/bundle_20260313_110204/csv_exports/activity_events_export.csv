@@ -1,8 +1,0 @@
-id,event_time,username,role,action,detail
-1,2026-03-13 10:50:26,system,service,API Started,http://127.0.0.1:8787
-2,2026-03-13 10:55:39,system,service,API Started,http://127.0.0.1:8787
-3,2026-03-13 10:55:39,system,service,API Started,http://127.0.0.1:8787
-4,2026-03-13 10:56:49,system,service,API Started,http://127.0.0.1:8787
-5,2026-03-13 10:56:49,system,service,Scheduler Stopped,Backup scheduler stopped
-6,2026-03-13 10:56:50,system,service,API Stopped,Server stopped
-7,2026-03-13 10:56:50,system,service,API Started,http://127.0.0.1:8787
