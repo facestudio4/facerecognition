@@ -91,8 +91,8 @@ class _FaceReferenceCache {
 
   Future<_FaceReferenceProfile?> _loadImpl() async {
     const candidates = [
-      'assets/face_reference.png',
       'assets/face_reference.jpeg',
+      'assets/face_reference.png',
     ];
     for (final asset in candidates) {
       try {
@@ -1637,14 +1637,7 @@ class _BlueFaceHeroState extends State<_BlueFaceHero>
                                     (widget.settleIn && widget.size <= 64),
                               ),
                             ),
-                            if (widget.ultraClear)
-                              IgnorePointer(
-                                child: CustomPaint(
-                                  painter: _FaceGlyphPainter(
-                                    glow: (pulse * 0.7).clamp(0.2, 1.4),
-                                  ),
-                                ),
-                              ),
+                            const SizedBox.shrink(),
                             // Specular sweep disabled globally for matte look
                           ],
                         ),
@@ -6129,7 +6122,7 @@ class _MotionStudioPageState extends State<MotionStudioPage>
                                       borderRadius: BorderRadius.circular(18),
                                       gradient: LinearGradient(
                                         begin: Alignment(-0.9, -1 + sheenShift),
-                                        end: Alignment(0.85, 1),
+                                        end: const Alignment(0.85, 1),
                                         colors: [
                                           Colors.white.withValues(
                                               alpha: 0.18 + (focus * 0.07)),
@@ -6657,13 +6650,13 @@ class FeatureForgePage extends StatelessWidget {
       appBar: AppBar(title: const Text('Feature Forge 3D')),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(12, 12, 12, 6),
             child: _CinematicFaceHeader(
               title: 'What Feature Forge 3D Does',
               subtitle:
                   'Feature Forge 3D is for testing many generation, analytics, and operations scenarios fast. Use 3D Motion Studio for camera motion experiments.',
-              tags: const [
+              tags: [
                 _HeaderTag(
                   icon: Icons.dashboard_customize,
                   label: 'Scenario Deck',
@@ -8345,7 +8338,7 @@ Path _planeCardPath(Size size, double morph, double variantSeed) {
     Offset(0.1, 0.66 - (noseLift * 0.22)),
     Offset(0.74, 0.46 - (noseLift * 0.2)),
     Offset(0.9, 0.34 + (tailTaper * 0.08)),
-    Offset(0.78, 0.54),
+    const Offset(0.78, 0.54),
     Offset(0.56, wingDepth),
     Offset(0.47, 0.68 + (tailTaper * 0.04)),
     Offset(0.3, wingDepth + (tailTaper * 0.03)),
@@ -8435,7 +8428,7 @@ class _PlaneFoldPainter extends CustomPainter {
       void arrow(Offset a, Offset b) {
         canvas.drawLine(a, b, line);
         final ang = math.atan2(b.dy - a.dy, b.dx - a.dx);
-        final h = 8.0;
+        const h = 8.0;
         final p1 = Offset(
           b.dx - (math.cos(ang - 0.55) * h),
           b.dy - (math.sin(ang - 0.55) * h),
