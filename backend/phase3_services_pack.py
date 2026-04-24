@@ -1469,6 +1469,35 @@ class Phase3ServiceHub:
                     ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_latest_recognition_locations(self, limit: int = 2000):
+        limit = max(1, min(int(limit), 5000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    e.id,
+                    e.event_time,
+                    e.recognized_name,
+                    e.location_name,
+                    e.latitude,
+                    e.longitude,
+                    e.confidence,
+                    e.source,
+                    e.requested_by
+                FROM recognition_location_events e
+                INNER JOIN (
+                    SELECT lower(recognized_name) AS k, MAX(id) AS max_id
+                    FROM recognition_location_events
+                    GROUP BY lower(recognized_name)
+                ) latest
+                ON latest.max_id = e.id
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def _decode_image_b64(self, image_b64: str):
         if not image_b64:
             raise ValueError("image_b64 is required")
@@ -1705,23 +1734,30 @@ class Phase3ServiceHub:
             }
 
         enc_arr = np.array(encs)
-        threshold_default = float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.38))
-        threshold_raw = os.getenv(
-            "MOBILE_RECOGNITION_THRESHOLD",
-            str(threshold_default),
+        threshold_default = max(
+            float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.38)),
+            0.50,
         )
+        threshold_raw = os.getenv("MOBILE_RECOGNITION_THRESHOLD", str(threshold_default))
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.48
-        threshold = max(0.25, min(0.85, threshold))
+            threshold = 0.50
+        threshold = max(0.30, min(0.90, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.03")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.05")
         try:
             margin = float(margin_raw)
         except Exception:
-            margin = 0.06
-        margin = max(0.0, min(0.25, margin))
+            margin = 0.05
+        margin = max(0.0, min(0.30, margin))
+
+        min_samples_raw = os.getenv("MOBILE_MIN_SAMPLES_PER_PERSON", "10")
+        try:
+            min_samples_per_person = int(min_samples_raw)
+        except Exception:
+            min_samples_per_person = 10
+        min_samples_per_person = max(1, min(100, min_samples_per_person))
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
@@ -1752,8 +1788,11 @@ class Phase3ServiceHub:
             best_candidate = top[0] if top else {"name": "Unknown", "score": 0.0}
             second_score = float(top[1]["score"]) if len(top) > 1 else 0.0
             ambiguous = len(top) > 1 and (float(best_candidate["score"]) - second_score) < margin
+            best_name = str(best_candidate.get("name", "Unknown"))
+            samples_for_best = len((known or {}).get(best_name, []) or [])
+            sample_penalty = 0.04 if samples_for_best < min_samples_per_person else 0.0
 
-            if float(best_candidate["score"]) < threshold or ambiguous:
+            if float(best_candidate["score"]) < (threshold + sample_penalty) or ambiguous:
                 best = {"name": "Unknown", "score": 0.0}
             else:
                 best = best_candidate
@@ -1783,6 +1822,8 @@ class Phase3ServiceHub:
                         "h": int(fh),
                     },
                     "best": best,
+                    "best_samples": samples_for_best,
+                    "insufficient_samples": samples_for_best < min_samples_per_person,
                     "matches": top,
                 }
             )
@@ -1791,6 +1832,7 @@ class Phase3ServiceHub:
             "detected": True,
             "threshold": threshold,
             "margin": margin,
+            "min_samples_per_person": min_samples_per_person,
             "known_people": len(known or {}),
             "known_vectors": len(encs),
             "face_count": len(all_faces),
@@ -2299,6 +2341,27 @@ class Phase3ServiceHub:
                         latest_only=latest_only,
                     )
                     self._send_json(200, {"ok": True, "data": rows})
+                    return
+
+                if path == "/api/mobile/recognition-location/latest":
+                    limit = int(query.get("limit", ["500"])[0])
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    requester = str(payload.get("sub", "")).strip()
+                    rows = hub.list_latest_recognition_locations(limit=limit)
+                    filtered = []
+                    for row in rows:
+                        person_name = str(row.get("recognized_name", "")).strip()
+                        if not person_name:
+                            continue
+                        if hub.can_user_access_person(
+                            target_username=person_name,
+                            requester_username=requester,
+                            requester_role=role,
+                            access_scope="map",
+                        ):
+                            filtered.append(row)
+                    self._send_json(200, {"ok": True, "data": filtered})
                     return
 
                 if path == "/api/events/stream":

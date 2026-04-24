@@ -28,6 +28,7 @@ const Duration _kNetworkTimeout = Duration(seconds: 12);
 const Duration _kAuthTimeout = Duration(seconds: 24);
 const String _kMotionPresetPrefKey = 'face_studio_motion_preset';
 const String _kGlobal3dIntensityPrefKey = 'face_studio_global_3d_intensity';
+const bool _kUseLegacyProceduralFace = false;
 
 enum _MotionPreset {
   auto,
@@ -78,6 +79,9 @@ Future<void> _setGlobal3dIntensity(double value) async {
 final _faceReferenceCache = _FaceReferenceCache();
 
 Future<_FaceReferenceProfile?> _loadFaceReferenceProfile() {
+  if (_kUseLegacyProceduralFace) {
+    return Future.value(null);
+  }
   return _faceReferenceCache.load();
 }
 
@@ -91,7 +95,6 @@ class _FaceReferenceCache {
 
   Future<_FaceReferenceProfile?> _loadImpl() async {
     const candidates = [
-      'assets/face_reference.jpeg',
       'assets/face_reference.png',
     ];
     for (final asset in candidates) {
@@ -121,26 +124,24 @@ Future<_FaceReferenceProfile?> _buildFaceReferenceProfile(
   final pixels = rgba.buffer.asUint8List();
   final width = image.width;
   final height = image.height;
-
   final maskedPixels = Uint8List.fromList(pixels);
   for (int i = 0; i < maskedPixels.length; i += 4) {
     final r = maskedPixels[i] / 255;
     final g = maskedPixels[i + 1] / 255;
     final b = maskedPixels[i + 2] / 255;
     final a = maskedPixels[i + 3] / 255;
-    final luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-    final neon = (b * 0.58) + (r * 0.3) + (g * 0.12);
-    final keep = math.max(luminance, neon);
-    // Lowered thresholds to preserve more detail and reduce shine
-    if (a < 0.025 || keep < 0.18) {
-      maskedPixels[i] = 0;
-      maskedPixels[i + 1] = 0;
-      maskedPixels[i + 2] = 0;
+    if (a < 0.025) {
       maskedPixels[i + 3] = 0;
       continue;
     }
-    // Make alpha less dependent on shine, more on original alpha
-    final alphaScale = ((keep - 0.18) / 0.82).clamp(0.5, 1.0);
+    final luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+    final chroma = (b * 0.58) + (r * 0.3) + (g * 0.12);
+    final keep = math.max(luminance, chroma);
+    if (keep < 0.2) {
+      maskedPixels[i + 3] = 0;
+      continue;
+    }
+    final alphaScale = ((keep - 0.2) / 0.8).clamp(0.0, 1.0);
     maskedPixels[i + 3] = (maskedPixels[i + 3] * alphaScale).round();
   }
   final transparentImage = await _decodeRgbaImage(maskedPixels, width, height);
@@ -1516,7 +1517,8 @@ class _BlueFaceHeroState extends State<_BlueFaceHero>
             final tier = widget.motionTier ?? _MotionTier.cinematic;
             final low = tier == _MotionTier.low;
             final balanced = tier == _MotionTier.balanced;
-            final compactSettled = widget.settleIn && widget.size <= 64;
+            final compactSettled =
+                widget.settleIn && _settled && widget.size <= 64;
             final motionFactor = low
                 ? 0.46
                 : balanced
@@ -1528,15 +1530,16 @@ class _BlueFaceHeroState extends State<_BlueFaceHero>
                 ? baseDepthScale * 0.62
                 : baseDepthScale * motionFactor;
             final effectiveGlowScale = compactSettled
-                ? baseGlowScale * 0.56
+                ? baseGlowScale * 0.48
                 : baseGlowScale * motionFactor;
-            final effectiveShowOrbit =
-                widget.showOrbit && effectiveGlowScale > 0.01;
+            final effectiveShowOrbit = widget.showOrbit &&
+                effectiveGlowScale > 0.01 &&
+                !compactSettled;
             final effectiveShowHalo =
                 widget.showHalo && effectiveGlowScale > 0.01;
             final pulse = 1 +
                 (math.sin((t * math.pi * 2) + 0.9) *
-                    (compactSettled ? 0.026 : 0.064) *
+                    (compactSettled ? 0.012 : 0.064) *
                     effectiveGlowScale);
             final depth = compactSettled
                 ? 0.0
@@ -1638,7 +1641,6 @@ class _BlueFaceHeroState extends State<_BlueFaceHero>
                               ),
                             ),
                             const SizedBox.shrink(),
-                            // Specular sweep disabled globally for matte look
                           ],
                         ),
                       ),
@@ -1686,7 +1688,7 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
     });
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 4600),
+      duration: const Duration(milliseconds: 3400),
     )..addStatusListener((status) {
         if (status == AnimationStatus.completed && !_completed) {
           _completed = true;
@@ -1708,8 +1710,8 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
       child: LayoutBuilder(
         builder: (context, constraints) {
           final screen = Size(constraints.maxWidth, constraints.maxHeight);
-          final center = Offset(screen.width * 0.5, screen.height * 0.5);
-          final assembleSide = math.min(screen.width, screen.height) * 0.702;
+          final center = Offset(screen.width * 0.5, screen.height * 0.56);
+          final assembleSide = math.min(screen.width, screen.height) * 0.54;
           final assembleRect = Rect.fromCenter(
             center: center,
             width: assembleSide,
@@ -1721,25 +1723,31 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
             animation: _controller,
             builder: (context, child) {
               final t = _controller.value;
-              const formEnd = 0.64;
-              const holdEnd = 0.86;
-              final formProgress = (t / formEnd).clamp(0.0, 1.0);
+              const idleEnd = 0.18;
+              const formEnd = 0.50;
+              const holdEnd = 0.74;
+              final formProgress =
+                  ((t - idleEnd) / (formEnd - idleEnd)).clamp(0.0, 1.0);
               final travelProgress =
                   ((t - holdEnd) / (1 - holdEnd)).clamp(0.0, 1.0);
               final holdProgress =
                   ((t - formEnd) / (holdEnd - formEnd)).clamp(0.0, 1.0);
-              final lockStrength = (t >= formEnd && t < holdEnd)
-                  ? (0.35 +
-                      (0.65 * math.sin(holdProgress * math.pi)) *
-                          Curves.easeOut.transform(holdProgress))
-                  : 0.0;
-              final formedFaceBoost = (t >= formEnd && t < holdEnd)
-                  ? (math.sin(holdProgress * math.pi) *
-                          Curves.easeInOut.transform(holdProgress))
-                      .clamp(0.0, 1.0)
-                  : 0.0;
+              final postHoldPeak = Curves.easeOut.transform(
+                (travelProgress / 0.42).clamp(0.0, 1.0),
+              );
+              final postHoldFade = 1 -
+                  Curves.easeIn.transform(
+                    ((travelProgress - 0.32) / 0.68).clamp(0.0, 1.0),
+                  );
+              final lockStrength = t < formEnd
+                  ? 0.0
+                  : t < holdEnd
+                      ? (0.24 +
+                          (0.42 * math.sin(holdProgress * math.pi)) *
+                              Curves.easeOut.transform(holdProgress))
+                      : (0.46 * postHoldPeak * postHoldFade);
               final panProgress = Curves.easeOutCubic.transform(formProgress);
-              final panX = ((1 - panProgress) * -screen.width * 0.03);
+              final panX = ((1 - panProgress) * -screen.width * 0.02);
               final stagedCenter = Offset(center.dx + panX, center.dy);
 
               final assemblePulse =
@@ -1761,18 +1769,20 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
                           endRect,
                           Curves.easeOutBack.transform(travelProgress),
                         )!;
-
-              final faceOpacity = formProgress < 0.12
+              final heroOpacity = t < formEnd
                   ? 0.0
-                  : Curves.easeOutCubic.transform(
-                      ((formProgress - 0.12) / 0.42).clamp(0.0, 1.0));
-              final outlineOpacity =
-                  ((1 - (formProgress / 0.38)).clamp(0.0, 1.0) * 0.9);
+                  : t < holdEnd
+                      ? (0.28 +
+                          (Curves.easeInOut.transform(holdProgress) * 0.46))
+                      : ((1 - Curves.easeIn.transform(travelProgress)) * 0.62)
+                          .clamp(0.0, 1.0);
 
               return Stack(
                 children: [
                   Opacity(
-                    opacity: t < holdEnd ? 1 : (1 - travelProgress),
+                    opacity: t < holdEnd
+                        ? 1
+                        : (1 - Curves.easeInCubic.transform(travelProgress)),
                     child: CustomPaint(
                       size: screen,
                       painter: _FaceRayAssemblyPainter(
@@ -1789,58 +1799,26 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
                     top: rect.top,
                     width: rect.width,
                     height: rect.height,
-                    child: Opacity(
-                      opacity: (faceOpacity * (0.9 + (formedFaceBoost * 0.1)))
-                          .clamp(0.0, 1.0),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          if (outlineOpacity > 0)
-                            Opacity(
-                              opacity: outlineOpacity,
-                              child: const CustomPaint(
-                                painter: _FaceInitialOutlinePainter(),
-                              ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (heroOpacity > 0)
+                          Opacity(
+                            opacity: heroOpacity,
+                            child: _BlueFaceHero(
+                              size: rect.shortestSide,
+                              settleIn: false,
+                              profile: _faceProfile,
+                              showOrbit: false,
+                              showHalo: false,
+                              glowScale: 0.0,
+                              depthScale: 0.0,
+                              cinematicSpecular: false,
+                              ultraClear: false,
+                              motionTier: _MotionTier.cinematic,
                             ),
-                          _BlueFaceHero(
-                            size: rect.shortestSide,
-                            settleIn: false,
-                            profile: _faceProfile,
-                            showOrbit: false,
-                            showHalo: false,
-                            glowScale: 0.0,
-                            depthScale: 0.0,
-                            cinematicSpecular: false,
-                            ultraClear: true,
-                            motionTier: _motionTierFor(context),
                           ),
-                          if (formedFaceBoost > 0)
-                            IgnorePointer(
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: RadialGradient(
-                                    center: const Alignment(0, -0.08),
-                                    radius: 0.88,
-                                    colors: [
-                                      const Color(0xFFEAFBFF).withValues(
-                                          alpha: 0.08 * formedFaceBoost),
-                                      const Color(0xFF8FE8FF).withValues(
-                                          alpha: 0.11 * formedFaceBoost),
-                                      Colors.transparent,
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (lockStrength > 0)
-                            CustomPaint(
-                              painter: _FaceLockPulsePainter(
-                                phase: t,
-                                strength: lockStrength * 0.72,
-                              ),
-                            ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
                 ],
@@ -1947,18 +1925,24 @@ class _FaceRayAssemblyPainter extends CustomPainter {
       final head = Offset(baseHead.dx, baseHead.dy + streamWobble);
       final tail = Offset(baseTail.dx, baseTail.dy + (streamWobble * 0.42));
 
-      final stroke = 0.8 + ((1 - depth) * 2.0);
-      final alpha = ((0.18 + (eased * 0.8)) * (0.38 + (progress * 0.62))) *
-          (1 - depth * 0.16);
+      final stroke = 0.72 + ((1 - depth) * 1.6);
+      final earlyDamp = travel < 0.4 ? 0.78 : 0.9;
+      final alpha = ((((0.18 + (eased * 0.8)) * (0.38 + (progress * 0.62))) *
+                  (1 - depth * 0.16)) *
+              0.5) *
+          earlyDamp;
 
       if (travel < 0.3 && i % 2 == 0) {
-        final sourceAlpha =
-            (0.35 - travel).clamp(0.0, 0.35) * (1.2 - depth * 0.2);
+        final sourceDamp = travel < 0.4 ? 0.72 : 0.9;
+        final sourceAlpha = (0.35 - travel).clamp(0.0, 0.35) *
+            (1.2 - depth * 0.2) *
+            0.5 *
+            sourceDamp;
         final sourceCore = Paint()
           ..shader = RadialGradient(
             colors: [
-              const Color(0xFF87B4FF).withValues(alpha: sourceAlpha * 0.95),
-              const Color(0xFFB04EFF).withValues(alpha: sourceAlpha * 0.72),
+              const Color(0xFF87B4FF).withValues(alpha: sourceAlpha * 0.56),
+              const Color(0xFF2F8DFF).withValues(alpha: sourceAlpha * 0.32),
               Colors.transparent,
             ],
           ).createShader(
@@ -1973,9 +1957,9 @@ class _FaceRayAssemblyPainter extends CustomPainter {
         ..strokeWidth = stroke
         ..shader = LinearGradient(
           colors: [
-            const Color(0xFF3B1C7A).withValues(alpha: alpha * 0.12),
-            const Color(0xFF2F8DFF).withValues(alpha: alpha * 0.8),
-            const Color(0xFF9AE8FF).withValues(alpha: alpha),
+            const Color(0xFF215B9C).withValues(alpha: alpha * 0.05),
+            const Color(0xFF2F8DFF).withValues(alpha: alpha * 0.44),
+            const Color(0xFF9AE8FF).withValues(alpha: alpha * 0.56),
           ],
         ).createShader(Rect.fromPoints(tail, head));
       canvas.drawLine(tail, head, beam);
@@ -1985,7 +1969,7 @@ class _FaceRayAssemblyPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeWidth = stroke * (2.1 - depth * 0.18)
-          ..color = const Color(0xFF69D1FF).withValues(alpha: alpha * 0.2);
+          ..color = const Color(0xFF69D1FF).withValues(alpha: alpha * 0.07);
         canvas.drawLine(tail, head, trailGlow);
       }
 
@@ -1993,7 +1977,7 @@ class _FaceRayAssemblyPainter extends CustomPainter {
         final spark = Paint()
           ..shader = RadialGradient(
             colors: [
-              const Color(0xFFD4F8FF).withValues(alpha: alpha * 1.1),
+              const Color(0xFFD4F8FF).withValues(alpha: alpha * 0.55),
               Colors.transparent,
             ],
           ).createShader(
@@ -2007,8 +1991,8 @@ class _FaceRayAssemblyPainter extends CustomPainter {
         final lockSpark = Paint()
           ..shader = RadialGradient(
             colors: [
-              const Color(0xFFE8FDFF).withValues(alpha: 0.52 * lock),
-              const Color(0xFF6FD8FF).withValues(alpha: 0.3 * lock),
+              const Color(0xFFE8FDFF).withValues(alpha: 0.26 * lock),
+              const Color(0xFF6FD8FF).withValues(alpha: 0.14 * lock),
               Colors.transparent,
             ],
           ).createShader(
@@ -2131,34 +2115,34 @@ Offset _faceRayTarget(double seed, int index) {
   ];
 
   final bucket = index % 38;
-  if (bucket < 11) {
+  if (bucket < 5) {
     return _interpolatePolyline(contour, (seed * 1.2) % 1);
   }
-  if (bucket < 14) {
+  if (bucket < 8) {
     return _interpolatePolyline(leftEye, (seed * 2.3) % 1);
   }
-  if (bucket < 17) {
+  if (bucket < 11) {
     return _interpolatePolyline(rightEye, (seed * 2.3) % 1);
   }
-  if (bucket < 20) {
+  if (bucket < 14) {
     return _interpolatePolyline(browLeft, (seed * 3.0) % 1);
   }
-  if (bucket < 23) {
+  if (bucket < 17) {
     return _interpolatePolyline(browRight, (seed * 3.0) % 1);
   }
-  if (bucket < 27) {
+  if (bucket < 22) {
     return _interpolatePolyline(noseBridge, (seed * 2.8) % 1);
   }
-  if (bucket < 29) {
+  if (bucket < 24) {
     return _interpolatePolyline(noseBase, (seed * 2.4) % 1);
   }
-  if (bucket < 32) {
+  if (bucket < 28) {
     return _interpolatePolyline(mouthTop, (seed * 2.2) % 1);
   }
-  if (bucket < 35) {
+  if (bucket < 32) {
     return _interpolatePolyline(mouthBottom, (seed * 2.2) % 1);
   }
-  if (bucket < 37) {
+  if (bucket < 35) {
     return _interpolatePolyline(leftCheek, (seed * 2.1) % 1);
   }
   return _interpolatePolyline(rightCheek, (seed * 2.1) % 1);
@@ -2213,9 +2197,19 @@ class _RayFaceCorePainter extends CustomPainter {
         profile!.image.width.toDouble(),
         profile!.image.height.toDouble(),
       );
+      final overlayImageOnly =
+          !showHalo && (shineScale <= 0.01) && !preferFaceClarity;
+      final imagePaint = Paint()
+        ..filterQuality = FilterQuality.high
+        ..blendMode = BlendMode.srcOver;
+      if (overlayImageOnly) {
+        canvas.drawImageRect(profile!.image, srcRect, faceRect, imagePaint);
+        return;
+      }
+
       final maskPath = Path()..addOval(faceRect);
       canvas.save();
-      canvas.clipPath(maskPath);
+      canvas.clipPath(maskPath, doAntiAlias: true);
       if (preferFaceClarity) {
         final baseTone = Paint()
           ..shader = RadialGradient(
@@ -2230,31 +2224,14 @@ class _RayFaceCorePainter extends CustomPainter {
           ).createShader(faceRect);
         canvas.drawRect(faceRect, baseTone);
       }
-      final imagePaint = Paint()
-        ..filterQuality =
-            preferFaceClarity ? FilterQuality.high : FilterQuality.low
-        ..blendMode = preferFaceClarity ? BlendMode.srcOver : BlendMode.lighten
-        ..colorFilter = ColorFilter.mode(
-          Colors.white.withValues(alpha: preferFaceClarity ? 0.92 : 0.78),
-          BlendMode.modulate,
-        );
       canvas.drawImageRect(profile!.image, srcRect, faceRect, imagePaint);
-      if (preferFaceClarity) {
-        final contour = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2
-          ..color = const Color(0xFF8ED4FF).withValues(alpha: 0.38);
-        canvas.drawOval(faceRect.deflate(size.width * 0.01), contour);
-      }
       canvas.restore();
     }
 
     final segments =
         profile?.scaledSegments(c, rx, ry) ?? _faceFeatureSegments(c, rx, ry);
     final segCount = segments.length;
-    final segStride = profile != null
-        ? (preferFaceClarity ? 1 : (shineScale < 0.68 ? 5 : 3))
-        : 1;
+    final segStride = profile != null ? (preferFaceClarity ? 26 : 34) : 1;
     for (int i = 0; i < segCount; i += segStride) {
       final a = segments[i][0];
       final b = segments[i][1];
@@ -2271,10 +2248,7 @@ class _RayFaceCorePainter extends CustomPainter {
 
       final flicker =
           ((math.sin((phase * math.pi * 7.8) + (i * 0.43)) + 1) * 0.5);
-      final alphaScale = profile != null
-          ? (preferFaceClarity ? 0.92 : (shineScale < 0.68 ? 0.32 : 0.5)) *
-              shineScale
-          : shineScale;
+      final alphaScale = profile != null ? (0.1 * shineScale) : shineScale;
       final alpha = (0.26 + (flicker * 0.46)) * alphaScale;
 
       final base = Paint()
@@ -2338,7 +2312,7 @@ class _RayFaceCorePainter extends CustomPainter {
 
     if (profile != null) {
       final points = profile!.scaledPoints(c, rx, ry);
-      final pointStride = preferFaceClarity ? 4 : (shineScale < 0.68 ? 9 : 5);
+      final pointStride = preferFaceClarity ? 28 : 36;
       for (int i = 0; i < points.length; i += pointStride) {
         final p = points[i];
         final flicker =
@@ -2346,8 +2320,8 @@ class _RayFaceCorePainter extends CustomPainter {
         final dot = Paint()
           ..color = const Color(0xFF9FDEFF).withValues(
               alpha: (preferFaceClarity
-                      ? (0.07 + (flicker * 0.14))
-                      : (0.03 + (flicker * 0.11) + (glow * 0.015))) *
+                      ? (0.016 + (flicker * 0.032))
+                      : (0.01 + (flicker * 0.02) + (glow * 0.005))) *
                   shineScale);
         canvas.drawCircle(p, 0.5 + (flicker * 0.8), dot);
       }
@@ -3838,7 +3812,24 @@ class BackendApi {
     final person = Uri.encodeQueryComponent(name.trim());
     final res = await http.get(
       Uri.parse(
-          '$_base/api/mobile/recognition-location/search?name=$person&limit=$limit'),
+          '$_base/api/mobile/recognition-location/search?name=$person&limit=$limit&latest_only=true'),
+      headers: {'Authorization': 'Bearer $_token'},
+    );
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getLatestRecognitionLocations({
+    int limit = 500,
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {
+        'ok': false,
+        'error': 'Server is not available try after some time'
+      };
+    }
+    final res = await http.get(
+      Uri.parse('$_base/api/mobile/recognition-location/latest?limit=$limit'),
       headers: {'Authorization': 'Bearer $_token'},
     );
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -4215,6 +4206,7 @@ class _LoginPageState extends State<LoginPage> {
   bool _showFaceAcquireIntro = true;
   bool _showWelcomeShimmer = false;
   bool _bounceHeroFace = false;
+  int _heroRectCaptureAttempts = 0;
 
   @override
   void initState() {
@@ -4225,14 +4217,26 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   void _captureHeroFaceRect() {
-    if (!mounted) {
+    if (!mounted || !_showFaceAcquireIntro) {
       return;
     }
     final anchorContext = _heroFaceAnchorKey.currentContext;
     final stackContext = _loginBodyStackKey.currentContext;
     final anchorBox = anchorContext?.findRenderObject() as RenderBox?;
     final stackBox = stackContext?.findRenderObject() as RenderBox?;
-    if (anchorBox == null || stackBox == null) {
+    if (anchorBox == null ||
+        stackBox == null ||
+        !anchorBox.hasSize ||
+        !stackBox.hasSize ||
+        anchorBox.size.isEmpty ||
+        stackBox.size.isEmpty) {
+      if (_heroRectCaptureAttempts < 14) {
+        _heroRectCaptureAttempts += 1;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _captureHeroFaceRect();
+        });
+        return;
+      }
       setState(() {
         _showFaceAcquireIntro = false;
       });
@@ -4242,7 +4246,21 @@ class _LoginPageState extends State<LoginPage> {
     final topLeft =
         stackBox.globalToLocal(anchorBox.localToGlobal(Offset.zero));
     final rect = topLeft & anchorBox.size;
+    if (rect.width <= 0 || rect.height <= 0) {
+      if (_heroRectCaptureAttempts < 14) {
+        _heroRectCaptureAttempts += 1;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _captureHeroFaceRect();
+        });
+        return;
+      }
+      setState(() {
+        _showFaceAcquireIntro = false;
+      });
+      return;
+    }
     setState(() {
+      _heroRectCaptureAttempts = 0;
       _heroFaceRect = rect;
     });
   }
@@ -5037,6 +5055,7 @@ class _LoginPageState extends State<LoginPage> {
                                       glowScale: 0.72,
                                       depthScale: 1.25,
                                       cinematicSpecular: true,
+                                      motionTier: _MotionTier.cinematic,
                                     ),
                                   ),
                                 ),
@@ -6648,152 +6667,164 @@ class FeatureForgePage extends StatelessWidget {
     final cards = rapid_pack.rapidScenarios.take(120).toList(growable: false);
     return Scaffold(
       appBar: AppBar(title: const Text('Feature Forge 3D')),
-      body: Column(
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(12, 12, 12, 6),
-            child: _CinematicFaceHeader(
-              title: 'What Feature Forge 3D Does',
-              subtitle:
-                  'Feature Forge 3D is for testing many generation, analytics, and operations scenarios fast. Use 3D Motion Studio for camera motion experiments.',
-              tags: [
-                _HeaderTag(
-                  icon: Icons.dashboard_customize,
-                  label: 'Scenario Deck',
-                  tint: Color(0xFF8DDFFF),
-                ),
-                _HeaderTag(
-                  icon: Icons.view_in_ar,
-                  label: 'Interactive Labs in Motion Studio',
-                  tint: Color(0xFF93F3CF),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton.icon(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const MotionStudioPage(),
+      body: Scrollbar(
+        thumbVisibility: true,
+        child: CustomScrollView(
+          physics: const BouncingScrollPhysics(),
+          slivers: [
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(12, 12, 12, 6),
+                child: _CinematicFaceHeader(
+                  title: 'What Feature Forge 3D Does',
+                  subtitle:
+                      'Feature Forge 3D is for testing many generation, analytics, and operations scenarios fast. Use 3D Motion Studio for camera motion experiments.',
+                  tags: [
+                    _HeaderTag(
+                      icon: Icons.dashboard_customize,
+                      label: 'Scenario Deck',
+                      tint: Color(0xFF8DDFFF),
                     ),
-                  );
-                },
-                icon: const Icon(Icons.view_in_ar),
-                label: const Text('Open 3D Motion Studio'),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF132742),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: const Color(0xFF87DEFF).withValues(alpha: 0.24),
+                    _HeaderTag(
+                      icon: Icons.view_in_ar,
+                      label: 'Interactive Labs in Motion Studio',
+                      tint: Color(0xFF93F3CF),
+                    ),
+                  ],
                 ),
               ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Motive',
-                    style: TextStyle(
-                      color: Color(0xFFDFF5FF),
-                      fontWeight: FontWeight.w800,
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const MotionStudioPage(),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.view_in_ar),
+                    label: const Text('Open 3D Motion Studio'),
+                  ),
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF132742),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFF87DEFF).withValues(alpha: 0.24),
                     ),
                   ),
-                  SizedBox(height: 6),
-                  Text(
-                    'Use this page to launch many cards quickly and stress-test tool modules under diverse scenarios. It is a high-volume scenario launcher, not a camera-motion sandbox.',
-                    style: TextStyle(
-                      color: Color(0xFFBDD8F0),
-                      height: 1.3,
-                    ),
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Motive',
+                        style: TextStyle(
+                          color: Color(0xFFDFF5FF),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      Text(
+                        'Use this page to launch many cards quickly and stress-test tool modules under diverse scenarios. It is a high-volume scenario launcher, not a camera-motion sandbox.',
+                        style: TextStyle(
+                          color: Color(0xFFBDD8F0),
+                          height: 1.3,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-          ),
-          Expanded(
-            child: GridView.builder(
+            SliverPadding(
               padding: const EdgeInsets.all(12),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-                childAspectRatio: 0.92,
-              ),
-              itemCount: cards.length,
-              itemBuilder: (context, i) {
-                final c = cards[i];
-                return Card(
-                  color: const Color(0xFF13233A),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 0.92,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, i) {
+                    final c = cards[i];
+                    return Card(
+                      color: const Color(0xFF13233A),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Icon(c.icon, color: c.color),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                c.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: c.color,
-                                  fontWeight: FontWeight.w700,
+                            Row(
+                              children: [
+                                Icon(c.icon, color: c.color),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    c.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: c.color,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
                                 ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              c.subtitle,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Color(0xFFB9D9EE)),
+                            ),
+                            const Spacer(),
+                            Align(
+                              alignment: Alignment.bottomRight,
+                              child: FilledButton.tonal(
+                                onPressed: () {
+                                  showModalBottomSheet<void>(
+                                    context: context,
+                                    builder: (ctx) {
+                                      return Padding(
+                                        padding: const EdgeInsets.fromLTRB(
+                                            16, 14, 16, 20),
+                                        child: rapid_pack
+                                            .rapidDeckBuilders[c.id - 1](),
+                                      );
+                                    },
+                                  );
+                                },
+                                child: const Text('Open'),
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          c.subtitle,
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Color(0xFFB9D9EE)),
-                        ),
-                        const Spacer(),
-                        Align(
-                          alignment: Alignment.bottomRight,
-                          child: FilledButton.tonal(
-                            onPressed: () {
-                              showModalBottomSheet<void>(
-                                context: context,
-                                builder: (ctx) {
-                                  return Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                        16, 14, 16, 20),
-                                    child: rapid_pack
-                                        .rapidDeckBuilders[c.id - 1](),
-                                  );
-                                },
-                              );
-                            },
-                            child: const Text('Open'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
+                      ),
+                    );
+                  },
+                  childCount: cards.length,
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -9696,7 +9727,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         setState(() => _status = 'Live recognition running');
       }
 
-      _loopTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _loopTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
         _captureAndRecognize();
       });
       await _captureAndRecognize();
@@ -10096,6 +10127,8 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                                 faces: _liveFaces,
                                 imageWidth: _imgW,
                                 imageHeight: _imgH,
+                                mirrorX: ctrl.description.lensDirection ==
+                                    CameraLensDirection.front,
                               ),
                             ),
                           ),
@@ -10281,11 +10314,13 @@ class _LiveFaceOverlayPainter extends CustomPainter {
   final List<Map<String, dynamic>> faces;
   final int imageWidth;
   final int imageHeight;
+  final bool mirrorX;
 
   _LiveFaceOverlayPainter({
     required this.faces,
     required this.imageWidth,
     required this.imageHeight,
+    this.mirrorX = false,
   });
 
   @override
@@ -10293,9 +10328,6 @@ class _LiveFaceOverlayPainter extends CustomPainter {
     if (imageWidth <= 0 || imageHeight <= 0 || faces.isEmpty) {
       return;
     }
-
-    final sx = size.width / imageWidth;
-    final sy = size.height / imageHeight;
 
     final boxPaint = Paint()
       ..color = const Color(0xFF65B5FF)
@@ -10317,7 +10349,54 @@ class _LiveFaceOverlayPainter extends CustomPainter {
       final score =
           (num.tryParse((best['score'] ?? 0).toString()) ?? 0).toDouble();
 
-      final rect = Rect.fromLTWH(x * sx, y * sy, w * sx, h * sy);
+      var bx = x;
+      var by = y;
+      var bw = w;
+      var bh = h;
+      var srcW = imageWidth.toDouble();
+      var srcH = imageHeight.toDouble();
+
+      final sourceLandscape = srcW >= srcH;
+      final viewLandscape = size.width >= size.height;
+      final orientationMismatch = sourceLandscape != viewLandscape;
+      if (orientationMismatch) {
+        final rx = by;
+        final ry = srcW - bx - bw;
+        final rw = bh;
+        final rh = bw;
+        bx = rx;
+        by = ry;
+        bw = rw;
+        bh = rh;
+        final oldW = srcW;
+        srcW = srcH;
+        srcH = oldW;
+      }
+
+      final srcAspect = srcW / srcH;
+      final dstAspect = size.width / size.height;
+      late final double scale;
+      late final double dx;
+      late final double dy;
+      if (srcAspect > dstAspect) {
+        scale = size.height / srcH;
+        dx = (size.width - (srcW * scale)) / 2;
+        dy = 0;
+      } else {
+        scale = size.width / srcW;
+        dx = 0;
+        dy = (size.height - (srcH * scale)) / 2;
+      }
+
+      var left = (bx * scale) + dx;
+      final top = (by * scale) + dy;
+      final width = bw * scale;
+      final height = bh * scale;
+      if (mirrorX) {
+        left = size.width - left - width;
+      }
+
+      final rect = Rect.fromLTWH(left, top, width, height);
       canvas.drawRect(rect, boxPaint);
 
       final label = '$name ${(score * 100).toStringAsFixed(1)}%';
@@ -11876,6 +11955,7 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
         ),
       )
       ..loadRequest(Uri.parse(_mapCandidates[_mapIndex]));
+    unawaited(_loadLatestPins());
   }
 
   @override
@@ -11929,6 +12009,47 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
       setState(() {
         _loading = false;
         _status = 'Search error: $e';
+      });
+    }
+  }
+
+  Future<void> _loadLatestPins() async {
+    setState(() {
+      _loading = true;
+      _status = 'Loading latest recognition pins...';
+      _rows = const [];
+    });
+    try {
+      final api = buildBackendApi();
+      final res = await api.getLatestRecognitionLocations(limit: 500);
+      if (!mounted) {
+        return;
+      }
+      if (res['ok'] != true) {
+        setState(() {
+          _loading = false;
+          _status = (res['error'] ?? 'Load failed').toString();
+        });
+        return;
+      }
+      final data = ((res['data'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      setState(() {
+        _loading = false;
+        _rows = data;
+        _status = data.isEmpty
+            ? 'No saved recognition pins found'
+            : 'Showing latest saved location per recognized user';
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _status = 'Load error: $e';
       });
     }
   }
@@ -12113,6 +12234,15 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
                       onPressed: _loading ? null : _search,
                       icon: const Icon(Icons.travel_explore),
                     ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: _loading ? null : _loadLatestPins,
+                    icon: const Icon(Icons.push_pin),
+                    label: const Text('Show Latest Pins'),
                   ),
                 ),
               ],
