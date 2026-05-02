@@ -4535,21 +4535,15 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  Future<void> _promptFaceEnrollment(String username) async {
-    if (!mounted) return;
-    _enrollNameController.text = username;
-    Uint8List? imageBytes;
-    String status = '';
-    String error = '';
-    bool busy = false;
-    final picker = ImagePicker();
-
-    Future<void> pick(
-        ImageSource source, void Function(void Function()) setModal) async {
-      try {
-        final shot = await picker.pickImage(
-            source: source, maxWidth: 1024, imageQuality: 88);
-  
+  Future<void> _requestResetCode() async {
+    final identifier = _forgotIdController.text.trim();
+    if (identifier.isEmpty) {
+      setState(() {
+        _error = 'Enter username or email to receive reset code';
+      });
+      return;
+    }
+    setState(() {
       _busy = true;
       _error = '';
       _info = '';
@@ -9479,7 +9473,8 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
         _frames.add(bytes);
         final name = _nameController.text.trim();
         if (name.isNotEmpty) {
-          final res = await api.enrollFace(person: name, imageB64: base64Encode(bytes));
+          final res =
+              await api.enrollFace(person: name, imageB64: base64Encode(bytes));
           if (res['ok'] != true) {
             throw Exception((res['error'] ?? 'Upload failed').toString());
           }
@@ -9674,61 +9669,61 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                 width: double.infinity,
                 color: const Color(0xFF0B1220),
                 child: _ready && _controller != null
-                      ? Stack(
-                          children: [
-                            CameraPreview(_controller!),
-                            Center(
-                              child: SizedBox(
-                                width: 320,
-                                height: 320,
-                                child: Stack(
-                                  children: [
-                                    Align(
-                                      alignment: Alignment.center,
+                    ? Stack(
+                        children: [
+                          CameraPreview(_controller!),
+                          Center(
+                            child: SizedBox(
+                              width: 320,
+                              height: 320,
+                              child: Stack(
+                                children: [
+                                  Align(
+                                    alignment: Alignment.center,
+                                    child: Container(
+                                      width: 320,
+                                      height: 320,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: Colors.greenAccent,
+                                          width: 3,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned(
+                                    top: 12,
+                                    left: 0,
+                                    right: 0,
+                                    child: Center(
                                       child: Container(
-                                        width: 320,
-                                        height: 320,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
                                         decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          border: Border.all(
-                                            color: Colors.greenAccent,
-                                            width: 3,
+                                          color: Colors.black54,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: Text(
+                                          _stepIndex < _steps.length
+                                              ? _steps[_stepIndex]
+                                              : 'Review and finish enrollment',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
                                           ),
                                         ),
                                       ),
                                     ),
-                                    Positioned(
-                                      top: 12,
-                                      left: 0,
-                                      right: 0,
-                                      child: Center(
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 10, vertical: 6),
-                                          decoration: BoxDecoration(
-                                            color: Colors.black54,
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                          ),
-                                          child: Text(
-                                            _stepIndex < _steps.length
-                                                ? _steps[_stepIndex]
-                                                : 'Review and finish enrollment',
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
-                        )
-                      : const Center(child: CircularProgressIndicator()),
+                          ),
+                        ],
+                      )
+                    : const Center(child: CircularProgressIndicator()),
               ),
             ),
             Padding(
@@ -9745,9 +9740,8 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                     width: double.infinity,
                     child: FilledButton(
                       onPressed: canCapture ? _captureStep : null,
-                      child: _capturing
-                          ? const Text('Capturing...')
-                          : Text(label),
+                      child:
+                          _capturing ? const Text('Capturing...') : Text(label),
                     ),
                   ),
                 ],

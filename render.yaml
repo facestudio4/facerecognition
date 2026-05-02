@@ -30,7 +30,7 @@ services:
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+29
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B29/mobile_0.1.0%2B29.apk
+        value: https://github.com/facestudio4/facerecognition/releases/tag/v0.1.0%2B29
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
         value: Face Studio mobile v0.1.0+29 syncs the latest onboarding, recognition, and release metadata updates.
       - key: FACE_STUDIO_MOBILE_FORCE_UPDATE
