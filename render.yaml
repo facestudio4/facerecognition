@@ -26,13 +26,13 @@ services:
       - key: SQLITE_PATH
         value: /var/data/facestudio.db
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+26
+        value: 0.1.0+29
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+22
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B26/app-release-v0.1.0%2B26.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B29/app-release-v0.1.0%2B29.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Rapid Deck update with card-self transformations, non-repeating variants, plane fly and return behavior, and stability refinements.
+        value: Face Studio mobile v0.1.0+29 syncs the latest onboarding, recognition, and release metadata updates.
       - key: FACE_STUDIO_MOBILE_FORCE_UPDATE
         value: "false"
       - key: MOBILE_RECOGNITION_THRESHOLD

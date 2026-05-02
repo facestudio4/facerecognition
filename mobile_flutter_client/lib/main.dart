@@ -3359,21 +3359,6 @@ class BackendApi {
 
   List<String> _candidateBases() {
     final active = _base;
-    final isPublicHttps = active.startsWith('https://') &&
-        !active.contains('localhost') &&
-        !active.contains('127.0.0.1') &&
-        !active.contains('10.0.2.2') &&
-        !active.contains('10.0.3.2');
-    if (isPublicHttps) {
-      final cloudFirst = <String>[
-        active,
-        'https://facerecognition-4.onrender.com',
-        'https://face-studio-api.onrender.com',
-      ];
-      final seen = <String>{};
-      return cloudFirst.where((u) => u.isNotEmpty && seen.add(u)).toList();
-    }
-
     final ordered = <String>[
       active,
       const String.fromEnvironment(
@@ -3387,7 +3372,13 @@ class BackendApi {
       'http://127.0.0.1:8787',
       'http://localhost:8787',
     ];
-    if (!kIsWeb && !Platform.isAndroid) {
+    if (!kIsWeb && Platform.isAndroid) {
+      ordered.insertAll(0, const [
+        'http://10.0.2.2:8787',
+        'http://10.0.3.2:8787',
+        'http://127.0.0.1:8787',
+      ]);
+    } else if (!kIsWeb) {
       ordered.add('http://127.0.0.1:8787');
     }
     final seen = <String>{};
@@ -3569,6 +3560,26 @@ class BackendApi {
             'Content-Type': 'application/json',
           },
           body: jsonEncode({'person': person, 'image_b64': imageB64}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> createFacePerson({
+    required String person,
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/face/create'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'person': person}),
         )
         .timeout(_kNetworkTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -3840,7 +3851,19 @@ class BackendApi {
       'FACE_STUDIO_BASE_URL',
       defaultValue: 'https://facerecognition-4.onrender.com',
     ).trim().replaceAll(RegExp(r'/$'), '');
-    final preferred = <String>[configuredBase, _base];
+    final currentBase = _base;
+    bool isLocalBase(String base) {
+      final lower = base.toLowerCase();
+      return lower.contains('10.0.2.2') ||
+          lower.contains('10.0.3.2') ||
+          lower.contains('127.0.0.1') ||
+          lower.contains('localhost');
+    }
+
+    final pinLocal = !kIsWeb && Platform.isAndroid && isLocalBase(currentBase);
+    final preferred = pinLocal
+        ? <String>[currentBase]
+        : <String>[configuredBase, currentBase];
     final seen = <String>{};
     for (final base in preferred.where((u) => u.isNotEmpty && seen.add(u))) {
       try {
@@ -3850,7 +3873,9 @@ class BackendApi {
         if (res.statusCode != 200) {
           continue;
         }
-        _baseUrl = base;
+        if (!pinLocal || isLocalBase(base)) {
+          _baseUrl = base;
+        }
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         final data =
             (body['data'] as Map<String, dynamic>?) ?? <String, dynamic>{};
@@ -3900,6 +3925,7 @@ class _AuthGateState extends State<AuthGate> {
   Timer? _updateRecheckTimer;
   bool _updateCheckInFlight = false;
   bool _updateDialogOpen = false;
+  bool _firstEnrollInProgress = false;
 
   @override
   void initState() {
@@ -4113,7 +4139,38 @@ class _AuthGateState extends State<AuthGate> {
       setState(() {
         _ready = true;
       });
+      if (_username.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _maybeRunFirstTimeEnrollment(_username);
+        });
+      }
     }
+  }
+
+  Future<void> _maybeRunFirstTimeEnrollment(String username) async {
+    if (!mounted || _firstEnrollInProgress) {
+      return;
+    }
+    final clean = username.trim();
+    if (clean.isEmpty) {
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'fs_enroll_done_${clean.toLowerCase()}';
+    if (prefs.getBool(key) == true) {
+      return;
+    }
+    _firstEnrollInProgress = true;
+    final done = await Navigator.of(context).push<bool>(
+      _buildAdaptivePageRoute(
+        context: context,
+        builder: (_) => FirstTimeEnrollmentPage(username: clean),
+      ),
+    );
+    if (done == true) {
+      await prefs.setBool(key, true);
+    }
+    _firstEnrollInProgress = false;
   }
 
   Future<void> _onLoggedIn(Map<String, dynamic> user) async {
@@ -4129,6 +4186,7 @@ class _AuthGateState extends State<AuthGate> {
       _username = username;
       _isAdmin = role == 'admin';
     });
+    await _maybeRunFirstTimeEnrollment(username);
   }
 
   Future<void> _onLogout() async {
@@ -4189,7 +4247,6 @@ class _LoginPageState extends State<LoginPage> {
   final _signupPhoneController = TextEditingController();
   final _signupPwController = TextEditingController();
   final _signupCodeController = TextEditingController();
-  final _enrollNameController = TextEditingController();
   final _forgotIdController = TextEditingController();
   final _forgotUserController = TextEditingController();
   final _forgotCodeController = TextEditingController();
@@ -4301,7 +4358,6 @@ class _LoginPageState extends State<LoginPage> {
     _signupPhoneController.dispose();
     _signupPwController.dispose();
     _signupCodeController.dispose();
-    _enrollNameController.dispose();
     _forgotIdController.dispose();
     _forgotUserController.dispose();
     _forgotCodeController.dispose();
@@ -4463,8 +4519,6 @@ class _LoginPageState extends State<LoginPage> {
         });
         return;
       }
-      final uname = (user['username'] ?? username).toString();
-      await _promptFaceEnrollment(uname);
       setState(() {
         _signupSuccessTick += 1;
       });
@@ -4495,149 +4549,7 @@ class _LoginPageState extends State<LoginPage> {
       try {
         final shot = await picker.pickImage(
             source: source, maxWidth: 1024, imageQuality: 88);
-        if (shot == null) return;
-        final bytes = await shot.readAsBytes();
-        setModal(() {
-          imageBytes = bytes;
-          status = 'Selected ${shot.name}';
-          error = '';
-        });
-      } catch (e) {
-        setModal(() {
-          error = 'Could not get image: $e';
-        });
-      }
-    }
-
-    Future<void> submit(void Function(void Function()) setModal) async {
-      final name = _enrollNameController.text.trim();
-      if (name.isEmpty) {
-        setModal(() => error = 'Enter a name to save the face');
-        return;
-      }
-      if (imageBytes == null) {
-        setModal(() => error = 'Capture or upload a face photo first');
-        return;
-      }
-      setModal(() {
-        busy = true;
-        error = '';
-        status = 'Uploading face...';
-      });
-      final api = buildBackendApi();
-      try {
-        final res = await api.enrollFace(
-            person: name, imageB64: base64Encode(imageBytes!));
-        if (res['ok'] != true) {
-          setModal(() {
-            busy = false;
-            error = (res['error'] ?? 'Upload failed').toString();
-            status = '';
-          });
-          return;
-        }
-        if (mounted) {
-          Navigator.of(context).maybePop();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Face saved for better recognition')),
-          );
-        }
-      } catch (e) {
-        setModal(() {
-          busy = false;
-          error = 'Upload failed: $e';
-          status = '';
-        });
-      }
-    }
-
-    if (!mounted) return;
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
-          ),
-          child: StatefulBuilder(
-            builder: (context, setModal) {
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Set up your face',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _enrollNameController,
-                    decoration: const InputDecoration(labelText: 'Name'),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: busy
-                              ? null
-                              : () => pick(ImageSource.camera, setModal),
-                          icon: const Icon(Icons.photo_camera),
-                          label: const Text('Capture'),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: busy
-                              ? null
-                              : () => pick(ImageSource.gallery, setModal),
-                          icon: const Icon(Icons.photo_library),
-                          label: const Text('Gallery'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  if (status.isNotEmpty)
-                    Text(status,
-                        style: const TextStyle(color: Colors.greenAccent)),
-                  if (error.isNotEmpty)
-                    Text(error,
-                        style: const TextStyle(color: Colors.redAccent)),
-                  const SizedBox(height: 10),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: FilledButton(
-                      onPressed: busy ? null : () => submit(setModal),
-                      child: busy
-                          ? const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.white))
-                          : const Text('Save Face'),
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _requestResetCode() async {
-    final identifier = _forgotIdController.text.trim();
-    if (identifier.isEmpty) {
-      setState(() => _error = 'Enter username or email first');
-      return;
-    }
-    setState(() {
+  
       _busy = true;
       _error = '';
       _info = '';
@@ -5520,7 +5432,7 @@ class MotionStudioPage extends StatefulWidget {
 }
 
 class _MotionStudioPageState extends State<MotionStudioPage>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final TabController _motionTabController;
   late final AnimationController _cubeFloatController;
   final PageController _flowController = PageController(viewportFraction: 0.72);
@@ -5536,6 +5448,7 @@ class _MotionStudioPageState extends State<MotionStudioPage>
   double _realism = _globalMotionRealism.value;
   double _coverDepthBoost = 1.0;
   Offset _gridCamera = const Offset(0, 0);
+  bool _showMotionHeaderDetails = false;
   static const double _timelineItemExtent = 102;
 
   static const List<_MotionCoverSpec> _coverItems = [
@@ -6027,6 +5940,15 @@ class _MotionStudioPageState extends State<MotionStudioPage>
           child: PageView.builder(
             controller: _flowController,
             physics: const BouncingScrollPhysics(),
+            onPageChanged: (index) {
+              if (!mounted) {
+                return;
+              }
+              setState(() {
+                _coverFocus = index;
+                _coverPage = index.toDouble();
+              });
+            },
             itemCount: _coverItems.length,
             itemBuilder: (context, i) {
               final spec = _coverItems[i];
@@ -6432,6 +6354,33 @@ class _MotionStudioPageState extends State<MotionStudioPage>
                   _focusTimeline(v.round());
                 },
               ),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: List.generate(_timelineMilestones.length, (i) {
+                  final active = i == _timelineFocusIndex;
+                  return ChoiceChip(
+                    selectedColor: accent.withValues(alpha: 0.24),
+                    side: BorderSide(
+                      color: active
+                          ? accent.withValues(alpha: 0.7)
+                          : accent.withValues(alpha: 0.28),
+                    ),
+                    label: Text(
+                      _timelineMilestones[i]['title']!,
+                      style: TextStyle(
+                        color: active
+                            ? const Color(0xFFF2FBFF)
+                            : const Color(0xFFCDE0F2),
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                        fontSize: 11.5,
+                      ),
+                    ),
+                    selected: active,
+                    onSelected: (_) => _focusTimeline(i),
+                  );
+                }),
+              ),
             ],
           ),
         ),
@@ -6565,81 +6514,139 @@ class _MotionStudioPageState extends State<MotionStudioPage>
           const SizedBox(height: 10),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: _CinematicFaceHeader(
-              title: 'Interactive Motion Lab',
-              subtitle: _tabUsage(_motionTabIndex),
-              tags: [
-                _HeaderTag(
-                  icon: Icons.auto_awesome_motion,
-                  label: tier == _MotionTier.cinematic
-                      ? 'Cinematic'
-                      : tier == _MotionTier.balanced
-                          ? 'Balanced'
-                          : 'Reduced',
-                  tint: const Color(0xFF8DE2FF),
-                ),
-                _HeaderTag(
-                  icon: Icons.touch_app,
-                  label: _tabLabel(_motionTabIndex),
-                  tint: const Color(0xFF91F0CA),
-                ),
-                _HeaderTag(
-                  icon: Icons.palette,
-                  label: _styleLabel(_visualStyle),
-                  tint: const Color(0xFFFFD89B),
-                ),
-                _HeaderTag(
-                  icon: Icons.auto_awesome,
-                  label: _realismPresetLabel(_realism),
-                  tint: const Color(0xFFB1D2FF),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Card(
               margin: EdgeInsets.zero,
               color: const Color(0xFF102235),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-                child: Row(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: Column(
                   children: [
-                    const Icon(Icons.auto_awesome,
-                        size: 18, color: Color(0xFF9ED8FF)),
-                    const SizedBox(width: 8),
-                    const Text(
-                      'Realism',
-                      style: TextStyle(
-                        color: Color(0xFFCFEAFF),
-                        fontWeight: FontWeight.w700,
-                      ),
+                    Row(
+                      children: [
+                        const Icon(Icons.view_in_ar,
+                            color: Color(0xFF8FE4FF), size: 18),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Interactive Motion Lab',
+                            style: TextStyle(
+                              color: Color(0xFFE6F5FF),
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0F314B),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0xFF8FDFFF)
+                                  .withValues(alpha: 0.4),
+                            ),
+                          ),
+                          child: Text(
+                            _tabLabel(_motionTabIndex),
+                            style: const TextStyle(
+                              color: Color(0xFFBCEBFF),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          tooltip: _showMotionHeaderDetails
+                              ? 'Hide details'
+                              : 'Show details',
+                          onPressed: () {
+                            setState(() {
+                              _showMotionHeaderDetails =
+                                  !_showMotionHeaderDetails;
+                            });
+                          },
+                          icon: Icon(
+                            _showMotionHeaderDetails
+                                ? Icons.unfold_less
+                                : Icons.unfold_more,
+                            color: const Color(0xFF9FEAFF),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Slider(
-                        value: _realism,
-                        min: 0.2,
-                        max: 1.0,
-                        divisions: 16,
-                        onChanged: _setRealism,
+                    if (_showMotionHeaderDetails) ...[
+                      const SizedBox(height: 8),
+                      _CinematicFaceHeader(
+                        title: 'Scene Guidance',
+                        subtitle: _tabUsage(_motionTabIndex),
+                        tags: [
+                          _HeaderTag(
+                            icon: Icons.auto_awesome_motion,
+                            label: tier == _MotionTier.cinematic
+                                ? 'Cinematic'
+                                : tier == _MotionTier.balanced
+                                    ? 'Balanced'
+                                    : 'Reduced',
+                            tint: const Color(0xFF8DE2FF),
+                          ),
+                          _HeaderTag(
+                            icon: Icons.touch_app,
+                            label: _tabLabel(_motionTabIndex),
+                            tint: const Color(0xFF91F0CA),
+                          ),
+                          _HeaderTag(
+                            icon: Icons.palette,
+                            label: _styleLabel(_visualStyle),
+                            tint: const Color(0xFFFFD89B),
+                          ),
+                          _HeaderTag(
+                            icon: Icons.auto_awesome,
+                            label: _realismPresetLabel(_realism),
+                            tint: const Color(0xFFB1D2FF),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _realismPresetLabel(_realism),
-                      style: const TextStyle(
-                        color: Color(0xFF9DEBFF),
-                        fontWeight: FontWeight.w700,
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Icon(Icons.auto_awesome,
+                              size: 18, color: Color(0xFF9ED8FF)),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Realism',
+                            style: TextStyle(
+                              color: Color(0xFFCFEAFF),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Slider(
+                              value: _realism,
+                              min: 0.2,
+                              max: 1.0,
+                              divisions: 16,
+                              onChanged: _setRealism,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _realismPresetLabel(_realism),
+                            style: const TextStyle(
+                              color: Color(0xFF9DEBFF),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(12),
@@ -6659,8 +6666,33 @@ class RapidDeckPage extends StatefulWidget {
   State<RapidDeckPage> createState() => _RapidDeckPageState();
 }
 
-class FeatureForgePage extends StatelessWidget {
+class FeatureForgePage extends StatefulWidget {
   const FeatureForgePage({super.key});
+
+  @override
+  State<FeatureForgePage> createState() => _FeatureForgePageState();
+}
+
+class _FeatureForgePageState extends State<FeatureForgePage> {
+  bool _showForgeIntro = false;
+
+  static const List<List<Color>> _forgeCardPalettes = [
+    [Color(0xFF1F4F73), Color(0xFF12263E)],
+    [Color(0xFF4E2D69), Color(0xFF211433)],
+    [Color(0xFF1C5D53), Color(0xFF112B28)],
+    [Color(0xFF5D3C1E), Color(0xFF2B1F14)],
+    [Color(0xFF2A3E70), Color(0xFF17233F)],
+    [Color(0xFF5A2744), Color(0xFF2D1624)],
+  ];
+
+  List<Color> _cardPaletteForIndex(int index) {
+    return _forgeCardPalettes[index % _forgeCardPalettes.length];
+  }
+
+  String _cardStageLabel(int id) {
+    final stage = ((id - 1) % 5) + 1;
+    return 'Stage $stage';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -6672,50 +6704,9 @@ class FeatureForgePage extends StatelessWidget {
         child: CustomScrollView(
           physics: const BouncingScrollPhysics(),
           slivers: [
-            const SliverToBoxAdapter(
+            SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.fromLTRB(12, 12, 12, 6),
-                child: _CinematicFaceHeader(
-                  title: 'What Feature Forge 3D Does',
-                  subtitle:
-                      'Feature Forge 3D is for testing many generation, analytics, and operations scenarios fast. Use 3D Motion Studio for camera motion experiments.',
-                  tags: [
-                    _HeaderTag(
-                      icon: Icons.dashboard_customize,
-                      label: 'Scenario Deck',
-                      tint: Color(0xFF8DDFFF),
-                    ),
-                    _HeaderTag(
-                      icon: Icons.view_in_ar,
-                      label: 'Interactive Labs in Motion Studio',
-                      tint: Color(0xFF93F3CF),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const MotionStudioPage(),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.view_in_ar),
-                    label: const Text('Open 3D Motion Studio'),
-                  ),
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 child: Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
@@ -6726,22 +6717,138 @@ class FeatureForgePage extends StatelessWidget {
                       color: const Color(0xFF87DEFF).withValues(alpha: 0.24),
                     ),
                   ),
-                  child: const Column(
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Motive',
+                      Row(
+                        children: [
+                          const Icon(Icons.dashboard_customize,
+                              color: Color(0xFF9EEAFF)),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Feature Forge 3D',
+                              style: TextStyle(
+                                color: Color(0xFFDFF5FF),
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          FilledButton.icon(
+                            onPressed: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => const MotionStudioPage(),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.view_in_ar),
+                            label: const Text('Motion Studio'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Launch and compare many scenario cards quickly.',
                         style: TextStyle(
-                          color: Color(0xFFDFF5FF),
-                          fontWeight: FontWeight.w800,
+                          color: Color(0xFFC4DDF1),
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      SizedBox(height: 6),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _showForgeIntro = !_showForgeIntro;
+                            });
+                          },
+                          icon: Icon(
+                            _showForgeIntro
+                                ? Icons.unfold_less
+                                : Icons.unfold_more,
+                          ),
+                          label: Text(
+                            _showForgeIntro
+                                ? 'Hide Description'
+                                : 'Show Description',
+                          ),
+                        ),
+                      ),
+                      if (_showForgeIntro) ...[
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Feature Forge 3D is built for high-volume generation, analytics, and operations scenario checks. For camera-motion behavior and cinematic movement tuning, use 3D Motion Studio.',
+                          style: TextStyle(
+                            color: Color(0xFFBDD8F0),
+                            height: 1.3,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            Chip(
+                              avatar: const Icon(Icons.dashboard_customize,
+                                  size: 16, color: Color(0xFF8DDFFF)),
+                              label: const Text('Scenario Deck'),
+                              side: BorderSide.none,
+                              backgroundColor: const Color(0xFF8DDFFF)
+                                  .withValues(alpha: 0.16),
+                            ),
+                            Chip(
+                              avatar: const Icon(Icons.view_in_ar,
+                                  size: 16, color: Color(0xFF93F3CF)),
+                              label: const Text(
+                                  'Interactive Labs in Motion Studio'),
+                              side: BorderSide.none,
+                              backgroundColor: const Color(0xFF93F3CF)
+                                  .withValues(alpha: 0.16),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                child: Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF102338),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFF7FD8FF).withValues(alpha: 0.18),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.bolt_rounded,
+                          color: Color(0xFF9CEAFF), size: 18),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Tip: Tap Open on any card to launch a focused scenario panel.',
+                          style: TextStyle(
+                            color: Color(0xFFCBE3F4),
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ),
                       Text(
-                        'Use this page to launch many cards quickly and stress-test tool modules under diverse scenarios. It is a high-volume scenario launcher, not a camera-motion sandbox.',
-                        style: TextStyle(
-                          color: Color(0xFFBDD8F0),
-                          height: 1.3,
+                        '${cards.length} cards',
+                        style: const TextStyle(
+                          color: Color(0xFF8FE7FF),
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
                     ],
@@ -6751,76 +6858,162 @@ class FeatureForgePage extends StatelessWidget {
             ),
             SliverPadding(
               padding: const EdgeInsets.all(12),
-              sliver: SliverGrid(
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  childAspectRatio: 0.92,
-                ),
-                delegate: SliverChildBuilderDelegate(
-                  (context, i) {
-                    final c = cards[i];
-                    return Card(
-                      color: const Color(0xFF13233A),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                      child: Padding(
-                        padding: const EdgeInsets.all(10),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+              sliver: SliverLayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.crossAxisExtent;
+                  final crossAxisCount = width >= 1200
+                      ? 4
+                      : width >= 900
+                          ? 3
+                          : 2;
+                  final ratio = width < 420 ? 0.84 : 0.92;
+                  return SliverGrid(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: crossAxisCount,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: ratio,
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, i) {
+                        final c = cards[i];
+                        final palette = _cardPaletteForIndex(i);
+                        final stageLabel = _cardStageLabel(c.id);
+                        final intensityLabel =
+                            'Intensity ${(c.intensity * 100).round()}%';
+                        return Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(14),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: palette,
+                            ),
+                            border: Border.all(
+                              color: c.accent.withValues(alpha: 0.42),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Icon(c.icon, color: c.color),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    c.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: c.color,
-                                      fontWeight: FontWeight.w700,
+                                Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(7),
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: c.color.withValues(alpha: 0.2),
+                                        border: Border.all(
+                                          color:
+                                              c.color.withValues(alpha: 0.65),
+                                        ),
+                                      ),
+                                      child: Icon(c.icon,
+                                          color: c.color, size: 16),
                                     ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        c.title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: c.color,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                        color: c.accent.withValues(alpha: 0.18),
+                                        border: Border.all(
+                                          color:
+                                              c.accent.withValues(alpha: 0.5),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        stageLabel,
+                                        style: const TextStyle(
+                                          color: Color(0xFFE8F4FF),
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                        color: const Color(0xFF9DD5FF)
+                                            .withValues(alpha: 0.15),
+                                        border: Border.all(
+                                          color: const Color(0xFF9DD5FF)
+                                              .withValues(alpha: 0.35),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        intensityLabel,
+                                        style: const TextStyle(
+                                          color: Color(0xFFD8ECFF),
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  c.subtitle,
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  style:
+                                      const TextStyle(color: Color(0xFFC6DDF2)),
+                                ),
+                                const Spacer(),
+                                Align(
+                                  alignment: Alignment.bottomRight,
+                                  child: FilledButton.tonal(
+                                    onPressed: () {
+                                      showModalBottomSheet<void>(
+                                        context: context,
+                                        builder: (ctx) {
+                                          return Padding(
+                                            padding: const EdgeInsets.fromLTRB(
+                                                16, 14, 16, 20),
+                                            child: rapid_pack
+                                                .rapidDeckBuilders[c.id - 1](),
+                                          );
+                                        },
+                                      );
+                                    },
+                                    child: const Text('Open'),
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              c.subtitle,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Color(0xFFB9D9EE)),
-                            ),
-                            const Spacer(),
-                            Align(
-                              alignment: Alignment.bottomRight,
-                              child: FilledButton.tonal(
-                                onPressed: () {
-                                  showModalBottomSheet<void>(
-                                    context: context,
-                                    builder: (ctx) {
-                                      return Padding(
-                                        padding: const EdgeInsets.fromLTRB(
-                                            16, 14, 16, 20),
-                                        child: rapid_pack
-                                            .rapidDeckBuilders[c.id - 1](),
-                                      );
-                                    },
-                                  );
-                                },
-                                child: const Text('Open'),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                  childCount: cards.length,
-                ),
+                          ),
+                        );
+                      },
+                      childCount: cards.length,
+                    ),
+                  );
+                },
               ),
             ),
           ],
@@ -9144,6 +9337,429 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
   }
 }
 
+class FirstTimeEnrollmentPage extends StatefulWidget {
+  final String username;
+
+  const FirstTimeEnrollmentPage({super.key, required this.username});
+
+  @override
+  State<FirstTimeEnrollmentPage> createState() =>
+      _FirstTimeEnrollmentPageState();
+}
+
+class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
+  static const List<String> _steps = [
+    'Center your face',
+    'Look left',
+    'Look right',
+    'Look up',
+    'Look down',
+  ];
+  static const int _framesPerStep = 3;
+
+  final List<Uint8List> _frames = [];
+  final TextEditingController _nameController = TextEditingController();
+  CameraController? _controller;
+  bool _ready = false;
+  bool _capturing = false;
+  bool _uploading = false;
+  int _stepIndex = 0;
+  int _uploaded = 0;
+  String _status = '';
+  String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController.text = widget.username;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _askNameAndStart());
+  }
+
+  Future<void> _askNameAndStart() async {
+    final name = await _promptForName();
+    if (name == null || name.trim().isEmpty) {
+      if (mounted) Navigator.of(context).pop(false);
+      return;
+    }
+    final clean = name.trim();
+    _nameController.text = clean;
+    setState(() {
+      _status = 'Creating profile...';
+      _error = '';
+    });
+    final api = buildBackendApi();
+    try {
+      final res = await api.createFacePerson(person: clean);
+      if (res['ok'] != true) {
+        setState(() {
+          _error = 'Failed to create profile: ${(res['error'] ?? 'unknown')}';
+        });
+        return;
+      }
+      await _setupCamera();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Create profile failed: $e';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _setupCamera() async {
+    try {
+      final cams = await availableCameras().timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => <CameraDescription>[],
+      );
+      if (cams.isEmpty) {
+        setState(() {
+          _status = 'No camera found on device';
+        });
+        return;
+      }
+      final front = cams
+          .where((c) => c.lensDirection == CameraLensDirection.front)
+          .toList();
+      final selected = front.isNotEmpty ? front.first : cams.first;
+      final controller = CameraController(
+        selected,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+      await controller.initialize().timeout(const Duration(seconds: 10));
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _controller = controller;
+        _ready = true;
+        _status = 'Follow the direction prompts to capture your face';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'Camera setup error: $e';
+      });
+    }
+  }
+
+  Future<void> _captureStep() async {
+    if (_capturing || _uploading || !_ready) {
+      return;
+    }
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) {
+      setState(() {
+        _error = 'Camera not ready';
+      });
+      return;
+    }
+    if (_stepIndex >= _steps.length) {
+      await _finishEnrollment();
+      return;
+    }
+    setState(() {
+      _capturing = true;
+      _error = '';
+      _status = 'Capturing ${_steps[_stepIndex]}';
+    });
+    try {
+      final api = buildBackendApi();
+      for (int i = 0; i < _framesPerStep; i += 1) {
+        final shot = await ctrl.takePicture();
+        final bytes = await File(shot.path).readAsBytes();
+        _frames.add(bytes);
+        final name = _nameController.text.trim();
+        if (name.isNotEmpty) {
+          final res = await api.enrollFace(person: name, imageB64: base64Encode(bytes));
+          if (res['ok'] != true) {
+            throw Exception((res['error'] ?? 'Upload failed').toString());
+          }
+          if (!mounted) return;
+          setState(() {
+            _uploaded += 1;
+          });
+        }
+        await Future.delayed(const Duration(milliseconds: 420));
+      }
+      if (!mounted) return;
+      setState(() {
+        _stepIndex += 1;
+      });
+      if (_stepIndex >= _steps.length) {
+        await _finishEnrollment();
+      } else if (mounted) {
+        setState(() {
+          _status = 'Next: ${_steps[_stepIndex]}';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Capture failed: $e';
+      });
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _capturing = false;
+      });
+    }
+  }
+
+  Future<void> _finishEnrollment() async {
+    if (_uploading) {
+      return;
+    }
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() {
+        _error = 'Name is required to save enrollment';
+      });
+      return;
+    }
+    if (_frames.isEmpty) {
+      setState(() {
+        _error = 'No frames captured yet';
+      });
+      return;
+    }
+    setState(() {
+      _uploading = true;
+      _uploaded = 0;
+      _error = '';
+      _status = 'Uploading face samples...';
+    });
+    final api = buildBackendApi();
+    try {
+      if (_uploaded >= _frames.length) {
+        if (!mounted) return;
+        Navigator.of(context).pop(true);
+        return;
+      }
+      for (int i = _uploaded; i < _frames.length; i += 1) {
+        final res = await api.enrollFace(
+          person: name.trim(),
+          imageB64: base64Encode(_frames[i]),
+        );
+        if (res['ok'] != true) {
+          throw Exception((res['error'] ?? 'Upload failed').toString());
+        }
+        if (!mounted) return;
+        setState(() {
+          _uploaded = i + 1;
+        });
+      }
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Enrollment failed: $e';
+      });
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+      });
+    }
+  }
+
+  Future<String?> _promptForName() async {
+    String? out;
+    final controller = _nameController;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Confirm your name'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Real name'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                out = controller.text.trim();
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totalFrames = _steps.length * _framesPerStep;
+    final captured = _frames.length;
+    final progress = totalFrames == 0 ? 0.0 : captured / totalFrames;
+    final canCapture = _ready && !_capturing && !_uploading;
+    final label = _stepIndex >= _steps.length
+        ? 'Finish Enrollment'
+        : 'Capture: ${_steps[_stepIndex]}';
+
+    return WillPopScope(
+      onWillPop: () async => false,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Face Setup'),
+          automaticallyImplyLeading: false,
+        ),
+        body: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _stepIndex < _steps.length
+                        ? _steps[_stepIndex]
+                        : 'Review and finish enrollment',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  LinearProgressIndicator(value: progress.clamp(0.0, 1.0)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: List.generate(_steps.length, (i) {
+                      final done = i < _stepIndex;
+                      return Chip(
+                        label: Text('${i + 1}'),
+                        backgroundColor: done
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFF2A3B57),
+                        labelStyle: TextStyle(
+                          color: done ? Colors.black : Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      );
+                    }),
+                  ),
+                  if (_status.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(_status, style: const TextStyle(color: Colors.white)),
+                  ],
+                  if (_error.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(_error, style: const TextStyle(color: Colors.red)),
+                  ],
+                ],
+              ),
+            ),
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                color: const Color(0xFF0B1220),
+                child: _ready && _controller != null
+                      ? Stack(
+                          children: [
+                            CameraPreview(_controller!),
+                            Center(
+                              child: SizedBox(
+                                width: 320,
+                                height: 320,
+                                child: Stack(
+                                  children: [
+                                    Align(
+                                      alignment: Alignment.center,
+                                      child: Container(
+                                        width: 320,
+                                        height: 320,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.greenAccent,
+                                            width: 3,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      top: 12,
+                                      left: 0,
+                                      right: 0,
+                                      child: Center(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 10, vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black54,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                          child: Text(
+                                            _stepIndex < _steps.length
+                                                ? _steps[_stepIndex]
+                                                : 'Review and finish enrollment',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : const Center(child: CircularProgressIndicator()),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+              child: Column(
+                children: [
+                  if (_uploading)
+                    Text(
+                      'Uploading $_uploaded / ${_frames.length}',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  const SizedBox(height: 6),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: canCapture ? _captureStep : null,
+                      child: _capturing
+                          ? const Text('Capturing...')
+                          : Text(label),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class MobileHomePage extends StatefulWidget {
   final String username;
   final bool isAdmin;
@@ -9701,7 +10317,10 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       await _ensureLocationAccess();
       await _updateCurrentLocation(force: true);
 
-      final cams = await availableCameras();
+      final cams = await availableCameras().timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => <CameraDescription>[],
+      );
       if (cams.isEmpty) {
         setState(() => _status = 'No camera found on device');
         return;
@@ -9717,7 +10336,11 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         ResolutionPreset.medium,
         enableAudio: false,
       );
-      await controller.initialize();
+      await controller.initialize().timeout(const Duration(seconds: 10));
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
       _controller = controller;
 
       final ok = await _ensureToken();
@@ -9847,44 +10470,19 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     required String imageB64,
     required String personName,
   }) async {
-    if (!await _ensureToken()) {
-      if (mounted) {
-        setState(() => _status = 'Token unavailable for save');
-      }
-      return;
-    }
     final cleanName = personName.trim();
     if (cleanName.isEmpty) {
       return;
     }
-    final endpoint = Uri.parse(
-        '${_baseUrl.trim().replaceAll(RegExp(r'/$'), '')}/api/admin/faces/sync');
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final filename = 'mobile_$now.jpg';
-    final res = await http.post(
-      endpoint,
-      headers: {
-        'Authorization': 'Bearer $_token',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'entries': [
-          {
-            'person': cleanName,
-            'filename': filename,
-            'image_b64': imageB64,
-          }
-        ],
-        'clear_existing': false,
-        'refresh_after': true,
-      }),
-    );
     if (!mounted) {
       return;
     }
-    if (res.statusCode != 200) {
+    final api = buildBackendApi();
+    final res = await api.enrollFace(person: cleanName, imageB64: imageB64);
+    if (res['ok'] != true) {
       setState(() {
-        _status = 'Save unknown failed: ${res.statusCode}';
+        _status =
+            'Save unknown failed: ${(res['error'] ?? 'backend rejected').toString()}';
       });
       return;
     }
@@ -11901,6 +12499,7 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
   String _mapError = '';
   String _status = 'Search a recognized name to view recognition places';
   List<Map<String, dynamic>> _rows = const [];
+  Timer? _mapTimeoutTimer;
 
   String _osmExactLocationUrl(double lat, double lng) {
     final latText = lat.toStringAsFixed(6);
@@ -11912,10 +12511,18 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
   void initState() {
     super.initState();
     final base = buildBackendApi().baseUrl;
-    _mapCandidates = [
+    final candidates = <String>[
+      if (!kIsWeb && Platform.isAndroid) ...[
+        'http://10.0.2.2:8787/api/map/view',
+        'http://10.0.3.2:8787/api/map/view',
+        'http://127.0.0.1:8787/api/map/view',
+      ],
       '$base/api/map/view',
       'https://www.openstreetmap.org/#map=2/20.0/0.0',
     ];
+    final seen = <String>{};
+    _mapCandidates =
+        candidates.where((u) => u.isNotEmpty && seen.add(u)).toList();
     _mapController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0x00000000))
@@ -11929,6 +12536,7 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
               _mapLoading = true;
               _mapError = '';
             });
+            _startMapTimeout();
           },
           onPageFinished: (_) {
             if (!mounted) {
@@ -11937,11 +12545,13 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
             setState(() {
               _mapLoading = false;
             });
+            _mapTimeoutTimer?.cancel();
           },
           onWebResourceError: (error) {
             if (!mounted) {
               return;
             }
+            _mapTimeoutTimer?.cancel();
             if (_mapIndex + 1 < _mapCandidates.length) {
               _mapIndex += 1;
               _mapController.loadRequest(Uri.parse(_mapCandidates[_mapIndex]));
@@ -11955,13 +12565,33 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
         ),
       )
       ..loadRequest(Uri.parse(_mapCandidates[_mapIndex]));
+    _startMapTimeout();
     unawaited(_loadLatestPins());
   }
 
   @override
   void dispose() {
+    _mapTimeoutTimer?.cancel();
     _nameController.dispose();
     super.dispose();
+  }
+
+  void _startMapTimeout() {
+    _mapTimeoutTimer?.cancel();
+    _mapTimeoutTimer = Timer(const Duration(seconds: 12), () {
+      if (!mounted || !_mapLoading) {
+        return;
+      }
+      if (_mapIndex + 1 < _mapCandidates.length) {
+        _mapIndex += 1;
+        _mapController.loadRequest(Uri.parse(_mapCandidates[_mapIndex]));
+        return;
+      }
+      setState(() {
+        _mapLoading = false;
+        _mapError = 'Map load timed out';
+      });
+    });
   }
 
   Future<void> _search() async {

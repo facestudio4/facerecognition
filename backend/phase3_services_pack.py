@@ -1216,7 +1216,7 @@ class Phase3ServiceHub:
         requested_by: str = "mobile",
         force_update: bool = False,
     ):
-        name = (recognized_name or "").strip()
+        name = re.sub(r"\s+", " ", (recognized_name or "").strip())
         if not name or name.lower() == "unknown":
             return {"ok": False, "error": "recognized_name is required"}
 
@@ -1382,7 +1382,7 @@ class Phase3ServiceHub:
         return {"ok": True, "data": {"saved": True, "event_id": event_id, "event": payload}}
 
     def search_recognition_locations(self, name: str, limit: int = 100, latest_only: bool = False):
-        person = (name or "").strip()
+        person = re.sub(r"\s+", " ", (name or "").strip())
         if not person:
             return []
         limit = max(1, min(int(limit), 2000))
@@ -1736,28 +1736,35 @@ class Phase3ServiceHub:
         enc_arr = np.array(encs)
         threshold_default = max(
             float(getattr(legacy, "RECOGNITION_THRESHOLD", 0.38)),
-            0.50,
+            0.44,
         )
         threshold_raw = os.getenv("MOBILE_RECOGNITION_THRESHOLD", str(threshold_default))
         try:
             threshold = float(threshold_raw)
         except Exception:
-            threshold = 0.50
+            threshold = 0.44
         threshold = max(0.30, min(0.90, threshold))
 
-        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.05")
+        margin_raw = os.getenv("MOBILE_RECOGNITION_MARGIN", "0.03")
         try:
             margin = float(margin_raw)
         except Exception:
-            margin = 0.05
+            margin = 0.03
         margin = max(0.0, min(0.30, margin))
 
-        min_samples_raw = os.getenv("MOBILE_MIN_SAMPLES_PER_PERSON", "10")
+        min_samples_raw = os.getenv("MOBILE_MIN_SAMPLES_PER_PERSON", "6")
         try:
             min_samples_per_person = int(min_samples_raw)
         except Exception:
-            min_samples_per_person = 10
+            min_samples_per_person = 6
         min_samples_per_person = max(1, min(100, min_samples_per_person))
+        auto_append_samples = os.getenv("MOBILE_AUTO_APPEND_SAMPLES", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
         top_k = max(1, min(int(top_k), 10))
 
         all_faces = []
@@ -1786,13 +1793,16 @@ class Phase3ServiceHub:
 
             top = person_scores[:top_k]
             best_candidate = top[0] if top else {"name": "Unknown", "score": 0.0}
+            best_score = float(best_candidate["score"])
             second_score = float(top[1]["score"]) if len(top) > 1 else 0.0
-            ambiguous = len(top) > 1 and (float(best_candidate["score"]) - second_score) < margin
             best_name = str(best_candidate.get("name", "Unknown"))
             samples_for_best = len((known or {}).get(best_name, []) or [])
-            sample_penalty = 0.04 if samples_for_best < min_samples_per_person else 0.0
+            insufficient_samples = samples_for_best < min_samples_per_person
+            sample_penalty = 0.02 if insufficient_samples else 0.0
+            required_margin = margin + (0.02 if insufficient_samples else 0.0)
+            ambiguous = len(top) > 1 and (best_score - second_score) < required_margin
 
-            if float(best_candidate["score"]) < (threshold + sample_penalty) or ambiguous:
+            if best_score < (threshold + sample_penalty) or ambiguous:
                 best = {"name": "Unknown", "score": 0.0}
             else:
                 best = best_candidate
@@ -1801,7 +1811,13 @@ class Phase3ServiceHub:
                 global_best = best
                 global_top = top
 
-            if best.get("name") and best.get("name") != "Unknown":
+            if (
+                auto_append_samples
+                and best.get("name")
+                and best.get("name") != "Unknown"
+                and not insufficient_samples
+                and best_score >= (threshold + sample_penalty + 0.04)
+            ):
                 try:
                     x1 = max(int(fx), 0)
                     y1 = max(int(fy), 0)
@@ -1823,7 +1839,7 @@ class Phase3ServiceHub:
                     },
                     "best": best,
                     "best_samples": samples_for_best,
-                    "insufficient_samples": samples_for_best < min_samples_per_person,
+                    "insufficient_samples": insufficient_samples,
                     "matches": top,
                 }
             )
@@ -1891,6 +1907,15 @@ class Phase3ServiceHub:
             raise ValueError("filter_name is required")
         if filter_name not in getattr(legacy, "STYLE_LIST", []):
             raise ValueError(f"Unsupported filter_name: {filter_name}")
+
+        try:
+            from backend.services.face_generation import generate_face_variant
+
+            advanced = generate_face_variant(image_b64, filter_name)
+            if advanced:
+                return advanced
+        except Exception:
+            pass
 
         frame = self._decode_image_b64(image_b64)
         result = legacy.apply_face_filter(frame, filter_name)
@@ -2532,6 +2557,19 @@ class Phase3ServiceHub:
                         result = hub.enroll_face_for_user(person_name=person, image_b64=image_b64, username=username)
                         code = 200 if result.get("ok") else 400
                         self._send_json(code, result)
+                        return
+
+                    if path == "/api/mobile/face/create":
+                        token_payload = self._token_payload()
+                        username = str(token_payload.get("sub", "")) if token_payload else ""
+                        person = str(payload.get("person", "")).strip() or username
+                        try:
+                            safe_person = hub._sanitize_face_name(person)
+                            faces_root = os.path.join(hub.base_dir, "database", "faces")
+                            os.makedirs(os.path.join(faces_root, safe_person), exist_ok=True)
+                            self._send_json(200, {"ok": True})
+                        except Exception as ex:
+                            self._send_json(500, {"ok": False, "error": str(ex)})
                         return
 
                     if path == "/api/mobile/generate":

@@ -1012,11 +1012,16 @@ def match_embedding (embedding ,known_names ,known_encs_arr ):
         elif score >second_best and known_names[i] != best_name:
             second_best =score 
 
-    effective_threshold = float(RECOGNITION_THRESHOLD)
-    confidence_margin = best_score - second_best if (second_best >= 0 and second_best >= effective_threshold * 0.9) else best_score 
-    
-    # We remove the hardcoded 0.43 limit and make margin only 0.01 between different people
-    if best_score >= effective_threshold and confidence_margin >= 0.01:
+    effective_threshold =float (RECOGNITION_THRESHOLD )
+    margin_raw =os .getenv ("LEGACY_RECOGNITION_MARGIN","0.03")
+    try :
+        confidence_gate =float (margin_raw )
+    except Exception :
+        confidence_gate =0.03 
+    confidence_gate =max (0.0 ,min (0.2 ,confidence_gate ))
+    confidence_margin =best_score -second_best if second_best >=0 else best_score 
+
+    if best_score >=effective_threshold and confidence_margin >=confidence_gate :
         return best_name ,float (best_score )
     return "Unknown",0.0 
 
@@ -6771,7 +6776,6 @@ def side_by_side_gui (parent =None ,on_close_callback =None ):
 
 
 
-
 def system_info_gui (parent =None ,on_close_callback =None ):
     """Show system info: Python version, OpenCV, model sizes, DB stats."""
     if parent is None :
@@ -6890,3 +6894,4 @@ def main ():
 
 if __name__ =="__main__":
     main ()
+ 
