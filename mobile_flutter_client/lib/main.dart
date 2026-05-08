@@ -3989,8 +3989,13 @@ class _AuthGateState extends State<AuthGate> {
       final effectiveForceUpdate =
           (forceUpdate || mustUpdate) && !currentIsLatestOrNewer;
       final urlChanged = updateUrl != lastNotifiedUrl;
-      final shouldPrompt =
-          needsUpdate || mustUpdate || (urlChanged && !currentIsLatestOrNewer);
+      final sameVersionUrlUpdate =
+          latestN > 0 && currentN == latestN && urlChanged;
+      final urlChangedForOlderBuild = urlChanged && !currentIsLatestOrNewer;
+      final shouldPrompt = needsUpdate ||
+          mustUpdate ||
+          urlChangedForOlderBuild ||
+          sameVersionUrlUpdate;
       if (!shouldPrompt) {
         if (lastNotifiedVersion.isNotEmpty) {
           await prefs.remove('fs_last_update_notified_version');
@@ -4006,6 +4011,7 @@ class _AuthGateState extends State<AuthGate> {
       if (!effectiveForceUpdate &&
           !mustUpdate &&
           !needsUpdate &&
+          !sameVersionUrlUpdate &&
           notifiedCooldownActive) {
         return;
       }
