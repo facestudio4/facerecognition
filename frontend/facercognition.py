@@ -244,6 +244,107 @@ ATTENDANCE_LOG_PATH =os .path .join (ATTENDANCE_DIR ,"attendance.json")
 _pending_codes :dict ={}
 
 
+class DiskBackedRetryQueue :
+    """Small JSONL queue that survives app restarts and retries failed jobs."""
+
+    def __init__ (self ,path :str ,max_attempts :int =5 ,retry_delay_seconds :int =30 ):
+        self .path =path
+        self .max_attempts =max_attempts
+        self .retry_delay_seconds =retry_delay_seconds
+        self ._lock =threading .Lock ()
+        self ._worker_started =False
+        self ._stop_event =threading .Event ()
+        os .makedirs (os .path .dirname (path ),exist_ok =True )
+
+    def enqueue (self ,kind :str ,payload :dict ,reason :str =""):
+        job ={
+        "id":f"{int (time .time ()*1000 )}_{random .randint (1000 ,9999 )}",
+        "kind":kind ,
+        "payload":payload ,
+        "attempts":0 ,
+        "next_retry_at":time .time (),
+        "reason":str (reason or ""),
+        "created_at":datetime .now ().isoformat (timespec ="seconds"),
+        }
+        with self ._lock :
+            with open (self .path ,"a",encoding ="utf-8")as f :
+                f .write (json .dumps (job ,ensure_ascii =False )+"\n")
+        self .start_worker ()
+        print (f"[RETRY QUEUE] Queued {kind } job {job ['id']} after failure: {reason }")
+        return job ["id"]
+
+    def _load_jobs (self )->list :
+        if not os .path .exists (self .path ):
+            return []
+        jobs =[]
+        with self ._lock :
+            with open (self .path ,"r",encoding ="utf-8")as f :
+                for line in f :
+                    line =line .strip ()
+                    if not line :
+                        continue
+                    try :
+                        job =json .loads (line )
+                        if isinstance (job ,dict ):
+                            jobs .append (job )
+                    except json .JSONDecodeError :
+                        pass
+        return jobs
+
+    def _save_jobs (self ,jobs :list ):
+        tmp =self .path +".tmp"
+        with self ._lock :
+            with open (tmp ,"w",encoding ="utf-8")as f :
+                for job in jobs :
+                    f .write (json .dumps (job ,ensure_ascii =False )+"\n")
+            os .replace (tmp ,self .path )
+
+    def process_once (self ,handler )->int :
+        jobs =self ._load_jobs ()
+        if not jobs :
+            return 0
+        now =time .time ()
+        remaining =[]
+        processed =0
+        for job in jobs :
+            if float (job .get ("next_retry_at",0 )or 0 )>now :
+                remaining .append (job )
+                continue
+            attempts =int (job .get ("attempts",0 )or 0 )
+            if attempts >=self .max_attempts :
+                print (f"[RETRY QUEUE] Dropping {job .get ('kind')} job {job .get ('id')} after {attempts } attempts")
+                processed +=1
+                continue
+            try :
+                ok =bool (handler (job ))
+            except Exception as e :
+                ok =False
+                job ["reason"]=str (e )
+            if ok :
+                print (f"[RETRY QUEUE] Completed {job .get ('kind')} job {job .get ('id')}")
+                processed +=1
+            else :
+                job ["attempts"]=attempts +1
+                job ["next_retry_at"]=now +self .retry_delay_seconds *(2 **attempts )
+                remaining .append (job )
+        self ._save_jobs (remaining )
+        return processed
+
+    def start_worker (self ):
+        if self ._worker_started :
+            return
+        self ._worker_started =True
+        def _loop ():
+            while not self ._stop_event .wait (self .retry_delay_seconds ):
+                self .process_once (_process_retry_job )
+        threading .Thread (target =_loop ,daemon =True ,name ="FaceStudioRetryQueue").start ()
+
+
+RETRY_QUEUE_PATH =os .path .join (DATA_DIR ,"retry_queue.jsonl")
+_retry_queue =DiskBackedRetryQueue (RETRY_QUEUE_PATH )
+_retry_delivery_active =False
+
+
 
 
 
@@ -293,10 +394,44 @@ def _send_email (to_email :str ,subject :str ,body_html :str )->bool :
         return True 
     except Exception as e :
         print (f"[EMAIL ERROR] {e }")
+        if _retry_delivery_active :
+            return False
+        _retry_queue .enqueue ("email",{
+        "to_email":to_email ,
+        "subject":subject ,
+        "body_html":body_html ,
+        },str (e ))
 
         print ("[EMAIL] Falling back to demo mode — code will be shown in app.")
         _last_demo_code ["method"]="email_fallback"
         return True 
+
+
+def _process_retry_job (job :dict )->bool :
+    """Retry one queued outbound job without enqueuing another duplicate on failure."""
+    global _retry_delivery_active
+    payload =job .get ("payload")or {}
+    kind =job .get ("kind")
+    _retry_delivery_active =True
+    try :
+        if kind =="email":
+            return _send_email (
+            str (payload .get ("to_email")or ""),
+            str (payload .get ("subject")or ""),
+            str (payload .get ("body_html")or ""),
+            )
+        if kind =="sms":
+            return _send_sms (
+            str (payload .get ("to_phone")or ""),
+            str (payload .get ("message")or ""),
+            )
+        print (f"[RETRY QUEUE] Unknown job kind: {kind }")
+        return True
+    finally :
+        _retry_delivery_active =False
+
+
+_retry_queue .start_worker ()
 
 
 def _send_verification_email (to_email :str ,code :str )->bool :
@@ -374,9 +509,13 @@ def _send_sms (to_phone :str ,message :str )->bool :
             if resp .status ==201 :
                 print (f"[SMS] Sent to {to_phone }")
                 return True 
+        if not _retry_delivery_active :
+            _retry_queue .enqueue ("sms",{"to_phone":to_phone ,"message":message },f"HTTP status {resp .status}")
         return False 
     except Exception as e :
         print (f"[SMS ERROR] {e }")
+        if not _retry_delivery_active :
+            _retry_queue .enqueue ("sms",{"to_phone":to_phone ,"message":message },str (e ))
         return False 
 
 
@@ -1352,16 +1491,13 @@ def register_unknown_face (frame ,known_encodings :dict )->dict :
     parent =dialog_parent ,
     )
 
+    name ,person_dir =_resolve_person_folder_for_registration (name ,dialog_parent )
     if temp_parent is not None :
         temp_parent .destroy ()
-
-    name =(name or "").strip ()
-    if not name :
+    if not name or not person_dir :
         print ("  [SKIP] No name entered.")
         return known_encodings 
 
-
-    person_dir =os .path .join (FACES_ROOT ,name )
     os .makedirs (person_dir ,exist_ok =True )
     ts =int (time .time ())
     img_path =os .path .join (person_dir ,f"{name }_{ts }.jpg")
@@ -1380,6 +1516,66 @@ def register_unknown_face (frame ,known_encodings :dict )->dict :
         print ("  [WARN] Could not compute face encoding from frame.")
 
     return known_encodings 
+
+
+def _find_existing_person_dir (name :str )->str |None :
+    wanted =(name or "").strip ().lower ()
+    if not wanted or not os .path .isdir (FACES_ROOT ):
+        return None
+    for entry in os .listdir (FACES_ROOT ):
+        path =os .path .join (FACES_ROOT ,entry )
+        if os .path .isdir (path )and entry .strip ().lower ()==wanted :
+            return path
+    return None
+
+
+def _first_face_image_in_dir (person_dir :str )->str |None :
+    try :
+        names =sorted (os .listdir (person_dir ))
+    except OSError :
+        return None
+    for filename in names :
+        ext =os .path .splitext (filename )[1 ].lower ()
+        if ext in IMAGE_EXTENSIONS :
+            return os .path .join (person_dir ,filename )
+    return None
+
+
+def _confirm_existing_person_folder (name :str ,person_dir :str ,parent )->bool :
+    sample =_first_face_image_in_dir (person_dir )
+    window_name =f"Existing face for {name }"
+    if sample :
+        img =cv2 .imread (sample )
+        if img is not None :
+            cv2 .imshow (window_name ,img )
+            cv2 .waitKey (1 )
+    answer =messagebox .askyesno (
+    "Same name already exists",
+    f"A face folder named '{os .path .basename (person_dir )}' already exists.\n\nIs this you?\n\nYes: save this capture in the existing folder.\nNo: enter your full name.",
+    parent =parent ,
+    )
+    try :
+        cv2 .destroyWindow (window_name )
+    except Exception :
+        pass
+    return bool (answer )
+
+
+def _resolve_person_folder_for_registration (initial_name :str ,parent )->tuple [str |None ,str |None ]:
+    name =(initial_name or "").strip ()
+    while name :
+        existing_dir =_find_existing_person_dir (name )
+        if not existing_dir :
+            return name ,os .path .join (FACES_ROOT ,name )
+        if _confirm_existing_person_folder (name ,existing_dir ,parent ):
+            return os .path .basename (existing_dir ),existing_dir
+        name =simpledialog .askstring (
+        "Enter Full Name",
+        "That folder belongs to someone else. Please enter your full name:",
+        parent =parent ,
+        )
+        name =(name or "").strip ()
+    return None ,None
 
 
 
