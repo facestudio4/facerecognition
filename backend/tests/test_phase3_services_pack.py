@@ -192,6 +192,40 @@ class Phase3ServicesPackTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows[0]['latitude']), 23.0225, places=4)
         self.assertAlmostEqual(float(rows[0]['longitude']), 72.5714, places=4)
 
+    def test_latest_recognition_location_survives_hub_restart(self):
+        hub = Phase3ServiceHub(self.base_dir, self.db_path)
+        first = hub.save_recognition_location_event(
+            recognized_name='alice',
+            location_name='Mumbai, India',
+            latitude=19.0760,
+            longitude=72.8777,
+            confidence=0.80,
+            requested_by='alice',
+        )
+        self.assertTrue(first.get('ok'))
+        second = hub.save_recognition_location_event(
+            recognized_name='alice',
+            location_name='Delhi, India',
+            latitude=28.6139,
+            longitude=77.2090,
+            confidence=0.92,
+            requested_by='alice',
+            force_update=True,
+        )
+        self.assertTrue(second.get('ok'))
+
+        restarted = Phase3ServiceHub(self.base_dir, self.db_path)
+        rows = restarted.search_recognition_locations(name='alice', latest_only=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['location_name'], 'Delhi, India')
+        self.assertAlmostEqual(float(rows[0]['latitude']), 28.6139, places=4)
+        self.assertAlmostEqual(float(rows[0]['longitude']), 77.2090, places=4)
+
+        latest = restarted.list_latest_recognition_locations(limit=10)
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]['recognized_name'].lower(), 'alice')
+        self.assertEqual(latest[0]['location_name'], 'Delhi, India')
+
     def test_signup_email_verification_flow(self):
         hub = Phase3ServiceHub(self.base_dir, self.db_path)
         sent = []

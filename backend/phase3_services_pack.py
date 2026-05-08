@@ -112,12 +112,78 @@ class Phase3ServiceHub:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recognition_latest_locations (
+                    recognized_name_key TEXT PRIMARY KEY,
+                    recognized_name TEXT,
+                    event_time TEXT,
+                    location_name TEXT,
+                    latitude REAL,
+                    longitude REAL,
+                    confidence REAL,
+                    source TEXT,
+                    requested_by TEXT,
+                    event_id INTEGER,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_time ON activity_events(event_time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_name ON recognition_location_events(recognized_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_time ON recognition_location_events(event_time)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_latest_rec_loc_name ON recognition_latest_locations(recognized_name)")
+            self._backfill_latest_recognition_locations(conn)
             if self._table_exists(conn, "users"):
                 self._ensure_users_privacy_columns(conn)
             conn.commit()
+
+    def _backfill_latest_recognition_locations(self, conn):
+        try:
+            rows = conn.execute(
+                """
+                SELECT e.id, e.event_time, e.recognized_name, e.location_name,
+                       e.latitude, e.longitude, e.confidence, e.source, e.requested_by,
+                       e.payload_json
+                FROM recognition_location_events e
+                INNER JOIN (
+                    SELECT lower(recognized_name) AS k, MAX(id) AS max_id
+                    FROM recognition_location_events
+                    GROUP BY lower(recognized_name)
+                ) latest ON latest.max_id = e.id
+                """
+            ).fetchall()
+        except Exception:
+            return
+        for row in rows:
+            name = str(row["recognized_name"] or "").strip()
+            if not name:
+                continue
+            payload_text = row["payload_json"] or ""
+            if not payload_text:
+                payload_text = json.dumps(dict(row), ensure_ascii=False)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO recognition_latest_locations(
+                    recognized_name_key, recognized_name, event_time, location_name,
+                    latitude, longitude, confidence, source, requested_by,
+                    event_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name.lower(),
+                    name,
+                    row["event_time"],
+                    row["location_name"],
+                    row["latitude"],
+                    row["longitude"],
+                    row["confidence"],
+                    row["source"],
+                    row["requested_by"],
+                    int(row["id"] or 0),
+                    payload_text,
+                ),
+            )
 
     def _column_exists(self, conn, table_name: str, column_name: str):
         try:
@@ -1371,6 +1437,28 @@ class Phase3ServiceHub:
                 """,
                 (name, event_id),
             )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO recognition_latest_locations(
+                    recognized_name_key, recognized_name, event_time, location_name,
+                    latitude, longitude, confidence, source, requested_by,
+                    event_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name.lower(),
+                    name,
+                    ts,
+                    location,
+                    lat,
+                    lng,
+                    conf,
+                    source,
+                    requested_by,
+                    event_id,
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
             conn.commit()
 
         self._log_activity(
@@ -1391,7 +1479,7 @@ class Phase3ServiceHub:
                 rows = conn.execute(
                     """
                     SELECT
-                        id,
+                        event_id AS id,
                         event_time,
                         recognized_name,
                         location_name,
@@ -1400,9 +1488,8 @@ class Phase3ServiceHub:
                         confidence,
                         source,
                         requested_by
-                    FROM recognition_location_events
+                    FROM recognition_latest_locations
                     WHERE lower(recognized_name)=lower(?)
-                    ORDER BY id DESC
                     LIMIT 1
                     """,
                     (person,),
@@ -1411,7 +1498,7 @@ class Phase3ServiceHub:
                     rows = conn.execute(
                         """
                         SELECT
-                            id,
+                            event_id AS id,
                             event_time,
                             recognized_name,
                             location_name,
@@ -1420,9 +1507,9 @@ class Phase3ServiceHub:
                             confidence,
                             source,
                             requested_by
-                        FROM recognition_location_events
+                        FROM recognition_latest_locations
                         WHERE lower(recognized_name) LIKE lower(?)
-                        ORDER BY id DESC
+                        ORDER BY event_time DESC, event_id DESC
                         LIMIT 1
                         """,
                         (f"%{person}%",),
@@ -1431,7 +1518,7 @@ class Phase3ServiceHub:
                 rows = conn.execute(
                     """
                     SELECT
-                        id,
+                        event_id AS id,
                         event_time,
                         recognized_name,
                         location_name,
@@ -1440,9 +1527,9 @@ class Phase3ServiceHub:
                         confidence,
                         source,
                         requested_by
-                    FROM recognition_location_events
+                    FROM recognition_latest_locations
                     WHERE lower(recognized_name)=lower(?)
-                    ORDER BY id DESC
+                    ORDER BY event_time DESC, event_id DESC
                     LIMIT ?
                     """,
                     (person, limit),
@@ -1451,7 +1538,7 @@ class Phase3ServiceHub:
                     rows = conn.execute(
                         """
                         SELECT
-                            id,
+                            event_id AS id,
                             event_time,
                             recognized_name,
                             location_name,
@@ -1460,9 +1547,9 @@ class Phase3ServiceHub:
                             confidence,
                             source,
                             requested_by
-                        FROM recognition_location_events
+                        FROM recognition_latest_locations
                         WHERE lower(recognized_name) LIKE lower(?)
-                        ORDER BY id DESC
+                        ORDER BY event_time DESC, event_id DESC
                         LIMIT ?
                         """,
                         (f"%{person}%", limit),
@@ -1475,23 +1562,17 @@ class Phase3ServiceHub:
             rows = conn.execute(
                 """
                 SELECT
-                    e.id,
-                    e.event_time,
-                    e.recognized_name,
-                    e.location_name,
-                    e.latitude,
-                    e.longitude,
-                    e.confidence,
-                    e.source,
-                    e.requested_by
-                FROM recognition_location_events e
-                INNER JOIN (
-                    SELECT lower(recognized_name) AS k, MAX(id) AS max_id
-                    FROM recognition_location_events
-                    GROUP BY lower(recognized_name)
-                ) latest
-                ON latest.max_id = e.id
-                ORDER BY e.id DESC
+                    event_id AS id,
+                    event_time,
+                    recognized_name,
+                    location_name,
+                    latitude,
+                    longitude,
+                    confidence,
+                    source,
+                    requested_by
+                FROM recognition_latest_locations
+                ORDER BY event_time DESC, event_id DESC
                 LIMIT ?
                 """,
                 (limit,),
