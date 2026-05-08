@@ -7060,8 +7060,8 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
         return SafeArea(
           child: Center(
             child: FractionallySizedBox(
-              widthFactor: 0.84,
-              heightFactor: 0.5,
+              widthFactor: 0.94,
+              heightFactor: 0.58,
               child: _RapidTransformPreview(
                 mode: mode,
                 rarity: widget.rarity,
@@ -7095,9 +7095,8 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
     };
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _showTransformPreview,
+      onTap: widget.onTap,
       onDoubleTap: _showTransformPreview,
-      onLongPress: widget.onTap,
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
@@ -9100,7 +9099,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
         if (!compact) ...[
           const SizedBox(height: 8),
           Text(
-            'Tap: run rarity animation. Tap again: new direction/form. Long press: details',
+            'Tap for details. Double tap: open big transformation stage',
             style: const TextStyle(
               color: Color(0xFFA9BEDA),
               fontSize: 12,
