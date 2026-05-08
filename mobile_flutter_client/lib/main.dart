@@ -7041,7 +7041,10 @@ class _ThreeDDeckCard extends StatefulWidget {
 
 class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
     with SingleTickerProviderStateMixin {
+  int _activation = 0;
+
   Future<void> _showTransformPreview() async {
+    _activation += 1;
     if (!mounted) {
       return;
     }
@@ -7052,7 +7055,8 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
       barrierColor: Colors.black.withValues(alpha: 0.56),
       transitionDuration: const Duration(milliseconds: 180),
       pageBuilder: (context, _, __) {
-        final mode = _fxModeForCard(widget.index, widget.rarity);
+        final activation = _activation;
+        final mode = _fxModeForCard(widget.index, widget.rarity, activation);
         return SafeArea(
           child: Center(
             child: FractionallySizedBox(
@@ -7064,6 +7068,7 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
                 title: widget.title,
                 icon: widget.icon,
                 index: widget.index,
+                activation: activation,
               ),
             ),
           ),
@@ -7090,8 +7095,9 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
     };
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: widget.onTap,
+      onTap: _showTransformPreview,
       onDoubleTap: _showTransformPreview,
+      onLongPress: widget.onTap,
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
@@ -7117,14 +7123,17 @@ enum _RapidDeckFxMode {
   plane,
 }
 
-_RapidDeckFxMode _fxModeForCard(int index, _RapidRarity rarity) {
+_RapidDeckFxMode _fxModeForCard(int index, _RapidRarity rarity,
+    [int activation = 0]) {
+  final slot = (index + activation + _rarityOffsetForRapidRarity(rarity)) %
+      _RapidDeckFxMode.values.length;
   return switch (rarity) {
     _RapidRarity.common => _RapidDeckFxMode.roll,
-    _RapidRarity.legendary => _RapidDeckFxMode.plane,
     _RapidRarity.rare =>
-      index.isEven ? _RapidDeckFxMode.shape : _RapidDeckFxMode.animal,
+      slot.isEven ? _RapidDeckFxMode.shape : _RapidDeckFxMode.roll,
     _RapidRarity.epic =>
-      index.isEven ? _RapidDeckFxMode.animal : _RapidDeckFxMode.shape,
+      slot.isEven ? _RapidDeckFxMode.animal : _RapidDeckFxMode.shape,
+    _RapidRarity.legendary => _RapidDeckFxMode.values[slot],
   };
 }
 
@@ -7331,6 +7340,7 @@ class _RapidTransformPreview extends StatefulWidget {
   final String title;
   final IconData icon;
   final int index;
+  final int activation;
 
   const _RapidTransformPreview({
     required this.mode,
@@ -7338,6 +7348,7 @@ class _RapidTransformPreview extends StatefulWidget {
     required this.title,
     required this.icon,
     required this.index,
+    required this.activation,
   });
 
   @override
@@ -7352,7 +7363,13 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
   void initState() {
     super.initState();
     final realism = _globalMotionRealism.value;
-    final durationMs = (3600 + (realism * 1600)).round();
+    final rarityBoost = switch (widget.rarity) {
+      _RapidRarity.common => 0.75,
+      _RapidRarity.rare => 0.9,
+      _RapidRarity.epic => 1.08,
+      _RapidRarity.legendary => 1.28,
+    };
+    final durationMs = ((3200 + (realism * 1700)) / rarityBoost).round();
     _controller = AnimationController(
       vsync: this,
       duration: Duration(milliseconds: durationMs),
@@ -7381,12 +7398,14 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
     };
     final shapeVariant = _shapeVariantForCard(widget.index, widget.rarity);
     final animalVariant = _animalVariantForCard(widget.index, widget.rarity);
-    final flightVariant = _flightVariantForCard(widget.index, widget.rarity);
+    final flightVariant = _flightVariantForCard(
+        widget.index + (widget.activation * 9), widget.rarity);
     final rollVariant = _rollVariantForCard(widget.index, widget.rarity);
-    final seedA = _rapidSeed01(widget.index, 31);
-    final seedB = _rapidSeed01(widget.index, 67);
-    final seedC = _rapidSeed01(widget.index, 97);
-    final variantSeed = _rapidSeed01(widget.index, 131);
+    final activationSalt = widget.activation * 101;
+    final seedA = _rapidSeed01(widget.index + activationSalt, 31);
+    final seedB = _rapidSeed01(widget.index + activationSalt, 67);
+    final seedC = _rapidSeed01(widget.index + activationSalt, 97);
+    final variantSeed = _rapidSeed01(widget.index + activationSalt, 131);
     final cardCode = widget.index + 1;
 
     return Material(
@@ -7395,7 +7414,13 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
         animation: _controller,
         builder: (context, _) {
           final realism = _globalMotionRealism.value;
-          final inertiaScale = 0.82 + (realism * 0.5);
+          final rarityPower = switch (widget.rarity) {
+            _RapidRarity.common => 0.72,
+            _RapidRarity.rare => 0.95,
+            _RapidRarity.epic => 1.22,
+            _RapidRarity.legendary => 1.58,
+          };
+          final inertiaScale = (0.82 + (realism * 0.5)) * rarityPower;
           final specSpeed = 1.04 - (realism * 0.58);
           final t = Curves.easeInOutQuart.transform(_controller.value);
           final pulse = Curves.easeInOutCubic
@@ -7460,9 +7485,9 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
                   rotZ = -eased * (math.pi * (0.12 + (seedC * 0.1)));
                   break;
               }
-              tx = (rollBackwards ? -1 : 1) * 18 * eased;
-              ty = -6 - (math.sin(eased * math.pi) * 10);
-              cardScale = 1 + (0.06 * eased);
+              tx = (rollBackwards ? -1 : 1) * 18 * eased * rarityPower;
+              ty = -6 - (math.sin(eased * math.pi) * 10 * rarityPower);
+              cardScale = 1 + (0.06 * eased * rarityPower);
               depthZ = 16 * eased * inertiaScale;
               ambientYaw = (rollBackwards ? -1 : 1) *
                   (0.04 + (seedA * 0.04)) *
@@ -7527,9 +7552,12 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
             case _RapidDeckFxMode.animal:
               clipMorph = pulse;
               final stride = math.sin((t * math.pi * 2.2) + (seedA * 6));
-              tx = stride * (6 + (seedB * 6)) * pulse;
+              tx = stride * (18 + (seedB * 18)) * pulse * rarityPower;
               ty = -9 * pulse +
-                  (math.sin((t * math.pi * 2.1) + seedC).abs() * 6 * pulse);
+                  (math.sin((t * math.pi * 2.1) + seedC).abs() *
+                      16 *
+                      pulse *
+                      rarityPower);
               rotX = math.sin((t * math.pi * 1.8) + (seedA * 3.1)) *
                   (0.12 + (seedA * 0.08)) *
                   pulse;
@@ -7573,8 +7601,9 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
               final dir = _flightDirectionForVariant(flightVariant);
               clipMorph = (fold * (1 - ret)).clamp(0.0, 1.0);
               final travel = (fly * (1 - ret)).clamp(0.0, 1.0);
-              tx = dir.dx * (132 + (seedA * 42)) * travel;
-              ty = (dir.dy * (98 + (seedB * 32)) * travel) - (20 * travel);
+              tx = dir.dx * (132 + (seedA * 42)) * travel * rarityPower;
+              ty = (dir.dy * (98 + (seedB * 32)) * travel * rarityPower) -
+                  (20 * travel * rarityPower);
               rotY = dir.dx * (0.38 + (0.22 * clipMorph));
               rotX = -dir.dy * (0.28 + (0.22 * clipMorph));
               rotZ = (dir.dx * 0.16 + dir.dy * 0.08) * (0.2 + (0.8 * travel));
@@ -9071,7 +9100,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
         if (!compact) ...[
           const SizedBox(height: 8),
           Text(
-            'Double tap this card to run ${rarityLabel.toLowerCase()} animation',
+            'Tap: run rarity animation. Tap again: new direction/form. Long press: details',
             style: const TextStyle(
               color: Color(0xFFA9BEDA),
               fontSize: 12,
