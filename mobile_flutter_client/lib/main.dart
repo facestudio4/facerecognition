@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9343,21 +9344,29 @@ class FirstTimeEnrollmentPage extends StatefulWidget {
 
 class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   static const List<String> _steps = [
-    'Center your face',
-    'Look left',
     'Look right',
+    'Look left',
     'Look up',
     'Look down',
   ];
-  static const int _framesPerStep = 3;
+  static const int _framesPerStep = 2;
 
   final List<Uint8List> _frames = [];
   final TextEditingController _nameController = TextEditingController();
+  final FaceDetector _faceDetector = FaceDetector(
+    options: FaceDetectorOptions(
+      performanceMode: FaceDetectorMode.fast,
+      enableClassification: false,
+      enableContours: false,
+      enableLandmarks: false,
+    ),
+  );
   CameraController? _controller;
   bool _ready = false;
-  bool _capturing = false;
   bool _uploading = false;
+  bool _autoRunning = false;
   int _stepIndex = 0;
+  int _stepFrames = 0;
   int _uploaded = 0;
   String _status = '';
   String _error = '';
@@ -9401,7 +9410,9 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
 
   @override
   void dispose() {
+    _autoRunning = false;
     _controller?.dispose();
+    _faceDetector.close();
     _nameController.dispose();
     super.dispose();
   }
@@ -9435,8 +9446,9 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       setState(() {
         _controller = controller;
         _ready = true;
-        _status = 'Follow the direction prompts to capture your face';
+        _status = 'Keep your face inside the oval. Starting live capture...';
       });
+      unawaited(_startGuidedCapture());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -9445,67 +9457,102 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     }
   }
 
-  Future<void> _captureStep() async {
-    if (_capturing || _uploading || !_ready) {
+  Future<void> _startGuidedCapture() async {
+    if (_autoRunning || _uploading || !_ready) {
       return;
     }
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) {
-      setState(() {
-        _error = 'Camera not ready';
-      });
+      setState(() => _error = 'Camera not ready');
       return;
     }
-    if (_stepIndex >= _steps.length) {
-      await _finishEnrollment();
-      return;
-    }
+    _autoRunning = true;
     setState(() {
-      _capturing = true;
       _error = '';
-      _status = 'Capturing ${_steps[_stepIndex]}';
+      _status = 'Turn your head: ${_steps[_stepIndex]}';
     });
     try {
-      final api = buildBackendApi();
-      for (int i = 0; i < _framesPerStep; i += 1) {
+      while (mounted && _autoRunning && _stepIndex < _steps.length) {
         final shot = await ctrl.takePicture();
+        final faces = await _faceDetector.processImage(
+          InputImage.fromFilePath(shot.path),
+        );
+        if (faces.isEmpty) {
+          setState(
+              () => _status = 'No face found. Put your face inside the oval.');
+          await Future.delayed(const Duration(milliseconds: 650));
+          continue;
+        }
+        final face = faces.reduce((a, b) =>
+            a.boundingBox.width * a.boundingBox.height >=
+                    b.boundingBox.width * b.boundingBox.height
+                ? a
+                : b);
+        final step = _steps[_stepIndex];
+        if (!_poseMatches(step, face)) {
+          setState(() => _status = '$step until the app detects it');
+          await Future.delayed(const Duration(milliseconds: 650));
+          continue;
+        }
+
         final bytes = await File(shot.path).readAsBytes();
         _frames.add(bytes);
         final name = _nameController.text.trim();
         if (name.isNotEmpty) {
-          final res =
-              await api.enrollFace(person: name, imageB64: base64Encode(bytes));
+          final res = await buildBackendApi().enrollFace(
+            person: name,
+            imageB64: base64Encode(bytes),
+          );
           if (res['ok'] != true) {
             throw Exception((res['error'] ?? 'Upload failed').toString());
           }
-          if (!mounted) return;
+        }
+        if (!mounted) return;
+        setState(() {
+          _uploaded += 1;
+          _stepFrames += 1;
+          _status = 'Captured $step ($_stepFrames / $_framesPerStep)';
+        });
+        if (_stepFrames >= _framesPerStep) {
           setState(() {
-            _uploaded += 1;
+            _stepIndex += 1;
+            _stepFrames = 0;
+            _status = _stepIndex < _steps.length
+                ? 'Good. Now ${_steps[_stepIndex]}'
+                : 'All face angles captured. Saving...';
           });
         }
-        await Future.delayed(const Duration(milliseconds: 420));
+        await Future.delayed(const Duration(milliseconds: 500));
       }
-      if (!mounted) return;
-      setState(() {
-        _stepIndex += 1;
-      });
-      if (_stepIndex >= _steps.length) {
+      if (mounted && _stepIndex >= _steps.length) {
         await _finishEnrollment();
-      } else if (mounted) {
-        setState(() {
-          _status = 'Next: ${_steps[_stepIndex]}';
-        });
       }
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = 'Capture failed: $e';
+        _error = 'Live capture failed: $e';
+        _status = 'Tap Retry to continue face setup';
       });
     } finally {
+      _autoRunning = false;
       if (!mounted) return;
-      setState(() {
-        _capturing = false;
-      });
+    }
+  }
+
+  bool _poseMatches(String step, Face face) {
+    final yaw = face.headEulerAngleY ?? 0.0;
+    final pitch = face.headEulerAngleX ?? 0.0;
+    switch (step) {
+      case 'Look right':
+        return yaw > 12;
+      case 'Look left':
+        return yaw < -12;
+      case 'Look up':
+        return pitch < -10;
+      case 'Look down':
+        return pitch > 10;
+      default:
+        return true;
     }
   }
 
@@ -9528,7 +9575,6 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     }
     setState(() {
       _uploading = true;
-      _uploaded = 0;
       _error = '';
       _status = 'Uploading face samples...';
     });
@@ -9605,7 +9651,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     final totalFrames = _steps.length * _framesPerStep;
     final captured = _frames.length;
     final progress = totalFrames == 0 ? 0.0 : captured / totalFrames;
-    final canCapture = _ready && !_capturing && !_uploading;
+    final canCapture = _ready && !_autoRunning && !_uploading;
     final label = _stepIndex >= _steps.length
         ? 'Finish Enrollment'
         : 'Capture: ${_steps[_stepIndex]}';
@@ -9672,52 +9718,28 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                     ? Stack(
                         children: [
                           CameraPreview(_controller!),
-                          Center(
-                            child: SizedBox(
-                              width: 320,
-                              height: 320,
-                              child: Stack(
-                                children: [
-                                  Align(
-                                    alignment: Alignment.center,
-                                    child: Container(
-                                      width: 320,
-                                      height: 320,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: Colors.greenAccent,
-                                          width: 3,
-                                        ),
-                                      ),
-                                    ),
+                          const Positioned.fill(child: _OvalFaceGuideOverlay()),
+                          Positioned(
+                            top: 16,
+                            left: 16,
+                            right: 16,
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  _stepIndex < _steps.length
+                                      ? _steps[_stepIndex]
+                                      : 'Review and finish enrollment',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w700,
                                   ),
-                                  Positioned(
-                                    top: 12,
-                                    left: 0,
-                                    right: 0,
-                                    child: Center(
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 10, vertical: 6),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black54,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          _stepIndex < _steps.length
-                                              ? _steps[_stepIndex]
-                                              : 'Review and finish enrollment',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                ),
                               ),
                             ),
                           ),
@@ -9736,14 +9758,21 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                       style: const TextStyle(color: Colors.white70),
                     ),
                   const SizedBox(height: 6),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: canCapture ? _captureStep : null,
-                      child:
-                          _capturing ? const Text('Capturing...') : Text(label),
+                  if (!_autoRunning)
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: canCapture ? _startGuidedCapture : null,
+                        child: Text(label == 'Finish Enrollment'
+                            ? 'Finish Enrollment'
+                            : 'Retry Live Capture'),
+                      ),
+                    )
+                  else
+                    const Text(
+                      'Live capture running. Move your head when prompted.',
+                      style: TextStyle(color: Colors.white70),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -9752,6 +9781,55 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       ),
     );
   }
+}
+
+class _OvalFaceGuideOverlay extends StatelessWidget {
+  const _OvalFaceGuideOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: CustomPaint(
+        painter: _OvalFaceGuidePainter(),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+class _OvalFaceGuidePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final ovalW = math.min(size.width * 0.72, 330.0);
+    final ovalH = math.min(size.height * 0.62, 430.0);
+    final oval = Rect.fromCenter(
+      center: Offset(size.width / 2, size.height / 2),
+      width: ovalW,
+      height: ovalH,
+    );
+    final overlay = Path()
+      ..addRect(Offset.zero & size)
+      ..addOval(oval)
+      ..fillType = PathFillType.evenOdd;
+    canvas.drawPath(overlay, Paint()..color = const Color(0x99000000));
+    canvas.drawOval(
+      oval,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4
+        ..color = Colors.greenAccent,
+    );
+    canvas.drawOval(
+      oval.inflate(7),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..color = const Color(0xAAFFFFFF),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class MobileHomePage extends StatefulWidget {
