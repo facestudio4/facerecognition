@@ -957,6 +957,8 @@ class Phase3ServiceHub:
                 {"path": "/api/events/stream", "method": "GET"},
                 {"path": "/api/mobile/styles", "method": "GET"},
                 {"path": "/api/mobile/identify", "method": "POST", "body": "{image_b64, top_k?}"},
+                {"path": "/api/mobile/face/create", "method": "POST", "body": "{person}"},
+                {"path": "/api/mobile/face/lookup", "method": "POST", "body": "{person}"},
                 {"path": "/api/mobile/generate", "method": "POST", "body": "{image_b64, filter_name}"},
                 {"path": "/api/mobile/compare", "method": "POST", "body": "{left_image_b64, right_image_b64}"},
                 {"path": "/api/mobile/recognition-location/save", "method": "POST", "body": "{recognized_name, location_name, latitude?, longitude?, confidence?}"},
@@ -972,6 +974,7 @@ class Phase3ServiceHub:
                 {"path": "/api/admin/scheduler/start", "method": "POST"},
                 {"path": "/api/admin/scheduler/stop", "method": "POST"},
                 {"path": "/api/admin/faces/sync", "method": "POST", "body": "{entries:[{person,filename,image_b64}], clear_existing?}"},
+                {"path": "/api/admin/faces/export", "method": "POST", "body": "{person?, limit?}"},
                 {"path": "/api/auth/token?subject=demo&ttl=120", "method": "GET", "requires": "X-API-Key"},
             ],
         }
@@ -1763,6 +1766,60 @@ class Phase3ServiceHub:
                 "refresh_scheduled": bool(refresh_state.get("scheduled", False)),
                 "refresh_running": bool(refresh_state.get("running", False)),
                 "refresh_error": str(refresh_state.get("error", "") or ""),
+            },
+        }
+
+    def export_known_faces(self, person: str = "", limit: int = 0):
+        faces_root = os.path.join(self.base_dir, "database", "faces")
+        if not os.path.isdir(faces_root):
+            return {"ok": True, "data": {"entries": [], "count": 0}}
+
+        allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        safe_person = self._sanitize_face_name(person) if person else ""
+        max_entries = max(0, int(limit))
+
+        entries = []
+        for name in sorted(os.listdir(faces_root)):
+            person_dir = os.path.join(faces_root, name)
+            if not os.path.isdir(person_dir):
+                continue
+            if safe_person and name.lower() != safe_person.lower():
+                continue
+
+            for fname in sorted(os.listdir(person_dir)):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in allowed_ext:
+                    continue
+                fpath = os.path.join(person_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, "rb") as f:
+                        raw = f.read()
+                except Exception:
+                    continue
+                if not raw:
+                    continue
+                entries.append(
+                    {
+                        "person": name,
+                        "filename": fname,
+                        "image_b64": base64.b64encode(raw).decode("ascii"),
+                    }
+                )
+                if max_entries and len(entries) >= max_entries:
+                    break
+
+            if max_entries and len(entries) >= max_entries:
+                break
+
+        return {
+            "ok": True,
+            "data": {
+                "entries": entries,
+                "count": len(entries),
+                "faces_root": faces_root,
+                "person_filter": safe_person,
             },
         }
 
@@ -2653,6 +2710,63 @@ class Phase3ServiceHub:
                             self._send_json(500, {"ok": False, "error": str(ex)})
                         return
 
+                    if path == "/api/mobile/face/lookup":
+                        token_payload = self._token_payload()
+                        username = str(token_payload.get("sub", "")) if token_payload else ""
+                        person = str(payload.get("person", "")).strip() or username
+                        try:
+                            safe_person = hub._sanitize_face_name(person)
+                            faces_root = os.path.join(hub.base_dir, "database", "faces")
+                            if not os.path.isdir(faces_root):
+                                self._send_json(200, {"ok": True, "data": {"exists": False}})
+                                return
+
+                            matched = ""
+                            person_dir = ""
+                            for entry in os.listdir(faces_root):
+                                path = os.path.join(faces_root, entry)
+                                if not os.path.isdir(path):
+                                    continue
+                                if entry.lower() == safe_person.lower():
+                                    matched = entry
+                                    person_dir = path
+                                    break
+
+                            if not matched:
+                                self._send_json(200, {"ok": True, "data": {"exists": False}})
+                                return
+
+                            allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+                            preview_b64 = ""
+                            try:
+                                for fname in sorted(os.listdir(person_dir)):
+                                    ext = os.path.splitext(fname)[1].lower()
+                                    if ext not in allowed_ext:
+                                        continue
+                                    p = os.path.join(person_dir, fname)
+                                    with open(p, "rb") as f:
+                                        raw = f.read()
+                                    if raw:
+                                        preview_b64 = base64.b64encode(raw).decode("ascii")
+                                        break
+                            except Exception:
+                                preview_b64 = ""
+
+                            self._send_json(
+                                200,
+                                {
+                                    "ok": True,
+                                    "data": {
+                                        "exists": True,
+                                        "person": matched,
+                                        "preview_b64": preview_b64,
+                                    },
+                                },
+                            )
+                        except Exception as ex:
+                            self._send_json(500, {"ok": False, "error": str(ex)})
+                        return
+
                     if path == "/api/mobile/generate":
                         image_b64 = str(payload.get("image_b64", ""))
                         filter_name = str(payload.get("filter_name", ""))
@@ -2736,6 +2850,17 @@ class Phase3ServiceHub:
                             clear_existing=clear_existing,
                             refresh_after=refresh_after,
                         )
+                        self._send_json(200, result)
+                        return
+
+                    if path == "/api/admin/faces/export":
+                        person = str(payload.get("person", "")).strip()
+                        limit = payload.get("limit", 0)
+                        try:
+                            limit = int(limit or 0)
+                        except Exception:
+                            limit = 0
+                        result = hub.export_known_faces(person=person, limit=limit)
                         self._send_json(200, result)
                         return
                 except ValueError as e:
