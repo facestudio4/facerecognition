@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.request
 from urllib.error import HTTPError
 
@@ -107,8 +108,22 @@ def write_entries(entries: list, dest_dir: str, clear_existing: bool):
         person_dir = os.path.join(dest_dir, person)
         os.makedirs(person_dir, exist_ok=True)
         out_path = os.path.join(person_dir, out_name)
-        with open(out_path, "wb") as f:
-            f.write(raw)
+        tmp_path = f"{out_path}.tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(raw)
+            try:
+                os.replace(tmp_path, out_path)
+            except PermissionError:
+                unique_name = f"{safe_root}_{int(time.time() * 1000)}{ext.lower()}"
+                fallback_path = os.path.join(person_dir, unique_name)
+                os.replace(tmp_path, fallback_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
         imported += 1
 
     return imported

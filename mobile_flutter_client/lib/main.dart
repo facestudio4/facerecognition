@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -14,7 +14,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -29,6 +31,7 @@ const Duration _kNetworkTimeout = Duration(seconds: 12);
 const Duration _kAuthTimeout = Duration(seconds: 24);
 const String _kMotionPresetPrefKey = 'face_studio_motion_preset';
 const String _kGlobal3dIntensityPrefKey = 'face_studio_global_3d_intensity';
+const String _kBaseUrlOverridePrefKey = 'face_studio_base_url_override';
 const bool _kUseLegacyProceduralFace = false;
 
 enum _MotionPreset {
@@ -75,6 +78,193 @@ Future<void> _setGlobal3dIntensity(double value) async {
   _global3dIntensityNotifier.value = clamped;
   final prefs = await SharedPreferences.getInstance();
   await prefs.setDouble(_kGlobal3dIntensityPrefKey, clamped);
+}
+
+class _EnrollmentUploadQueue {
+  static const String _queueFileName = 'enroll_upload_queue.json';
+  static const String _queueFolderName = 'enroll_queue';
+  static const Duration _retryDelay = Duration(seconds: 45);
+  static const int _maxAttempts = 12;
+  static bool _processing = false;
+  static Timer? _retryTimer;
+
+  static Future<Directory> _queueDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(
+      '${base.path}${Platform.pathSeparator}$_queueFolderName',
+    );
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  static Future<File> _queueFile() async {
+    final base = await getApplicationDocumentsDirectory();
+    return File('${base.path}${Platform.pathSeparator}$_queueFileName');
+  }
+
+  static Future<List<Map<String, dynamic>>> _loadQueue() async {
+    try {
+      final file = await _queueFile();
+      if (!await file.exists()) {
+        return [];
+      }
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) {
+        return [];
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        return [];
+      }
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> _saveQueue(List<Map<String, dynamic>> entries) async {
+    final file = await _queueFile();
+    await file.writeAsString(jsonEncode(entries), flush: true);
+  }
+
+  static Future<void> enqueueFrames({
+    required String personName,
+    required List<Uint8List> frames,
+  }) async {
+    final trimmed = personName.trim();
+    if (trimmed.isEmpty || frames.isEmpty) {
+      return;
+    }
+    final dir = await _queueDir();
+    final batchId = DateTime.now().millisecondsSinceEpoch;
+    final batchDir = Directory(
+      '${dir.path}${Platform.pathSeparator}batch_$batchId',
+    );
+    if (!await batchDir.exists()) {
+      await batchDir.create(recursive: true);
+    }
+    final files = <String>[];
+    for (int i = 0; i < frames.length; i += 1) {
+      final path = '${batchDir.path}${Platform.pathSeparator}${batchId}_$i.jpg';
+      await File(path).writeAsBytes(frames[i], flush: true);
+      files.add(path);
+    }
+    final queue = await _loadQueue();
+    queue.add({
+      'id': batchId,
+      'person': trimmed,
+      'files': files,
+      'attempts': 0,
+      'created_at': DateTime.now().toIso8601String(),
+      'last_attempt': '',
+      'last_error': '',
+    });
+    await _saveQueue(queue);
+    _scheduleRetry();
+  }
+
+  static void _scheduleRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = Timer(_retryDelay, () {
+      unawaited(processQueue());
+    });
+  }
+
+  static Future<void> processQueue() async {
+    if (_processing) {
+      return;
+    }
+    _processing = true;
+    try {
+      final queue = await _loadQueue();
+      if (queue.isEmpty) {
+        return;
+      }
+      final api = buildBackendApi();
+      final ok = await api.ensureToken();
+      if (!ok) {
+        _scheduleRetry();
+        return;
+      }
+      final updated = <Map<String, dynamic>>[];
+      for (final entry in queue) {
+        final person = (entry['person'] ?? '').toString();
+        var files = (entry['files'] as List?)
+                ?.map((e) => e.toString())
+                .where((e) => e.isNotEmpty)
+                .toList() ??
+            <String>[];
+        var attempts = int.tryParse((entry['attempts'] ?? 0).toString()) ?? 0;
+        if (person.isEmpty || files.isEmpty) {
+          continue;
+        }
+        if (attempts >= _maxAttempts) {
+          updated.add(entry);
+          continue;
+        }
+        final batchEntries = <Map<String, String>>[];
+        var hadReadError = false;
+        for (int i = 0; i < files.length; i += 1) {
+          final path = files[i];
+          final file = File(path);
+          if (!await file.exists()) {
+            continue;
+          }
+          try {
+            final bytes = await file.readAsBytes();
+            batchEntries.add({
+              'filename': path.split(Platform.pathSeparator).last,
+              'image_b64': base64Encode(bytes),
+            });
+          } catch (e) {
+            entry['last_error'] = e.toString();
+            hadReadError = true;
+            break;
+          }
+        }
+        if (hadReadError || batchEntries.isEmpty) {
+          entry['attempts'] = ++attempts;
+          entry['files'] = files;
+          entry['last_attempt'] = DateTime.now().toIso8601String();
+          updated.add(entry);
+          continue;
+        }
+        try {
+          final res =
+              await api.enrollFacesBatch(person: person, entries: batchEntries);
+          if (res['ok'] == true) {
+            for (final path in files) {
+              final file = File(path);
+              if (await file.exists()) {
+                try {
+                  await file.delete();
+                } catch (_) {}
+              }
+            }
+            continue;
+          }
+          entry['last_error'] = (res['error'] ?? 'upload_failed').toString();
+        } catch (e) {
+          entry['last_error'] = e.toString();
+        }
+        entry['attempts'] = ++attempts;
+        entry['files'] = files;
+        entry['last_attempt'] = DateTime.now().toIso8601String();
+        updated.add(entry);
+      }
+      await _saveQueue(updated);
+      if (updated.isNotEmpty) {
+        _scheduleRetry();
+      }
+    } finally {
+      _processing = false;
+    }
+  }
 }
 
 final _faceReferenceCache = _FaceReferenceCache();
@@ -505,6 +695,7 @@ Future<void> main() async {
   await _loadMotionPreset();
   await _loadGlobal3dIntensity();
   await _UpdateNotificationService.initialize();
+  unawaited(_EnrollmentUploadQueue.processQueue());
   runApp(const FaceStudioMobileClientApp());
 }
 
@@ -3586,6 +3777,26 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> lookupFacePerson({
+    required String person,
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/face/lookup'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'person': person}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<bool> ensureToken() async {
     if (_token.isNotEmpty) return true;
     if (apiKey.isEmpty) return false;
@@ -3668,6 +3879,27 @@ class BackendApi {
           ..sort(),
       }),
     );
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> enrollFacesBatch({
+    required String person,
+    required List<Map<String, String>> entries,
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/face/enroll-batch'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'person': person, 'entries': entries}),
+        )
+        .timeout(_kNetworkTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
@@ -3912,6 +4144,15 @@ BackendApi buildBackendApi() {
   return _backendApi;
 }
 
+Future<void> _loadBaseUrlOverride() async {
+  final prefs = await SharedPreferences.getInstance();
+  final override = (prefs.getString(_kBaseUrlOverridePrefKey) ?? '').trim();
+  if (override.isEmpty) {
+    return;
+  }
+  _backendApi.setBaseUrl(override);
+}
+
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
@@ -3931,6 +4172,7 @@ class _AuthGateState extends State<AuthGate> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadBaseUrlOverride());
     _checkForAppUpdate();
     _startUpdateRecheckLoop();
     _loadSession();
@@ -4147,6 +4389,9 @@ class _AuthGateState extends State<AuthGate> {
         _ready = true;
       });
       if (_username.isNotEmpty) {
+        unawaited(_EnrollmentUploadQueue.processQueue());
+      }
+      if (_username.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _maybeRunFirstTimeEnrollment(_username);
         });
@@ -4193,6 +4438,7 @@ class _AuthGateState extends State<AuthGate> {
       _username = username;
       _isAdmin = role == 'admin';
     });
+    unawaited(_EnrollmentUploadQueue.processQueue());
     await _maybeRunFirstTimeEnrollment(username);
   }
 
@@ -9376,14 +9622,29 @@ class FirstTimeEnrollmentPage extends StatefulWidget {
       _FirstTimeEnrollmentPageState();
 }
 
+class _FaceNameResolution {
+  final String person;
+  final bool existing;
+
+  const _FaceNameResolution({required this.person, required this.existing});
+}
+
 class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
+  static const Duration _promptSpeakThrottle = Duration(milliseconds: 1100);
   static const List<String> _steps = [
     'Look right',
+    'Return to center',
     'Look left',
+    'Return to center',
     'Look up',
+    'Return to center',
     'Look down',
   ];
   static const int _framesPerStep = 2;
+  static const Duration _stepTimeout = Duration(seconds: 8);
+  static const double _yawThreshold = 8.0;
+  static const double _pitchThreshold = 8.0;
+  static const double _centerThreshold = 7.0;
 
   final List<Uint8List> _frames = [];
   final TextEditingController _nameController = TextEditingController();
@@ -9404,42 +9665,157 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   int _uploaded = 0;
   String _status = '';
   String _error = '';
+  bool _isFrontCamera = true;
+  DateTime _stepStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  FlutterTts? _tts;
+  bool _ttsReady = false;
+  String _lastSpokenPrompt = '';
+  DateTime _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
     super.initState();
     _nameController.text = widget.username;
+    _initTts();
     WidgetsBinding.instance.addPostFrameCallback((_) => _askNameAndStart());
   }
 
   Future<void> _askNameAndStart() async {
-    final name = await _promptForName();
-    if (name == null || name.trim().isEmpty) {
-      if (mounted) Navigator.of(context).pop(false);
-      return;
-    }
-    final clean = name.trim();
-    _nameController.text = clean;
-    setState(() {
-      _status = 'Creating profile...';
-      _error = '';
-    });
-    final api = buildBackendApi();
-    try {
-      final res = await api.createFacePerson(person: clean);
-      if (res['ok'] != true) {
-        setState(() {
-          _error = 'Failed to create profile: ${(res['error'] ?? 'unknown')}';
-        });
+    while (mounted) {
+      final name = await _promptForName();
+      if (name == null) {
+        if (mounted) Navigator.of(context).pop(false);
         return;
       }
-      await _setupCamera();
-    } catch (e) {
+      final clean = name.trim();
+      if (clean.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _error = 'Name is required to continue.';
+        });
+        await _showBlockingError(_error);
+        continue;
+      }
       if (!mounted) return;
       setState(() {
-        _error = 'Create profile failed: $e';
+        _error = '';
       });
+      _setStatus('Checking name...');
+      final resolved = await _resolvePersonName(clean);
+      if (!mounted) return;
+      if (resolved == null) {
+        _nameController.clear();
+        setState(() {
+          _error = 'Please enter your full name.';
+        });
+        await _showBlockingError(_error);
+        continue;
+      }
+      setState(() {
+        _error = '';
+      });
+      _setStatus('Creating profile...');
+      final api = buildBackendApi();
+      try {
+        final res = await api.createFacePerson(person: resolved.person);
+        if (res['ok'] != true) {
+          if (!mounted) return;
+          setState(() {
+            _error = 'Failed to create profile: ${(res['error'] ?? 'unknown')}';
+          });
+          await _showBlockingError(_error);
+          continue;
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _error = 'Create profile failed: $e';
+        });
+        await _showBlockingError(_error);
+        continue;
+      }
+      _nameController.text = resolved.person;
+      await _setupCamera();
+      return;
     }
+  }
+
+  Future<_FaceNameResolution?> _resolvePersonName(String name) async {
+    final api = buildBackendApi();
+    try {
+      final res = await api.lookupFacePerson(person: name);
+      if (res['ok'] != true) {
+        return _FaceNameResolution(person: name, existing: false);
+      }
+      final data = (res['data'] as Map<String, dynamic>?) ?? const {};
+      final exists = data['exists'] == true;
+      if (!exists) {
+        return _FaceNameResolution(person: name, existing: false);
+      }
+      final person = (data['person'] ?? name).toString();
+      final previewB64 = (data['preview_b64'] ?? '').toString();
+      final confirm = await _confirmExistingPerson(person, previewB64);
+      if (confirm == true) {
+        return _FaceNameResolution(person: person, existing: true);
+      }
+      return null;
+    } catch (_) {
+      return _FaceNameResolution(person: name, existing: false);
+    }
+  }
+
+  Future<bool?> _confirmExistingPerson(String name, String previewB64) async {
+    Uint8List? previewBytes;
+    if (previewB64.trim().isNotEmpty) {
+      try {
+        previewBytes = base64Decode(previewB64);
+      } catch (_) {}
+    }
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Is this you?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (previewBytes != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.memory(
+                    previewBytes,
+                    width: 160,
+                    height: 160,
+                    fit: BoxFit.cover,
+                  ),
+                )
+              else
+                const Icon(Icons.account_circle, size: 80),
+              const SizedBox(height: 12),
+              Text(
+                name,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'We found an existing folder with this name.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('No'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Yes'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -9448,7 +9824,96 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     _controller?.dispose();
     _faceDetector.close();
     _nameController.dispose();
+    _tts?.stop();
+    _tts = null;
     super.dispose();
+  }
+
+  Future<void> _initTts() async {
+    if (kIsWeb) {
+      return;
+    }
+    final tts = FlutterTts();
+    try {
+      await tts.setLanguage('en-US');
+      await tts.setSpeechRate(0.46);
+      await tts.setPitch(1.0);
+      await tts.setVolume(1.0);
+      await tts.awaitSpeakCompletion(true);
+      if (!mounted) {
+        await tts.stop();
+        return;
+      }
+      _tts = tts;
+      _ttsReady = true;
+    } catch (_) {
+      await tts.stop();
+    }
+  }
+
+  Future<void> _speakPrompt(String text, {bool force = false}) async {
+    if (!_ttsReady) {
+      await _initTts();
+    }
+    if (!_ttsReady) {
+      return;
+    }
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    final now = DateTime.now();
+    if (!force &&
+        _lastSpokenPrompt == trimmed &&
+        now.difference(_lastSpokenAt) < _promptSpeakThrottle) {
+      return;
+    }
+    _lastSpokenPrompt = trimmed;
+    _lastSpokenAt = now;
+    _tts?.stop();
+    await _tts?.speak(trimmed);
+  }
+
+  Future<void> _announce(String value) async {
+    _setStatus(value);
+    await _speakPrompt(value, force: true);
+  }
+
+  Future<void> _showBlockingError(String message) async {
+    final trimmed = message.trim();
+    if (!mounted || trimmed.isEmpty) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Face Setup Error'),
+          content: Text(trimmed),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _setStatus(String value, {bool speak = false}) {
+    if (!mounted) {
+      return;
+    }
+    if (_status == value) {
+      return;
+    }
+    setState(() {
+      _status = value;
+    });
+    if (speak) {
+      unawaited(_speakPrompt(value));
+    }
   }
 
   Future<void> _setupCamera() async {
@@ -9473,6 +9938,10 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
         enableAudio: false,
       );
       await controller.initialize().timeout(const Duration(seconds: 10));
+      try {
+        await controller.setFocusMode(FocusMode.auto);
+        await controller.setExposureMode(ExposureMode.auto);
+      } catch (_) {}
       if (!mounted) {
         await controller.dispose();
         return;
@@ -9480,14 +9949,19 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       setState(() {
         _controller = controller;
         _ready = true;
-        _status = 'Keep your face inside the oval. Starting live capture...';
+        _isFrontCamera = selected.lensDirection == CameraLensDirection.front;
       });
+      await _initTts();
+      await _announce('Hold still. Aligning the camera...');
+      await Future.delayed(const Duration(milliseconds: 700));
+      await _announce(
+          'Keep your face inside the oval. Starting live capture...');
       unawaited(_startGuidedCapture());
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _status = 'Camera setup error: $e';
-      });
+      final message = 'Camera setup error: $e';
+      _setStatus(message);
+      await _showBlockingError(message);
     }
   }
 
@@ -9498,13 +9972,15 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) {
       setState(() => _error = 'Camera not ready');
+      await _showBlockingError(_error);
       return;
     }
     _autoRunning = true;
     setState(() {
       _error = '';
-      _status = 'Turn your head: ${_steps[_stepIndex]}';
     });
+    _stepStartedAt = DateTime.now();
+    await _announce('Turn your head: ${_steps[_stepIndex]}');
     try {
       while (mounted && _autoRunning && _stepIndex < _steps.length) {
         final shot = await ctrl.takePicture();
@@ -9512,8 +9988,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
           InputImage.fromFilePath(shot.path),
         );
         if (faces.isEmpty) {
-          setState(
-              () => _status = 'No face found. Put your face inside the oval.');
+          await _announce('No face found. Put your face inside the oval.');
           await Future.delayed(const Duration(milliseconds: 650));
           continue;
         }
@@ -9524,37 +9999,46 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                 : b);
         final step = _steps[_stepIndex];
         if (!_poseMatches(step, face)) {
-          setState(() => _status = '$step until the app detects it');
+          if (DateTime.now().difference(_stepStartedAt) > _stepTimeout) {
+            final bytes = await File(shot.path).readAsBytes();
+            _frames.add(bytes);
+            if (!mounted) return;
+            setState(() {
+              _stepIndex += 1;
+              _stepFrames = 0;
+              _stepStartedAt = DateTime.now();
+            });
+            if (_stepIndex < _steps.length) {
+              await _announce('Ok. Now ${_steps[_stepIndex]}');
+            } else {
+              await _announce('All face angles captured. Saving...');
+            }
+            await Future.delayed(const Duration(milliseconds: 350));
+            continue;
+          }
+          await _announce('$step until the app detects it');
           await Future.delayed(const Duration(milliseconds: 650));
           continue;
         }
 
         final bytes = await File(shot.path).readAsBytes();
         _frames.add(bytes);
-        final name = _nameController.text.trim();
-        if (name.isNotEmpty) {
-          final res = await buildBackendApi().enrollFace(
-            person: name,
-            imageB64: base64Encode(bytes),
-          );
-          if (res['ok'] != true) {
-            throw Exception((res['error'] ?? 'Upload failed').toString());
-          }
-        }
         if (!mounted) return;
         setState(() {
-          _uploaded += 1;
           _stepFrames += 1;
-          _status = 'Captured $step ($_stepFrames / $_framesPerStep)';
         });
+        _setStatus('Captured $step ($_stepFrames / $_framesPerStep)');
         if (_stepFrames >= _framesPerStep) {
           setState(() {
             _stepIndex += 1;
             _stepFrames = 0;
-            _status = _stepIndex < _steps.length
-                ? 'Good. Now ${_steps[_stepIndex]}'
-                : 'All face angles captured. Saving...';
+            _stepStartedAt = DateTime.now();
           });
+          if (_stepIndex < _steps.length) {
+            await _announce('Good. Now ${_steps[_stepIndex]}');
+          } else {
+            await _announce('All face angles captured. Saving...');
+          }
         }
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -9574,17 +10058,22 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   }
 
   bool _poseMatches(String step, Face face) {
-    final yaw = face.headEulerAngleY ?? 0.0;
+    var yaw = face.headEulerAngleY ?? 0.0;
     final pitch = face.headEulerAngleX ?? 0.0;
+    if (_isFrontCamera) {
+      yaw = -yaw;
+    }
     switch (step) {
       case 'Look right':
-        return yaw > 12;
+        return yaw > _yawThreshold;
       case 'Look left':
-        return yaw < -12;
+        return yaw < -_yawThreshold;
       case 'Look up':
-        return pitch < -10;
+        return pitch < -_pitchThreshold;
       case 'Look down':
-        return pitch > 10;
+        return pitch > _pitchThreshold;
+      case 'Return to center':
+        return yaw.abs() < _centerThreshold && pitch.abs() < _centerThreshold;
       default:
         return true;
     }
@@ -9610,40 +10099,31 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     setState(() {
       _uploading = true;
       _error = '';
-      _status = 'Uploading face samples...';
+      _status = 'Queueing face samples...';
     });
-    final api = buildBackendApi();
+    final frames = List<Uint8List>.from(_frames);
+    _frames.clear();
     try {
-      if (_uploaded >= _frames.length) {
-        if (!mounted) return;
-        Navigator.of(context).pop(true);
-        return;
-      }
-      for (int i = _uploaded; i < _frames.length; i += 1) {
-        final res = await api.enrollFace(
-          person: name.trim(),
-          imageB64: base64Encode(_frames[i]),
-        );
-        if (res['ok'] != true) {
-          throw Exception((res['error'] ?? 'Upload failed').toString());
-        }
-        if (!mounted) return;
+      await _EnrollmentUploadQueue.enqueueFrames(
+        personName: name,
+        frames: frames,
+      );
+      await _EnrollmentUploadQueue.processQueue();
+    } catch (e) {
+      if (mounted) {
         setState(() {
-          _uploaded = i + 1;
+          _error = 'Queue failed: $e';
         });
       }
-      if (!mounted) return;
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = 'Enrollment failed: $e';
-      });
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _uploading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _uploading = false;
+        });
+      }
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
     }
   }
 
@@ -9788,7 +10268,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                 children: [
                   if (_uploading)
                     Text(
-                      'Uploading $_uploaded / ${_frames.length}',
+                      'Queueing ${_frames.length} samples...',
                       style: const TextStyle(color: Colors.white70),
                     ),
                   const SizedBox(height: 6),
@@ -14966,6 +15446,7 @@ class ApiToolsPage extends StatefulWidget {
 class _ApiToolsPageState extends State<ApiToolsPage> {
   String get _baseUrl => buildBackendApi().baseUrl;
   final _apiKeyController = TextEditingController();
+  final _baseUrlController = TextEditingController();
   final String _autoApiKey =
       const String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
   final _styleController = TextEditingController(text: 'Anime');
@@ -15079,6 +15560,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   void initState() {
     super.initState();
     _activeTool = widget.defaultTool;
+    _baseUrlController.text = _baseUrl;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _bootstrapAccess();
       if (widget.openCameraOnStart) {
@@ -15090,11 +15572,45 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   @override
   void dispose() {
     _apiKeyController.dispose();
+    _baseUrlController.dispose();
     _styleController.dispose();
     _identityNameController.dispose();
     _negativePromptController.dispose();
     _topKController.dispose();
     super.dispose();
+  }
+
+  Future<void> _applyBaseUrlOverride() async {
+    final raw = _baseUrlController.text.trim();
+    if (raw.isEmpty) {
+      setState(() => _status = 'Enter a backend URL first');
+      return;
+    }
+    final normalized = raw.startsWith('http://') || raw.startsWith('https://')
+        ? raw
+        : 'http://$raw';
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kBaseUrlOverridePrefKey, normalized);
+    buildBackendApi().setBaseUrl(normalized);
+    setState(() {
+      _status = 'Backend URL set to $normalized';
+    });
+    _appendLog('Backend URL override: $normalized');
+  }
+
+  Future<void> _clearBaseUrlOverride() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kBaseUrlOverridePrefKey);
+    const fallback = String.fromEnvironment(
+      'FACE_STUDIO_BASE_URL',
+      defaultValue: 'https://facerecognition-4.onrender.com',
+    );
+    buildBackendApi().setBaseUrl(fallback);
+    _baseUrlController.text = buildBackendApi().baseUrl;
+    setState(() {
+      _status = 'Backend URL reset to default';
+    });
+    _appendLog('Backend URL override cleared');
   }
 
   void _appendLog(String message) {
@@ -16832,6 +17348,30 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                         controller: _apiKeyController,
                         style: const TextStyle(color: Colors.white),
                         decoration: _inputDecoration('API key'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _baseUrlController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration:
+                            _inputDecoration('Backend URL (http://host:8787)'),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: _applyBaseUrlOverride,
+                            icon: const Icon(Icons.link),
+                            label: const Text('Save Backend URL'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _clearBaseUrlOverride,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reset Default'),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 8),
                       Row(

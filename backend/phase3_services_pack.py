@@ -958,6 +958,7 @@ class Phase3ServiceHub:
                 {"path": "/api/mobile/styles", "method": "GET"},
                 {"path": "/api/mobile/identify", "method": "POST", "body": "{image_b64, top_k?}"},
                 {"path": "/api/mobile/face/create", "method": "POST", "body": "{person}"},
+                {"path": "/api/mobile/face/enroll-batch", "method": "POST", "body": "{person, entries:[{filename,image_b64}]}"},
                 {"path": "/api/mobile/face/lookup", "method": "POST", "body": "{person}"},
                 {"path": "/api/mobile/generate", "method": "POST", "body": "{image_b64, filter_name}"},
                 {"path": "/api/mobile/compare", "method": "POST", "body": "{left_image_b64, right_image_b64}"},
@@ -1659,6 +1660,25 @@ class Phase3ServiceHub:
             "image_b64": image_b64,
         }
         return self.sync_known_faces([entry], clear_existing=False, refresh_after=True)
+
+    def enroll_faces_for_user(self, person_name: str, entries, username: str = ""):
+        person = self._sanitize_face_name(person_name or username or "user")
+        if not isinstance(entries, list) or not entries:
+            return {"ok": False, "error": "entries required"}
+        payload = []
+        for idx, item in enumerate(entries):
+            if not isinstance(item, dict):
+                continue
+            image_b64 = str(item.get("image_b64", "")).strip()
+            if not image_b64:
+                continue
+            filename = os.path.basename(str(item.get("filename", "")).strip())
+            if not filename:
+                filename = f"{int(time.time() * 1000)}_{idx}.jpg"
+            payload.append({"person": person, "filename": filename, "image_b64": image_b64})
+        if not payload:
+            return {"ok": False, "error": "no valid images"}
+        return self.sync_known_faces(payload, clear_existing=False, refresh_after=True)
 
     def _append_face_sample(self, person: str, frame):
         if frame is None or frame.size == 0:
@@ -2693,6 +2713,16 @@ class Phase3ServiceHub:
                             self._send_json(400, {"ok": False, "error": "image_b64 required"})
                             return
                         result = hub.enroll_face_for_user(person_name=person, image_b64=image_b64, username=username)
+                        code = 200 if result.get("ok") else 400
+                        self._send_json(code, result)
+                        return
+
+                    if path == "/api/mobile/face/enroll-batch":
+                        token_payload = self._token_payload()
+                        username = str(token_payload.get("sub", "")) if token_payload else ""
+                        person = str(payload.get("person", "")).strip() or username
+                        entries = payload.get("entries", [])
+                        result = hub.enroll_faces_for_user(person_name=person, entries=entries, username=username)
                         code = 200 if result.get("ok") else 400
                         self._send_json(code, result)
                         return
