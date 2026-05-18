@@ -28,7 +28,7 @@ const Color _kPanel = Color(0xFF11182A);
 const Color _kAccent = Color(0xFFE94560);
 const Color _kTextMuted = Color(0xFFAAB2D6);
 const Duration _kNetworkTimeout = Duration(seconds: 12);
-const Duration _kAuthTimeout = Duration(seconds: 24);
+const Duration _kAuthTimeout = Duration(seconds: 40);
 const String _kMotionPresetPrefKey = 'face_studio_motion_preset';
 const String _kGlobal3dIntensityPrefKey = 'face_studio_global_3d_intensity';
 const String _kBaseUrlOverridePrefKey = 'face_studio_base_url_override';
@@ -237,13 +237,26 @@ class _EnrollmentUploadQueue {
         try {
           final res =
               await api.enrollFacesBatch(person: person, entries: batchEntries);
-          if (res['ok'] == true) {
+          final ok = res['ok'] == true;
+          final imported =
+              int.tryParse((res['data']?['imported_files'] ?? 0).toString()) ??
+                  0;
+          final expected =
+              int.tryParse((res['data']?['expected_frames'] ?? 0).toString()) ??
+                  batchEntries.length;
+          final missing =
+              int.tryParse((res['data']?['frames_missing'] ?? 0).toString()) ??
+                  0;
+          if (ok && imported == batchEntries.length) {
             for (final path in files) {
               final file = File(path);
               if (await file.exists()) {
                 try {
                   await file.delete();
                 } catch (_) {}
+              } else if (ok == false || missing > 0) {
+                entry['last_error'] =
+                    'Frame persistence issue: expected $expected, imported $imported, missing $missing. Backend response: ${res['error'] ?? "no error message"}';
               }
             }
             continue;
@@ -3663,19 +3676,23 @@ class BackendApi {
     required String phone,
     required String password,
   }) async {
-    final res = await http
-        .post(
-          Uri.parse('$_base/api/auth/signup/request'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'username': username,
-            'email': email,
-            'phone': phone,
-            'password': password,
-          }),
-        )
-        .timeout(_kAuthTimeout);
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_base/api/auth/signup/request'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'username': username,
+              'email': email,
+              'phone': phone,
+              'password': password,
+            }),
+          )
+          .timeout(_kAuthTimeout);
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      return {'ok': false, 'error': 'Network or timeout error: $e'};
+    }
   }
 
   Future<Map<String, dynamic>?> verifySignupCode({
@@ -3991,6 +4008,16 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> getAdminUserProfile(String username) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token issue failed'};
+    final res = await http.get(
+      Uri.parse('$_base/api/admin/user/profile?username=$username'),
+      headers: {'Authorization': 'Bearer $_token'},
+    );
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> postAdminAction(String actionPath,
       {Map<String, dynamic>? payload}) async {
     final ok = await ensureToken();
@@ -4002,6 +4029,28 @@ class BackendApi {
         'Content-Type': 'application/json',
       },
       body: jsonEncode(payload ?? const {}),
+    );
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> requestUserReenroll(String username,
+      {bool required = true}) async {
+    return postAdminAction(
+      '/api/admin/user/reenroll',
+      payload: {'username': username, 'required': required},
+    );
+  }
+
+  Future<Map<String, dynamic>> acknowledgeReenrollReset() async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token issue failed'};
+    final res = await http.post(
+      Uri.parse('$_base/api/users/me/enroll-reset/ack'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(const {}),
     );
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
@@ -4409,6 +4458,15 @@ class _AuthGateState extends State<AuthGate> {
     }
     final prefs = await SharedPreferences.getInstance();
     final key = 'fs_enroll_done_${clean.toLowerCase()}';
+    try {
+      final api = buildBackendApi();
+      final profile = await api.getCurrentUser();
+      final reenrollRequired = profile['data']?['reenroll_required'] == true;
+      if (reenrollRequired) {
+        await prefs.remove(key);
+        unawaited(api.acknowledgeReenrollReset());
+      }
+    } catch (_) {}
     if (prefs.getBool(key) == true) {
       return;
     }
@@ -9650,10 +9708,10 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   final TextEditingController _nameController = TextEditingController();
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.fast,
+      performanceMode: FaceDetectorMode.accurate,
       enableClassification: false,
       enableContours: false,
-      enableLandmarks: false,
+      enableLandmarks: true,
     ),
   );
   CameraController? _controller;
@@ -10231,7 +10289,12 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                 child: _ready && _controller != null
                     ? Stack(
                         children: [
-                          CameraPreview(_controller!),
+                          Center(
+                            child: AspectRatio(
+                              aspectRatio: _controller!.value.aspectRatio,
+                              child: CameraPreview(_controller!),
+                            ),
+                          ),
                           const Positioned.fill(child: _OvalFaceGuideOverlay()),
                           Positioned(
                             top: 16,
@@ -10448,7 +10511,8 @@ class _MobileHomePageState extends State<MobileHomePage> {
           subtitle: 'Browse and manage registered faces',
           colorValue: 0xFF6D597A,
           icon: Icons.storage,
-          page: UsersPage(pageTitle: 'Face Database', showRoles: false),
+          page: UsersPage(
+              pageTitle: 'Face Database', showRoles: false, isAdmin: true),
         ),
         const _MenuItem(
           title: 'Analytics Dashboard',
@@ -10469,7 +10533,8 @@ class _MobileHomePageState extends State<MobileHomePage> {
           subtitle: 'Manage users and access history',
           colorValue: 0xFF3A86FF,
           icon: Icons.group,
-          page: UsersPage(pageTitle: 'User Registry', showRoles: true),
+          page: UsersPage(
+              pageTitle: 'User Registry', showRoles: true, isAdmin: true),
         ),
         const _MenuItem(
           title: 'Advanced Project Lab',
@@ -10885,6 +10950,15 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   bool _unknownPromptOpen = false;
   DateTime? _lastUnknownPromptAt;
 
+  String _firstNameOnly(String fullName) {
+    final trimmed = fullName.trim();
+    if (trimmed.isEmpty || trimmed.toLowerCase() == 'unknown') {
+      return trimmed.isEmpty ? 'Unknown' : trimmed;
+    }
+    final first = trimmed.split(RegExp(r'\s+')).first.trim();
+    return first.isEmpty ? trimmed : first;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -11251,7 +11325,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
 
       if (mounted) {
         setState(() {
-          _topName = name;
+          _topName = _firstNameOnly(name);
           _topScore = score;
           _liveFaces = faces;
           _imgW = iw;
@@ -11303,7 +11377,12 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                   : Stack(
                       fit: StackFit.expand,
                       children: [
-                        CameraPreview(ctrl),
+                        Center(
+                          child: AspectRatio(
+                            aspectRatio: ctrl.value.aspectRatio,
+                            child: CameraPreview(ctrl),
+                          ),
+                        ),
                         Positioned.fill(
                           child: IgnorePointer(
                             child: CustomPaint(
@@ -12198,11 +12277,13 @@ class _ProfilePageState extends State<ProfilePage> {
 class UsersPage extends StatefulWidget {
   final String pageTitle;
   final bool showRoles;
+  final bool isAdmin;
 
   const UsersPage({
     super.key,
     required this.pageTitle,
     this.showRoles = true,
+    this.isAdmin = false,
   });
 
   @override
@@ -12354,8 +12435,31 @@ class _UsersPageState extends State<UsersPage> {
     );
   }
 
+  Future<void> _loadAdminUserDetail(String username) async {
+    if (!widget.isAdmin) {
+      return;
+    }
+    final clean = username.trim();
+    if (clean.isEmpty) {
+      return;
+    }
+    try {
+      final api = buildBackendApi();
+      final res = await api.getAdminUserProfile(clean);
+      if (res['ok'] == true && mounted) {
+        final data = Map<String, dynamic>.from(res['data'] ?? const {});
+        setState(() {
+          _selectedUser = {...?_selectedUser, ...data};
+        });
+      }
+    } catch (_) {}
+  }
+
   void _openUserSheet(Map<String, dynamic> user) {
     setState(() => _selectedUser = user);
+    if (widget.isAdmin) {
+      unawaited(_loadAdminUserDetail((user['username'] ?? '').toString()));
+    }
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -12364,12 +12468,21 @@ class _UsersPageState extends State<UsersPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (context) {
-        final username = (user['username'] ?? '-').toString();
-        final email = (user['email'] ?? '-').toString();
-        final phone = (user['phone'] ?? '-').toString();
-        final role = (user['role'] ?? 'user').toString();
-        final created = (user['created'] ?? '-').toString();
-        final logins = _loginCount(user);
+        final activeUser = _selectedUser ?? user;
+        final username = (activeUser['username'] ?? '-').toString();
+        final email = (activeUser['email'] ?? '-').toString();
+        final phone = (activeUser['phone'] ?? '-').toString();
+        final role = (activeUser['role'] ?? 'user').toString();
+        final created = (activeUser['created'] ?? '-').toString();
+        final logins = _loginCount(activeUser);
+        final reenrollRequired =
+            (activeUser['reenroll_required'] ?? false) == true;
+        final reenrollRequestedAt =
+            (activeUser['reenroll_requested_at'] ?? '').toString();
+        final recentLogins = (activeUser['recent_logins'] as List?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const [];
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
@@ -12423,6 +12536,22 @@ class _UsersPageState extends State<UsersPage> {
                     label: 'Created',
                     value: created,
                     icon: Icons.calendar_today),
+                if (widget.isAdmin) ...[
+                  _ProfileFieldTile(
+                      label: 'Re-enroll Required',
+                      value: reenrollRequired ? 'Yes' : 'No',
+                      icon: Icons.restart_alt),
+                  if (reenrollRequestedAt.isNotEmpty)
+                    _ProfileFieldTile(
+                        label: 'Re-enroll Requested',
+                        value: reenrollRequestedAt,
+                        icon: Icons.schedule),
+                  if (recentLogins.isNotEmpty)
+                    _ProfileFieldTile(
+                        label: 'Recent Logins',
+                        value: recentLogins.take(3).join(', '),
+                        icon: Icons.history),
+                ],
                 const SizedBox(height: 6),
                 FilledButton.icon(
                   onPressed: () async {
@@ -12441,6 +12570,64 @@ class _UsersPageState extends State<UsersPage> {
                   icon: const Icon(Icons.copy),
                   label: const Text('Copy User Details'),
                 ),
+                if (widget.isAdmin) ...[
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      final api = buildBackendApi();
+                      final res = await api.requestUserReenroll(username,
+                          required: true);
+                      if (!context.mounted) return;
+                      final ok = res['ok'] == true;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                            content: Text(ok
+                                ? 'Re-enroll required for $username'
+                                : (res['error'] ?? 'Re-enroll failed')
+                                    .toString())),
+                      );
+                      if (ok) {
+                        setState(() {
+                          _selectedUser = {
+                            ...?_selectedUser,
+                            'reenroll_required': true,
+                            'reenroll_requested_at':
+                                DateTime.now().toIso8601String()
+                          };
+                        });
+                      }
+                    },
+                    icon: const Icon(Icons.restart_alt),
+                    label: const Text('Require Re-enrollment'),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final api = buildBackendApi();
+                      final res = await api.requestUserReenroll(username,
+                          required: false);
+                      if (!context.mounted) return;
+                      final ok = res['ok'] == true;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                            content: Text(ok
+                                ? 'Re-enroll cleared for $username'
+                                : (res['error'] ?? 'Clear failed').toString())),
+                      );
+                      if (ok) {
+                        setState(() {
+                          _selectedUser = {
+                            ...?_selectedUser,
+                            'reenroll_required': false,
+                            'reenroll_requested_at': ''
+                          };
+                        });
+                      }
+                    },
+                    icon: const Icon(Icons.check_circle_outline),
+                    label: const Text('Clear Re-enrollment'),
+                  ),
+                ],
               ],
             ),
           ),

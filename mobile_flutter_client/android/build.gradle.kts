@@ -29,10 +29,19 @@ subprojects {
             if (namespace == null) {
                 namespace = "com.facestudio.${project.name.replace('-', '_')}"
             }
+            val useLegacy = project.name == "image_gallery_saver" ||
+                project.name == "flutter_tts"
+            compileOptions {
+                sourceCompatibility =
+                    if (useLegacy) JavaVersion.VERSION_1_8 else JavaVersion.VERSION_17
+                targetCompatibility =
+                    if (useLegacy) JavaVersion.VERSION_1_8 else JavaVersion.VERSION_17
+            }
         }
         tasks.withType<KotlinJvmCompile>().configureEach {
             compilerOptions {
-                if (project.name == "image_gallery_saver") {
+                if (project.name == "image_gallery_saver" ||
+                    project.name == "flutter_tts") {
                     jvmTarget.set(JvmTarget.JVM_1_8)
                 } else {
                     jvmTarget.set(JvmTarget.JVM_17)
