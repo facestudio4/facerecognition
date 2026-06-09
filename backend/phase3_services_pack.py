@@ -204,6 +204,10 @@ class Phase3ServiceHub:
             conn.execute("ALTER TABLE users ADD COLUMN privacy_allowed_map_json TEXT DEFAULT '[]'")
         if not self._column_exists(conn, "users", "privacy_allowed_profile_json"):
             conn.execute("ALTER TABLE users ADD COLUMN privacy_allowed_profile_json TEXT DEFAULT '[]'")
+        if not self._column_exists(conn, "users", "reenroll_required"):
+            conn.execute("ALTER TABLE users ADD COLUMN reenroll_required INTEGER DEFAULT 0")
+        if not self._column_exists(conn, "users", "reenroll_requested_at"):
+            conn.execute("ALTER TABLE users ADD COLUMN reenroll_requested_at TEXT DEFAULT ''")
         conn.execute("UPDATE users SET privacy_mode='public' WHERE privacy_mode IS NULL OR trim(privacy_mode)=''")
         conn.execute("UPDATE users SET privacy_allowed_json='[]' WHERE privacy_allowed_json IS NULL OR trim(privacy_allowed_json)=''")
         conn.execute(
@@ -214,6 +218,8 @@ class Phase3ServiceHub:
             "UPDATE users SET privacy_allowed_profile_json=privacy_allowed_json "
             "WHERE privacy_allowed_profile_json IS NULL OR trim(privacy_allowed_profile_json)=''"
         )
+        conn.execute("UPDATE users SET reenroll_required=0 WHERE reenroll_required IS NULL")
+        conn.execute("UPDATE users SET reenroll_requested_at='' WHERE reenroll_requested_at IS NULL")
 
     def _normalize_privacy_mode(self, value):
         mode = str(value or "public").strip().lower()
@@ -849,8 +855,9 @@ class Phase3ServiceHub:
         with self._connect() as conn:
             if not self._table_exists(conn, "users"):
                 return None
+            self._ensure_users_privacy_columns(conn)
             row = conn.execute(
-                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_map_json, privacy_allowed_profile_json FROM users WHERE username=? LIMIT 1",
+                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_map_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at FROM users WHERE username=? LIMIT 1",
                 (uname,),
             ).fetchone()
             if not row:
@@ -872,7 +879,51 @@ class Phase3ServiceHub:
             "privacy_allowed": self._parse_allowed_usernames(row["privacy_allowed_json"]),
             "privacy_allowed_map": self._parse_allowed_usernames(row["privacy_allowed_map_json"]),
             "privacy_allowed_profile": self._parse_allowed_usernames(row["privacy_allowed_profile_json"]),
+            "reenroll_required": bool(int(row["reenroll_required"] or 0)),
+            "reenroll_requested_at": row["reenroll_requested_at"] or "",
         }
+
+    def set_user_reenroll_required(self, target_username: str, required: bool, actor_username: str, actor_role: str):
+        target = (target_username or "").strip()
+        actor = (actor_username or "").strip().lower()
+        role = (actor_role or "user").strip().lower()
+        if not target:
+            return {"ok": False, "error": "target username is required"}
+        if role != "admin":
+            return {"ok": False, "error": "admin role required"}
+
+        requested_at = time.strftime("%Y-%m-%d %H:%M:%S") if required else ""
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": False, "error": "users table is missing"}
+            self._ensure_users_privacy_columns(conn)
+            conn.execute(
+                "UPDATE users SET reenroll_required=?, reenroll_requested_at=? WHERE lower(username)=lower(?)",
+                (1 if required else 0, requested_at, target),
+            )
+            conn.commit()
+        self._log_activity(
+            "Reenroll Requested" if required else "Reenroll Cleared",
+            f"Reenroll flag {required} for {target}",
+            username=actor or target,
+            role=role,
+        )
+        return {"ok": True, "data": {"username": target, "reenroll_required": bool(required), "reenroll_requested_at": requested_at}}
+
+    def clear_user_reenroll_required(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": False, "error": "users table is missing"}
+            self._ensure_users_privacy_columns(conn)
+            conn.execute(
+                "UPDATE users SET reenroll_required=0, reenroll_requested_at='' WHERE lower(username)=lower(?)",
+                (uname,),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"username": uname, "reenroll_required": False}}
 
     def update_user_privacy(self, target_username: str, privacy_mode: str, allowed_usernames, allowed_map_usernames, allowed_profile_usernames, actor_username: str, actor_role: str):
         target = (target_username or "").strip()
@@ -1757,6 +1808,7 @@ class Phase3ServiceHub:
             out_path = os.path.join(person_dir, out_name)
             with open(out_path, "wb") as f:
                 f.write(raw)
+                f.flush()
             imported_files += 1
             imported_people.add(person)
 
@@ -1776,9 +1828,11 @@ class Phase3ServiceHub:
             refresh_state = self.start_sync_refresh()
 
         return {
-            "ok": True,
+            "ok": imported_files == len(entries),
             "data": {
                 "imported_files": imported_files,
+                "expected_frames": len(entries),
+                "frames_missing": len(entries) - imported_files,
                 "imported_people": sorted(imported_people),
                 "known_people_after_sync": known_count,
                 "faces_root": faces_root,
@@ -2158,7 +2212,7 @@ class Phase3ServiceHub:
                 return []
             self._ensure_users_privacy_columns(conn)
             rows = conn.execute(
-                "SELECT username, email, phone, role, created, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json FROM users ORDER BY username LIMIT ?",
+                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at FROM users ORDER BY username LIMIT ?",
                 (limit,),
             ).fetchall()
         out = []
@@ -2170,14 +2224,24 @@ class Phase3ServiceHub:
             if not allowed:
                 allowed = self._parse_allowed_usernames(row["privacy_allowed_json"])
 
+            try:
+                logins = json.loads(row["logins_json"] or "[]")
+                if not isinstance(logins, list):
+                    logins = []
+            except Exception:
+                logins = []
+            logins = list(reversed(logins[-10:]))
+
             if role != "admin" and requester != uname_l and privacy_mode == "private" and requester not in set(allowed):
                 continue
 
             email = row["email"] or ""
             phone = row["phone"] or ""
-            if role != "admin" and requester != uname_l:
+            show_sensitive = role == "admin" or requester == uname_l
+            if not show_sensitive:
                 email = ""
                 phone = ""
+                logins = []
 
             out.append(
                 {
@@ -2186,8 +2250,12 @@ class Phase3ServiceHub:
                     "phone": phone,
                     "role": row["role"] or "user",
                     "created": row["created"] or "",
+                    "logins": logins,
+                    "logins_count": len(logins),
                     "privacy_mode": privacy_mode,
                     "private_profile_allowed": requester in set(allowed) if privacy_mode == "private" else True,
+                    "reenroll_required": bool(int(row["reenroll_required"] or 0)),
+                    "reenroll_requested_at": row["reenroll_requested_at"] or "",
                 }
             )
         return out
@@ -2468,6 +2536,20 @@ class Phase3ServiceHub:
                     payload = self._token_payload() or {}
                     role = str(payload.get("role", "user")).strip().lower()
                     self._send_json(200, {"ok": True, "data": hub.get_system_info_summary(role=role)})
+                    return
+
+                if path == "/api/admin/user/profile":
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    if role != "admin":
+                        self._send_json(403, {"ok": False, "error": "admin role required"})
+                        return
+                    username = (query.get("username", [""])[0]).strip()
+                    profile = hub.get_user_profile(username)
+                    if not profile:
+                        self._send_json(404, {"ok": False, "error": "User not found"})
+                        return
+                    self._send_json(200, {"ok": True, "data": profile})
                     return
 
                 if path == "/api/admin/advanced-lab":
@@ -2850,9 +2932,57 @@ class Phase3ServiceHub:
                         self._send_json(code, result)
                         return
 
+                    if path == "/api/users/me/enroll-reset/ack":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        result = hub.clear_user_reenroll_required(actor)
+                        code = 200 if result.get("ok") is True else 400
+                        self._send_json(code, result)
+                        return
+
+                    if path == "/api/users/me/enroll-reset/ack":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        result = hub.clear_user_reenroll_required(actor)
+                        code = 200 if result.get("ok") is True else 400
+                        self._send_json(code, result)
+                        return
+
                     if path == "/api/admin/evaluator-bundle/export":
                         out_dir = hub.export_demo_kit()
                         self._send_json(200, {"ok": True, "data": {"out_dir": out_dir}})
+                        return
+
+                    if path == "/api/admin/user/reenroll":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        target = str(payload.get("username", "")).strip()
+                        required = bool(payload.get("required", True))
+                        result = hub.set_user_reenroll_required(
+                            target_username=target,
+                            required=required,
+                            actor_username=actor,
+                            actor_role=role,
+                        )
+                        code = 200 if result.get("ok") is True else 400
+                        self._send_json(code, result)
+                        return
+
+                    if path == "/api/admin/user/reenroll":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        target = str(payload.get("username", "")).strip()
+                        required = bool(payload.get("required", True))
+                        result = hub.set_user_reenroll_required(
+                            target_username=target,
+                            required=required,
+                            actor_username=actor,
+                            actor_role=role,
+                        )
+                        code = 200 if result.get("ok") is True else 400
+                        self._send_json(code, result)
                         return
 
                     if path == "/api/admin/backup/now":
