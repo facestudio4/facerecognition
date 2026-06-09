@@ -64,6 +64,55 @@ class Phase3ServiceHub:
         self._sync_refresh_thread = None
         self._sync_refresh_running = False
         self._sync_refresh_error = ""
+        self._seed_persistent_faces()
+
+    def _faces_root(self, ensure: bool = True) -> str:
+        """Single source of truth for where face images live.
+
+        Honors the FACES_ROOT env var (set to a persistent disk such as Render's
+        /var/data/faces in production) and otherwise falls back to the in-repo
+        database/faces folder used for local development.
+        """
+        configured = os.environ.get("FACES_ROOT", "").strip()
+        root = configured or os.path.join(self.base_dir, "database", "faces")
+        if ensure:
+            try:
+                os.makedirs(root, exist_ok=True)
+            except Exception:
+                pass
+        return root
+
+    def _seed_persistent_faces(self) -> None:
+        """Copy repo-bundled person folders onto the persistent faces disk once.
+
+        When FACES_ROOT points at a fresh persistent disk (e.g. after the first
+        Render deploy), any people committed in the repo's database/faces would
+        otherwise be invisible. Copy each missing person folder over so existing
+        enrollments stay recognizable. Idempotent: never overwrites folders that
+        already exist on the persistent disk (those hold newer runtime data).
+        """
+        try:
+            target = self._faces_root()
+            source = os.path.join(self.base_dir, "database", "faces")
+            if os.path.abspath(target) == os.path.abspath(source):
+                return
+            if not os.path.isdir(source):
+                return
+            for name in os.listdir(source):
+                if name.lower() == "__pycache__":
+                    continue
+                src_dir = os.path.join(source, name)
+                if not os.path.isdir(src_dir):
+                    continue
+                dst_dir = os.path.join(target, name)
+                if os.path.exists(dst_dir):
+                    continue
+                try:
+                    shutil.copytree(src_dir, dst_dir)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
@@ -1131,17 +1180,7 @@ class Phase3ServiceHub:
         yunet_kb = (os.path.getsize(yunet_path) / 1024.0) if os.path.exists(yunet_path) else 0.0
         sface_mb = (os.path.getsize(sface_path) / (1024.0 * 1024.0)) if os.path.exists(sface_path) else 0.0
 
-        faces_root_candidates = [
-            os.path.join(self.base_dir, "database", "faces"),
-            os.path.join(os.path.dirname(self.base_dir), "database", "faces"),
-        ]
-        faces_root = ""
-        for cand in faces_root_candidates:
-            if os.path.isdir(cand):
-                faces_root = cand
-                break
-        if not faces_root:
-            faces_root = faces_root_candidates[0]
+        faces_root = self._faces_root()
 
         ignored = {"known_faces", "archive", "__pycache__"}
         image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -1735,8 +1774,7 @@ class Phase3ServiceHub:
         if frame is None or frame.size == 0:
             return
         try:
-            faces_root = os.path.join(self.base_dir, "database", "faces")
-            os.makedirs(faces_root, exist_ok=True)
+            faces_root = self._faces_root()
             safe_person = self._sanitize_face_name(person)
             person_dir = os.path.join(faces_root, safe_person)
             os.makedirs(person_dir, exist_ok=True)
@@ -1758,8 +1796,7 @@ class Phase3ServiceHub:
         if not isinstance(entries, list) or not entries:
             raise ValueError("entries must be a non-empty list")
 
-        faces_root = os.path.join(self.base_dir, "database", "faces")
-        os.makedirs(faces_root, exist_ok=True)
+        faces_root = self._faces_root()
         protected_dirs = {"known_faces", "archive", "__pycache__"}
 
         if clear_existing:
@@ -1844,7 +1881,7 @@ class Phase3ServiceHub:
         }
 
     def export_known_faces(self, person: str = "", limit: int = 0):
-        faces_root = os.path.join(self.base_dir, "database", "faces")
+        faces_root = self._faces_root()
         if not os.path.isdir(faces_root):
             return {"ok": True, "data": {"entries": [], "count": 0}}
 
@@ -2815,7 +2852,7 @@ class Phase3ServiceHub:
                         person = str(payload.get("person", "")).strip() or username
                         try:
                             safe_person = hub._sanitize_face_name(person)
-                            faces_root = os.path.join(hub.base_dir, "database", "faces")
+                            faces_root = hub._faces_root()
                             os.makedirs(os.path.join(faces_root, safe_person), exist_ok=True)
                             self._send_json(200, {"ok": True})
                         except Exception as ex:
@@ -2828,7 +2865,7 @@ class Phase3ServiceHub:
                         person = str(payload.get("person", "")).strip() or username
                         try:
                             safe_person = hub._sanitize_face_name(person)
-                            faces_root = os.path.join(hub.base_dir, "database", "faces")
+                            faces_root = hub._faces_root()
                             if not os.path.isdir(faces_root):
                                 self._send_json(200, {"ok": True, "data": {"exists": False}})
                                 return

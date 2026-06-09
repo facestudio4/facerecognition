@@ -174,12 +174,15 @@ _patch_scroll_parent_redirection ()
 
 
 
-BASE_DIR =PROJECT_ROOT 
+BASE_DIR =PROJECT_ROOT
 DATA_DIR =os .path .join (BASE_DIR ,"database")
-FACES_ROOT =os .path .join (DATA_DIR ,"faces")
+# FACES_ROOT may be redirected to a persistent location (e.g. Render's /var/data
+# disk) via the FACES_ROOT env var so enrolled faces survive redeploys/restarts.
+# Falls back to the in-repo database/faces folder for local development.
+FACES_ROOT =(os .environ .get ("FACES_ROOT","").strip ()or os .path .join (DATA_DIR ,"faces"))
 KNOWN_FACES_DIR =os .path .join (FACES_ROOT ,"known_faces")
 ARCHIVE_DIR =os .path .join (FACES_ROOT ,"archive")
-ENCODINGS_PATH =os .path .join (DATA_DIR ,"face_encodings.pkl")
+ENCODINGS_PATH =(os .environ .get ("FACE_ENCODINGS_PATH","").strip ()or os .path .join (os .path .dirname (FACES_ROOT )or DATA_DIR ,"face_encodings.pkl"))
 
 RECOGNITION_THRESHOLD =0.363 
 FRAME_SCALE =0.5 
