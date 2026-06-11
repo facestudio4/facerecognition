@@ -388,27 +388,6 @@ class _RapidScenarioTileState extends State<RapidScenarioTile>
     );
   }
 
-  Future<void> _showDialogCard(String title, String body) async {
-    if (!mounted) {
-      return;
-    }
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          title: Text(title),
-          content: Text(body),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('OK'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   Future<void> _showMatrixDialog(
       RapidScenario s, RapidActionProgram program) async {
     if (!mounted) {
@@ -752,38 +731,6 @@ class _RapidScenarioTileState extends State<RapidScenarioTile>
               ),
               const SizedBox(height: 8),
               Text('Use this key for ${s.actionLabel}.'),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _showBottomSheet(String title, String subtitle) async {
-    if (!mounted) {
-      return;
-    }
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title,
-                  style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFFEAF4FF))),
-              const SizedBox(height: 6),
-              Text(subtitle,
-                  style:
-                      const TextStyle(color: Color(0xFFB8D5EE), height: 1.3)),
-              const SizedBox(height: 10),
-              LinearProgressIndicator(
-                  value: 0.62 + (widget.scenario.id % 20) * 0.015),
             ],
           ),
         );

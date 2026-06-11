@@ -26,10 +26,10 @@ Recommended mobile update vars:
 Main 5 env vars for app update:
 
 ```env
-FACE_STUDIO_MOBILE_LATEST_VERSION=0.1.0+29
-FACE_STUDIO_MOBILE_MIN_VERSION=0.1.0+29
-FACE_STUDIO_MOBILE_APK_URL=https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B29/mobile_0.1.0%2B29.apk
-FACE_STUDIO_MOBILE_UPDATE_NOTES=Face Studio mobile v0.1.0+29 syncs the latest onboarding, recognition, and release metadata updates.
+FACE_STUDIO_MOBILE_LATEST_VERSION=0.1.0+31
+FACE_STUDIO_MOBILE_MIN_VERSION=0.1.0+31
+FACE_STUDIO_MOBILE_APK_URL=https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B31/mobile_0.1.0%2B31.apk
+FACE_STUDIO_MOBILE_UPDATE_NOTES=Face Studio mobile v0.1.0+31 fixes the stretched camera preview and adds resilient retry/backoff so recognition recovers gracefully while the server wakes up.
 FACE_STUDIO_MOBILE_FORCE_UPDATE=false
 ```
 

@@ -1,5 +1,6 @@
 ﻿import 'dart:convert';
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -20,7 +21,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 
+import 'face_engine/face_recognition_engine.dart';
+import 'face_engine/recognition_result.dart';
 import 'expansion/rapid_growth_pack.dart' as rapid_pack;
 
 const Color _kBg = Color(0xFF1A1A2E);
@@ -73,11 +77,120 @@ Future<void> _loadGlobal3dIntensity() async {
   _global3dIntensityNotifier.value = raw.clamp(0.6, 1.8);
 }
 
-Future<void> _setGlobal3dIntensity(double value) async {
-  final clamped = value.clamp(0.6, 1.8);
-  _global3dIntensityNotifier.value = clamped;
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setDouble(_kGlobal3dIntensityPrefKey, clamped);
+const int _kDecodeMaxDimension = 512;
+const int _kMaxSavedSamplesPerUser = 24;
+
+String _sanitizeFileName(String s) {
+  return s.replaceAll(RegExp(r"[^A-Za-z0-9 _\-]"), '_').replaceAll(' ', '_');
+}
+
+Future<List<Directory>> _faceSamplesDirsForName(String name) async {
+  final normalized = _sanitizeFileName(name);
+  final uniqueDirs = <String, Directory>{};
+
+  try {
+    final base = await getApplicationDocumentsDirectory();
+    uniqueDirs[
+            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
+        Directory(
+            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+  } catch (_) {}
+  try {
+    final base = await getApplicationSupportDirectory();
+    uniqueDirs[
+            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
+        Directory(
+            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+  } catch (_) {}
+  if (Platform.isAndroid) {
+    try {
+      final base = await getExternalStorageDirectory();
+      if (base != null) {
+        uniqueDirs[
+                '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
+            Directory(
+                '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+      }
+    } catch (_) {}
+  }
+
+  return uniqueDirs.values.toList(growable: false);
+}
+
+Future<void> _saveFaceSampleBytes({
+  required String name,
+  required Uint8List bytes,
+  required String prefix,
+  int? index,
+}) async {
+  if (name.trim().isEmpty || bytes.isEmpty) {
+    return;
+  }
+  final dirs = await _faceSamplesDirsForName(name);
+  if (dirs.isEmpty) {
+    final base = await getApplicationDocumentsDirectory();
+    dirs.add(Directory(
+      '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}${_sanitizeFileName(name)}',
+    ));
+  }
+  final stamp = DateTime.now().millisecondsSinceEpoch;
+  final suffix = index == null ? '' : '_$index';
+  for (final dir in dirs) {
+    try {
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      final file = File(
+        '${dir.path}${Platform.pathSeparator}${prefix}_$stamp$suffix.jpg',
+      );
+      await file.writeAsBytes(bytes, flush: true);
+      await _pruneFaceSamples(dir, maxFiles: _kMaxSavedSamplesPerUser);
+    } catch (_) {
+      // Continue saving to other available locations even if one fails.
+    }
+  }
+}
+
+Future<void> _pruneFaceSamples(Directory dir, {required int maxFiles}) async {
+  try {
+    final entries = await dir.list().toList();
+    final files = entries.whereType<File>().toList(growable: false);
+    if (files.length <= maxFiles) {
+      return;
+    }
+    files.sort((a, b) => a.path.compareTo(b.path));
+    final toDelete = files.length - maxFiles;
+    for (var i = 0; i < toDelete; i++) {
+      try {
+        await files[i].delete();
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+Widget _buildCameraPreview(CameraController controller) {
+  final previewSize = controller.value.previewSize;
+  if (previewSize == null ||
+      previewSize.width <= 0 ||
+      previewSize.height <= 0) {
+    return CameraPreview(controller);
+  }
+
+  // The camera plugin reports previewSize in the sensor's landscape
+  // orientation (width > height). The app shows the preview in portrait, so we
+  // swap width/height here; otherwise the preview keeps the landscape aspect
+  // ratio and faces look horizontally stretched / "flat".
+  return ClipRect(
+    child: FittedBox(
+      fit: BoxFit.cover,
+      clipBehavior: Clip.hardEdge,
+      child: SizedBox(
+        width: previewSize.height,
+        height: previewSize.width,
+        child: CameraPreview(controller),
+      ),
+    ),
+  );
 }
 
 class _EnrollmentUploadQueue {
@@ -498,6 +611,34 @@ Future<ui.Image> _decodeRgbaImage(Uint8List rgba, int width, int height) {
     rowBytes: width * 4,
   );
   return completer.future;
+}
+
+Future<({Uint8List rgbBytes, int width, int height})?> _decodeImageToRgbBytes(
+    Uint8List bytes) async {
+  try {
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final image = frame.image;
+    final rgba = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (rgba == null) {
+      return null;
+    }
+    final src = rgba.buffer.asUint8List();
+    final rgbBytes = Uint8List((src.length ~/ 4) * 3);
+    var outIndex = 0;
+    for (var i = 0; i < src.length; i += 4) {
+      rgbBytes[outIndex++] = src[i];
+      rgbBytes[outIndex++] = src[i + 1];
+      rgbBytes[outIndex++] = src[i + 2];
+    }
+    return (
+      rgbBytes: rgbBytes,
+      width: image.width,
+      height: image.height,
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
 class _WeightedPixel {
@@ -1373,11 +1514,9 @@ String _motionPresetLabel(_MotionPreset preset) {
 
 class _MotionPresetSelector extends StatelessWidget {
   final String title;
-  final bool showGlobal3dControl;
 
   const _MotionPresetSelector({
     required this.title,
-    this.showGlobal3dControl = false,
   });
 
   @override
@@ -1394,7 +1533,6 @@ class _MotionPresetSelector extends StatelessWidget {
         return ValueListenableBuilder<double>(
           valueListenable: _global3dIntensityNotifier,
           builder: (context, intensity, _) {
-            final clampedIntensity = intensity.clamp(0.6, 1.8);
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
@@ -1445,34 +1583,6 @@ class _MotionPresetSelector extends StatelessWidget {
                             );
                           }).toList(),
                         ),
-                        if (showGlobal3dControl) ...[
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              const Expanded(
-                                child: Text(
-                                  'Global 3D intensity',
-                                  style: TextStyle(
-                                    color: Color(0xFFB6CCE8),
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ),
-                              TextButton(
-                                onPressed: () => _setGlobal3dIntensity(1.0),
-                                child: const Text('Reset'),
-                              ),
-                            ],
-                          ),
-                          Slider(
-                            value: clampedIntensity,
-                            min: 0.6,
-                            max: 1.8,
-                            divisions: 24,
-                            label: '${clampedIntensity.toStringAsFixed(2)}x',
-                            onChanged: (value) => _setGlobal3dIntensity(value),
-                          ),
-                        ],
                       ],
                     ),
                   ),
@@ -1528,14 +1638,12 @@ class _CinematicFaceHeader extends StatelessWidget {
   final String subtitle;
   final List<_HeaderTag> tags;
   final Object? heroTag;
-  final bool ultraClearFace;
 
   const _CinematicFaceHeader({
     required this.title,
     required this.subtitle,
     required this.tags,
     this.heroTag,
-    this.ultraClearFace = true,
   });
 
   @override
@@ -1554,7 +1662,7 @@ class _CinematicFaceHeader extends StatelessWidget {
       glowScale: tier == _MotionTier.low ? 0.44 : 0.72,
       depthScale: tier == _MotionTier.low ? 0.82 : 1.25,
       cinematicSpecular: tier != _MotionTier.low,
-      ultraClear: ultraClearFace,
+      ultraClear: true,
       motionTier: tier,
     );
     if (heroTag != null && tier != _MotionTier.low) {
@@ -1937,20 +2045,6 @@ class _FaceAcquireOverlayState extends State<_FaceAcquireOverlay>
                   ((t - holdEnd) / (1 - holdEnd)).clamp(0.0, 1.0);
               final holdProgress =
                   ((t - formEnd) / (holdEnd - formEnd)).clamp(0.0, 1.0);
-              final postHoldPeak = Curves.easeOut.transform(
-                (travelProgress / 0.42).clamp(0.0, 1.0),
-              );
-              final postHoldFade = 1 -
-                  Curves.easeIn.transform(
-                    ((travelProgress - 0.32) / 0.68).clamp(0.0, 1.0),
-                  );
-              final lockStrength = t < formEnd
-                  ? 0.0
-                  : t < holdEnd
-                      ? (0.24 +
-                          (0.42 * math.sin(holdProgress * math.pi)) *
-                              Curves.easeOut.transform(holdProgress))
-                      : (0.46 * postHoldPeak * postHoldFade);
               final panProgress = Curves.easeOutCubic.transform(formProgress);
               final panX = ((1 - panProgress) * -screen.width * 0.02);
               final stagedCenter = Offset(center.dx + panX, center.dy);
@@ -2722,156 +2816,6 @@ List<List<Offset>> _faceFeatureSegments(Offset c, double rx, double ry) {
   return segments;
 }
 
-class _FaceLockPulsePainter extends CustomPainter {
-  final double phase;
-  final double strength;
-
-  _FaceLockPulsePainter({required this.phase, required this.strength});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (strength <= 0) {
-      return;
-    }
-    final c = Offset(size.width / 2, size.height / 2);
-    final rx = size.width * 0.39;
-    final ry = size.height * 0.48;
-    const anchors = [
-      Offset(-0.23, -0.23),
-      Offset(0.23, -0.23),
-      Offset(0.0, -0.06),
-      Offset(-0.17, 0.32),
-      Offset(0.17, 0.32),
-      Offset(-0.36, -0.06),
-      Offset(0.34, -0.04),
-    ];
-    const links = [
-      [0, 2],
-      [1, 2],
-      [2, 3],
-      [2, 4],
-      [5, 0],
-      [6, 1],
-      [5, 2],
-      [6, 2],
-      [3, 4],
-    ];
-
-    final points = <Offset>[];
-    for (int i = 0; i < anchors.length; i++) {
-      points.add(
-          Offset(c.dx + (anchors[i].dx * rx), c.dy + (anchors[i].dy * ry)));
-    }
-
-    for (int i = 0; i < links.length; i++) {
-      final a = points[links[i][0]];
-      final b = points[links[i][1]];
-      final linkWave =
-          ((math.sin((phase * math.pi * 8.0) + (i * 0.7)) + 1) * 0.5);
-
-      final baseLine = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeWidth = 0.8 + (strength * 0.55)
-        ..color = const Color(0xFF86B8FF)
-            .withValues(alpha: (0.16 + (0.22 * linkWave)) * strength);
-      canvas.drawLine(a, b, baseLine);
-
-      final t = ((phase * 1.25) + (i * 0.13)) % 1.0;
-      final segStart = (t - 0.1).clamp(0.0, 1.0);
-      final segEnd = (t + 0.1).clamp(0.0, 1.0);
-      final p1 = Offset.lerp(a, b, segStart)!;
-      final p2 = Offset.lerp(a, b, segEnd)!;
-      final hotLine = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeWidth = 1.4 + (strength * 0.85)
-        ..shader = LinearGradient(
-          colors: [
-            const Color(0xFF8B65FF).withValues(alpha: 0),
-            const Color(0xFFC7D8FF)
-                .withValues(alpha: (0.65 + (0.35 * linkWave)) * strength),
-            const Color(0xFF8B65FF).withValues(alpha: 0),
-          ],
-        ).createShader(Rect.fromPoints(p1, p2));
-      canvas.drawLine(p1, p2, hotLine);
-    }
-
-    for (int i = 0; i < points.length; i++) {
-      final p = points[i];
-      final wave = ((math.sin((phase * math.pi * 11.5) + (i * 0.9)) + 1) * 0.5);
-      final ringR = 4.4 + (wave * 10.5 * strength);
-      final ring = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.1 + (strength * 0.7)
-        ..color = const Color(0xFFC9E8FF)
-            .withValues(alpha: (0.2 + (0.45 * wave)) * strength);
-      canvas.drawCircle(p, ringR, ring);
-
-      final core = Paint()
-        ..shader = RadialGradient(
-          colors: [
-            const Color(0xFFE9F6FF).withValues(alpha: 0.8 * strength),
-            const Color(0xFF5B8AFF).withValues(alpha: 0.5 * strength),
-            Colors.transparent,
-          ],
-        ).createShader(Rect.fromCircle(center: p, radius: 7.5));
-      canvas.drawCircle(p, 7.5, core);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _FaceLockPulsePainter oldDelegate) {
-    return oldDelegate.phase != phase || oldDelegate.strength != strength;
-  }
-}
-
-class _FaceInitialOutlinePainter extends CustomPainter {
-  const _FaceInitialOutlinePainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final c = Offset(size.width / 2, size.height / 2);
-    final rx = size.width * 0.39;
-    final ry = size.height * 0.48;
-    const outer = [
-      Offset(-0.28, -0.74),
-      Offset(-0.49, -0.55),
-      Offset(-0.57, -0.24),
-      Offset(-0.55, 0.11),
-      Offset(-0.42, 0.43),
-      Offset(-0.2, 0.68),
-      Offset(0.0, 0.74),
-      Offset(0.2, 0.68),
-      Offset(0.42, 0.43),
-      Offset(0.55, 0.11),
-      Offset(0.57, -0.24),
-      Offset(0.49, -0.55),
-      Offset(0.28, -0.74),
-    ];
-
-    final path = Path();
-    for (int i = 0; i < outer.length; i++) {
-      final p = Offset(c.dx + outer[i].dx * rx, c.dy + outer[i].dy * ry);
-      if (i == 0) {
-        path.moveTo(p.dx, p.dy);
-      } else {
-        path.lineTo(p.dx, p.dy);
-      }
-    }
-
-    final stroke = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..strokeCap = StrokeCap.round
-      ..color = const Color(0xFFA7EBFF).withValues(alpha: 0.85);
-    canvas.drawPath(path, stroke);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
 class _OrbitGlowPainter extends CustomPainter {
   final double intensity;
 
@@ -3525,18 +3469,6 @@ class _MenuItem {
   });
 }
 
-class _KnownMapLocation {
-  final String name;
-  final double latitude;
-  final double longitude;
-
-  const _KnownMapLocation({
-    required this.name,
-    required this.latitude,
-    required this.longitude,
-  });
-}
-
 class BackendApi {
   String _baseUrl;
   final String apiKey;
@@ -3612,7 +3544,7 @@ class BackendApi {
       try {
         final health = await http
             .get(Uri.parse('$base/api/health'))
-            .timeout(_kAuthTimeout);
+            .timeout(_kNetworkTimeout);
         if (health.statusCode != 200) {
           lastReason = 'backend_http_${health.statusCode}';
           continue;
@@ -3632,12 +3564,7 @@ class BackendApi {
               .timeout(_kAuthTimeout);
         }
 
-        http.Response res;
-        try {
-          res = await sendLogin();
-        } on TimeoutException {
-          res = await sendLogin();
-        }
+        final res = await sendLogin();
 
         if (res.statusCode == 401 || res.statusCode == 403) {
           return {'ok': false, 'reason': 'invalid_credentials'};
@@ -3756,10 +3683,18 @@ class BackendApi {
   Future<Map<String, dynamic>> enrollFace({
     required String person,
     required String imageB64,
+    String? filename,
   }) async {
     final ok = await ensureToken();
     if (!ok) {
       return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final payload = <String, dynamic>{
+      'person': person,
+      'image_b64': imageB64,
+    };
+    if (filename != null && filename.trim().isNotEmpty) {
+      payload['filename'] = filename.trim();
     }
     final res = await http
         .post(
@@ -3768,7 +3703,7 @@ class BackendApi {
             'Authorization': 'Bearer $_token',
             'Content-Type': 'application/json',
           },
-          body: jsonEncode({'person': person, 'image_b64': imageB64}),
+          body: jsonEncode(payload),
         )
         .timeout(_kNetworkTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -4209,18 +4144,25 @@ class AuthGate extends StatefulWidget {
   State<AuthGate> createState() => _AuthGateState();
 }
 
-class _AuthGateState extends State<AuthGate> {
+class _AuthGateState extends State<AuthGate>
+    with SingleTickerProviderStateMixin {
   bool _ready = false;
   String _username = '';
   bool _isAdmin = false;
+  bool _sessionValidationRunning = false;
   Timer? _updateRecheckTimer;
   bool _updateCheckInFlight = false;
   bool _updateDialogOpen = false;
   bool _firstEnrollInProgress = false;
+  late final AnimationController _sessionBannerController;
 
   @override
   void initState() {
     super.initState();
+    _sessionBannerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 5200),
+    )..repeat();
     unawaited(_loadBaseUrlOverride());
     _checkForAppUpdate();
     _startUpdateRecheckLoop();
@@ -4361,6 +4303,8 @@ class _AuthGateState extends State<AuthGate> {
                 ),
               FilledButton(
                 onPressed: () async {
+                  final navigator = Navigator.of(ctx);
+                  final messenger = ScaffoldMessenger.of(context);
                   final ok = await _UpdateNotificationService.openUpdateUrl(
                     updateUrl,
                   );
@@ -4368,10 +4312,10 @@ class _AuthGateState extends State<AuthGate> {
                     return;
                   }
                   if (ok) {
-                    Navigator.of(ctx).pop();
+                    navigator.pop();
                     return;
                   }
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     const SnackBar(
                       content: Text(
                         'Could not open update link. Please try again.',
@@ -4391,58 +4335,92 @@ class _AuthGateState extends State<AuthGate> {
   }
 
   Future<void> _loadSession() async {
+    var ready = false;
     try {
-      final api = buildBackendApi();
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('fs_token') ?? '';
-      final username = prefs.getString('fs_username') ?? '';
-      final role = (prefs.getString('fs_role') ?? 'user').toLowerCase();
+      await SharedPreferences.getInstance();
+      ready = true;
+    } catch (_) {
+      ready = true;
+    }
+    if (!mounted || !ready) {
+      return;
+    }
+    setState(() {
+      _ready = true;
+    });
+    unawaited(_loadSessionAndVerify());
+  }
 
+  Future<void> _loadSessionAndVerify() async {
+    if (mounted) {
+      setState(() {
+        _sessionValidationRunning = true;
+      });
+    }
+    final api = buildBackendApi();
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('fs_token') ?? '';
+    final username = prefs.getString('fs_username') ?? '';
+    final role = (prefs.getString('fs_role') ?? 'user').toLowerCase();
+
+    try {
       if (token.isNotEmpty && username.isNotEmpty) {
         api.setSession(token: token, username: username, role: role);
+        if (mounted) {
+          setState(() {
+            _username = username;
+            _isAdmin = role == 'admin';
+          });
+        }
+        unawaited(_EnrollmentUploadQueue.processQueue());
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _maybeRunFirstTimeEnrollment(username);
+        });
+
         final me = await api.getCurrentUser().timeout(
-              const Duration(seconds: 10),
+              const Duration(seconds: 6),
               onTimeout: () => {'ok': false, 'error': 'session_check_timeout'},
             );
         if (me['ok'] == true) {
           final data = (me['data'] as Map<String, dynamic>?) ?? {};
-          _username = (data['username'] ?? username).toString();
-          _isAdmin =
+          final resolvedUser = (data['username'] ?? username).toString();
+          final resolvedRole =
               ((data['role'] ?? role).toString().toLowerCase() == 'admin');
           api.setSession(
             token: token,
-            username: _username,
-            role: _isAdmin ? 'admin' : 'user',
+            username: resolvedUser,
+            role: resolvedRole ? 'admin' : 'user',
           );
+          if (mounted) {
+            setState(() {
+              _username = resolvedUser;
+              _isAdmin = resolvedRole;
+            });
+          }
         } else {
           final errorText = (me['error'] ?? '').toString().toLowerCase();
           final connectivityIssue = errorText.contains('unavailable') ||
               errorText.contains('failed to connect') ||
               errorText.contains('socket') ||
               errorText.contains('timeout');
-          if (connectivityIssue) {
-            _username = username;
-            _isAdmin = role == 'admin';
-          } else {
+          if (!connectivityIssue) {
             await prefs.remove('fs_token');
             await prefs.remove('fs_username');
             await prefs.remove('fs_role');
             api.clearSession();
+            if (mounted) {
+              setState(() {
+                _username = '';
+                _isAdmin = false;
+              });
+            }
           }
         }
       }
-    } catch (_) {
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _ready = true;
-      });
-      if (_username.isNotEmpty) {
-        unawaited(_EnrollmentUploadQueue.processQueue());
-      }
-      if (_username.isNotEmpty) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _maybeRunFirstTimeEnrollment(_username);
+      if (mounted) {
+        setState(() {
+          _sessionValidationRunning = false;
         });
       }
     }
@@ -4456,6 +4434,11 @@ class _AuthGateState extends State<AuthGate> {
     if (clean.isEmpty) {
       return;
     }
+    final navigator = Navigator.of(context);
+    final route = _buildAdaptivePageRoute<bool>(
+      context: context,
+      builder: (_) => FirstTimeEnrollmentPage(username: clean),
+    );
     final prefs = await SharedPreferences.getInstance();
     final key = 'fs_enroll_done_${clean.toLowerCase()}';
     try {
@@ -4471,12 +4454,7 @@ class _AuthGateState extends State<AuthGate> {
       return;
     }
     _firstEnrollInProgress = true;
-    final done = await Navigator.of(context).push<bool>(
-      _buildAdaptivePageRoute(
-        context: context,
-        builder: (_) => FirstTimeEnrollmentPage(username: clean),
-      ),
-    );
+    final done = await navigator.push<bool>(route);
     if (done == true) {
       await prefs.setBool(key, true);
     }
@@ -4517,7 +4495,126 @@ class _AuthGateState extends State<AuthGate> {
   @override
   void dispose() {
     _updateRecheckTimer?.cancel();
+    _sessionBannerController.dispose();
     super.dispose();
+  }
+
+  Widget _buildSessionValidationBanner(BuildContext context) {
+    final tier = _motionTierFor(context);
+    final reduceMotion = tier == _MotionTier.low;
+    final global3d = _global3dIntensityFor(context);
+    return AnimatedBuilder(
+      animation: _sessionBannerController,
+      builder: (context, child) {
+        final t = reduceMotion ? 0.0 : _sessionBannerController.value;
+        final wave = (math.sin(t * math.pi * 2) + 1) * 0.5;
+        final glow = 0.35 + (wave * 0.45);
+        final sweepStrength = reduceMotion ? 0.25 : 0.55;
+        final tilt = reduceMotion ? 0.0 : (0.018 + (wave * 0.01)) * global3d;
+        return Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.0015)
+            ..rotateX(tilt)
+            ..rotateY(-tilt * 0.9),
+          child: _TiltPanel(
+            maxTilt: 0.03,
+            child: Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFF1D2B4A).withValues(alpha: 0.95),
+                    const Color(0xFF10233F).withValues(alpha: 0.98),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                border: Border.all(
+                  color: const Color(0xFF4C6FA0).withValues(alpha: 0.8),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color:
+                        const Color(0xFF5CCBFF).withValues(alpha: glow * 0.35),
+                    blurRadius: 18,
+                    spreadRadius: 0.4,
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 54,
+                    height: 54,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: _OrbitGlowPainter(intensity: glow),
+                          ),
+                        ),
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: _FaceGlyphPainter(glow: glow),
+                          ),
+                        ),
+                        if (!reduceMotion)
+                          Positioned.fill(
+                            child: CustomPaint(
+                              painter: _FaceSpecularSweepPainter(
+                                phase: t,
+                                strength: sweepStrength,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Securing your session',
+                          style: TextStyle(
+                            color: Color(0xFFE8F4FF),
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14,
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'Syncing identity with the Face Studio core...',
+                          style: TextStyle(
+                            color: Color(0xFFB7CCE8),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Color(0xFF85E3FF),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -4530,10 +4627,23 @@ class _AuthGateState extends State<AuthGate> {
     if (_username.isEmpty) {
       return LoginPage(onLoggedIn: _onLoggedIn);
     }
-    return MobileHomePage(
-      username: _username,
-      isAdmin: _isAdmin,
-      onLogout: _onLogout,
+    return Stack(
+      children: [
+        MobileHomePage(
+          username: _username,
+          isAdmin: _isAdmin,
+          onLogout: _onLogout,
+        ),
+        if (_sessionValidationRunning)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: _buildSessionValidationBanner(context),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -5680,23 +5790,6 @@ const List<_GenerationStyleProfile> _generationStyleProfiles = [
   ),
 ];
 
-const List<_KnownMapLocation> _worldMapLocations = [
-  _KnownMapLocation(
-      name: 'Mumbai, India', latitude: 19.0760, longitude: 72.8777),
-  _KnownMapLocation(
-      name: 'Delhi, India', latitude: 28.6139, longitude: 77.2090),
-  _KnownMapLocation(
-      name: 'Bengaluru, India', latitude: 12.9716, longitude: 77.5946),
-  _KnownMapLocation(name: 'London, UK', latitude: 51.5074, longitude: -0.1278),
-  _KnownMapLocation(
-      name: 'New York, USA', latitude: 40.7128, longitude: -74.0060),
-  _KnownMapLocation(
-      name: 'Tokyo, Japan', latitude: 35.6762, longitude: 139.6503),
-  _KnownMapLocation(
-      name: 'Sydney, Australia', latitude: -33.8688, longitude: 151.2093),
-  _KnownMapLocation(name: 'Dubai, UAE', latitude: 25.2048, longitude: 55.2708),
-];
-
 final ValueNotifier<double> _globalMotionRealism = ValueNotifier<double>(0.72);
 
 String _realismPresetLabel(double value) {
@@ -6088,7 +6181,7 @@ class _MotionStudioPageState extends State<MotionStudioPage>
               alignment: Alignment.center,
               transform: Matrix4.identity()
                 ..setEntry(3, 2, isCinematic ? 0.0022 : 0.0015)
-                ..translate(0.0, -lift, 0.0)
+                ..translateByVector3(Vector3(0.0, -lift, 0.0))
                 ..rotateX(_cubeRx + (drift * 0.35))
                 ..rotateY(_cubeRy + drift),
               child: Container(
@@ -6293,9 +6386,10 @@ class _MotionStudioPageState extends State<MotionStudioPage>
                     transform: Matrix4.identity()
                       ..setEntry(3, 2,
                           tier == _MotionTier.cinematic ? 0.0027 : 0.00175)
-                      ..translate(lagDelta * 8, absDelta * 20, z)
+                      ..translateByVector3(
+                          Vector3(lagDelta * 8, absDelta * 20, z))
                       ..rotateY(rot)
-                      ..scale(scale, scale),
+                      ..scaleByVector3(Vector3(scale, scale, 1.0)),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: GestureDetector(
@@ -7011,7 +7105,7 @@ class _FeatureForgePageState extends State<FeatureForgePage> {
           slivers: [
             SliverToBoxAdapter(
               child: Padding(
-                padding: EdgeInsets.fromLTRB(12, 12, 12, 6),
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
                 child: Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
@@ -7334,6 +7428,7 @@ class _ThreeDDeckCard extends StatefulWidget {
   final _RapidRarity rarity;
   final String title;
   final IconData icon;
+  final bool isHero;
   final VoidCallback? onTap;
 
   const _ThreeDDeckCard({
@@ -7342,6 +7437,7 @@ class _ThreeDDeckCard extends StatefulWidget {
     required this.rarity,
     required this.title,
     required this.icon,
+    this.isHero = false,
     this.onTap,
   });
 
@@ -7352,6 +7448,46 @@ class _ThreeDDeckCard extends StatefulWidget {
 class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
     with SingleTickerProviderStateMixin {
   int _activation = 0;
+  late final AnimationController _floatController;
+  double _dragTiltX = 0;
+  double _dragTiltY = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _floatController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 6400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _floatController.dispose();
+    super.dispose();
+  }
+
+  void _updateDragTilt(Offset local, Size size, double maxTilt) {
+    if (size.width <= 0 || size.height <= 0) {
+      return;
+    }
+    final nx = ((local.dx / size.width) - 0.5).clamp(-0.5, 0.5);
+    final ny = ((local.dy / size.height) - 0.5).clamp(-0.5, 0.5);
+    setState(() {
+      _dragTiltY = nx * (maxTilt * 2);
+      _dragTiltX = -ny * (maxTilt * 2);
+    });
+  }
+
+  void _resetDragTilt() {
+    if (_dragTiltX == 0 && _dragTiltY == 0) {
+      return;
+    }
+    setState(() {
+      _dragTiltX = 0;
+      _dragTiltY = 0;
+    });
+  }
 
   Future<void> _showTransformPreview() async {
     _activation += 1;
@@ -7397,31 +7533,313 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
 
   @override
   Widget build(BuildContext context) {
+    final tier = _motionTierFor(context);
+    final reduceMotion = tier == _MotionTier.low;
+    final rarityAccent = switch (widget.rarity) {
+      _RapidRarity.common => const Color(0xFF8EA7CF),
+      _RapidRarity.rare => const Color(0xFF87DFFF),
+      _RapidRarity.epic => const Color(0xFF9AF4D8),
+      _RapidRarity.legendary => const Color(0xFFFFD88A),
+    };
     final rarityShadow = switch (widget.rarity) {
       _RapidRarity.common => 0.16,
-      _RapidRarity.rare => 0.2,
-      _RapidRarity.epic => 0.26,
-      _RapidRarity.legendary => 0.32,
+      _RapidRarity.rare => 0.22,
+      _RapidRarity.epic => 0.28,
+      _RapidRarity.legendary => 0.36,
     };
+    final heroBoost = widget.isHero ? 1.35 : 1.0;
+    final global3d = _global3dIntensityFor(context);
+
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: widget.onTap,
       onDoubleTap: _showTransformPreview,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF69C8FF).withValues(alpha: rarityShadow),
-              blurRadius: 13,
-              spreadRadius: 0.35,
-              offset: const Offset(0, 7),
+      onPanUpdate: reduceMotion
+          ? null
+          : (details) {
+              final box = context.findRenderObject() as RenderBox?;
+              if (box == null) {
+                return;
+              }
+              _updateDragTilt(
+                details.localPosition,
+                box.size,
+                0.08 * global3d,
+              );
+            },
+      onPanEnd: (_) => _resetDragTilt(),
+      onPanCancel: _resetDragTilt,
+      child: AnimatedBuilder(
+        animation: _floatController,
+        builder: (context, child) {
+          final t = reduceMotion ? 0.0 : _floatController.value;
+          final wave = (math.sin(t * math.pi * 2) + 1) * 0.5;
+          final bob = (math.sin(t * math.pi * 2.2) * 4) * global3d;
+          final tiltX =
+              ((math.sin(t * math.pi * 2.6) * 0.02) * global3d) + _dragTiltX;
+          final tiltY =
+              ((math.cos(t * math.pi * 2.1) * 0.024) * global3d) + _dragTiltY;
+          final glow = (0.2 + (wave * 0.6)) * heroBoost;
+          final sweepAlign = -1.2 + (wave * 2.4);
+
+          return Transform.translate(
+            offset: Offset(0, reduceMotion ? 0 : bob),
+            child: Transform(
+              alignment: Alignment.center,
+              transform: Matrix4.identity()
+                ..setEntry(3, 2, 0.0016)
+                ..rotateX(reduceMotion ? 0 : tiltX)
+                ..rotateY(reduceMotion ? 0 : tiltY),
+              child: Stack(
+                children: [
+                  Transform.translate(
+                    offset: const Offset(6, 10),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(18),
+                        gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Color(0xFF0A1222),
+                            Color(0xFF0E1A31),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          blurRadius: 18,
+                          offset: const Offset(0, 10),
+                        ),
+                        BoxShadow(
+                          color: rarityAccent.withValues(
+                              alpha: rarityShadow * heroBoost),
+                          blurRadius: 18,
+                          spreadRadius: 0.6,
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Stack(
+                        children: [
+                          const Positioned.fill(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    Color(0xFF172944),
+                                    Color(0xFF0D1C33),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: widget.child,
+                          ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: [
+                                      rarityAccent.withValues(alpha: 0.12),
+                                      Colors.transparent,
+                                      Colors.black.withValues(alpha: 0.25),
+                                    ],
+                                    stops: const [0.0, 0.55, 1.0],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _RapidMeshOverlayPainter(
+                                  phase: t,
+                                  accent: rarityAccent,
+                                  intensity: glow,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (widget.isHero)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _RapidHeroSparkPainter(
+                                    phase: t,
+                                    accent: rarityAccent,
+                                    intensity: glow,
+                                    seed: widget.index + 1,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: Align(
+                                alignment: Alignment(sweepAlign, -0.45),
+                                child: Transform.rotate(
+                                  angle: -0.55,
+                                  child: Container(
+                                    width: 120,
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(60),
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          Colors.white.withValues(alpha: 0.0),
+                                          Colors.white
+                                              .withValues(alpha: 0.35 * glow),
+                                          Colors.white.withValues(alpha: 0.0),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: rarityAccent.withValues(alpha: 0.5),
+                                  ),
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ],
-        ),
-        child: widget.child,
+          );
+        },
       ),
     );
+  }
+}
+
+class _RapidMeshOverlayPainter extends CustomPainter {
+  final double phase;
+  final Color accent;
+  final double intensity;
+
+  const _RapidMeshOverlayPainter({
+    required this.phase,
+    required this.accent,
+    required this.intensity,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) {
+      return;
+    }
+    final glow = (0.08 + (intensity * 0.22)).clamp(0.08, 0.36);
+    final grid = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.9
+      ..color = accent.withValues(alpha: glow);
+    final fine = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.6
+      ..color = accent.withValues(alpha: glow * 0.7);
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final wobble = math.sin(phase * math.pi * 2) * 0.04;
+
+    for (int i = 0; i < 6; i += 1) {
+      final t = i / 5.0;
+      final y = size.height * (0.16 + (t * 0.68));
+      final pad = size.width * (0.08 + (t * 0.08));
+      canvas.drawLine(Offset(pad, y), Offset(size.width - pad, y), grid);
+    }
+
+    for (int i = 0; i < 5; i += 1) {
+      final t = i / 4.0;
+      final x = size.width * (0.14 + (t * 0.72));
+      final pad = size.height * (0.14 + (t * 0.08));
+      canvas.drawLine(Offset(x, pad),
+          Offset(x + (wobble * size.width * 0.3), size.height - pad), fine);
+    }
+
+    final ring = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1
+      ..color = accent.withValues(alpha: glow * 0.9);
+    canvas.drawCircle(Offset(cx, cy), size.shortestSide * 0.34, ring);
+    canvas.drawCircle(Offset(cx, cy), size.shortestSide * 0.42, fine);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RapidMeshOverlayPainter oldDelegate) {
+    return oldDelegate.phase != phase ||
+        oldDelegate.intensity != intensity ||
+        oldDelegate.accent != accent;
+  }
+}
+
+class _RapidHeroSparkPainter extends CustomPainter {
+  final double phase;
+  final Color accent;
+  final double intensity;
+  final int seed;
+
+  const _RapidHeroSparkPainter({
+    required this.phase,
+    required this.accent,
+    required this.intensity,
+    required this.seed,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) {
+      return;
+    }
+    final rand = math.Random(seed);
+    final base = (0.08 + (intensity * 0.22)).clamp(0.08, 0.36);
+    for (int i = 0; i < 7; i += 1) {
+      final dx = (0.15 + (rand.nextDouble() * 0.7)) * size.width;
+      final dy = (0.18 + (rand.nextDouble() * 0.64)) * size.height;
+      final flicker = 0.6 + (0.4 * math.sin((phase * math.pi * 2) + i));
+      final r = 1.2 + (rand.nextDouble() * 1.8);
+      final glow = Paint()
+        ..style = PaintingStyle.fill
+        ..color = accent.withValues(alpha: (base * flicker).clamp(0.05, 0.5));
+      canvas.drawCircle(Offset(dx, dy), r, glow);
+      canvas.drawCircle(Offset(dx, dy), r * 2.4,
+          glow..color = glow.color.withValues(alpha: glow.color.a * 0.45));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RapidHeroSparkPainter oldDelegate) {
+    return oldDelegate.phase != phase ||
+        oldDelegate.intensity != intensity ||
+        oldDelegate.accent != accent ||
+        oldDelegate.seed != seed;
   }
 }
 
@@ -7453,11 +7871,6 @@ int _rarityOffsetForRapidRarity(_RapidRarity rarity) {
     _RapidRarity.epic => 2,
     _RapidRarity.legendary => 3,
   };
-}
-
-int _modeSlotForCard(int index, _RapidRarity rarity) {
-  final rarityOffset = _rarityOffsetForRapidRarity(rarity);
-  return (index + rarityOffset) ~/ _RapidDeckFxMode.values.length;
 }
 
 double _rapidSeed01(int index, int salt) {
@@ -7957,7 +8370,7 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
 
           final cardTransform = Matrix4.identity()
             ..setEntry(3, 2, 0.0019 + (realism * 0.0008))
-            ..translate(tx, ty, depthZ)
+            ..translateByVector3(Vector3(tx, ty, depthZ))
             ..rotateX(rotX + ambientPitch)
             ..rotateY(rotY + ambientYaw)
             ..rotateZ(rotZ);
@@ -8342,11 +8755,11 @@ Path _transformPathBySeed(Path path, Size size, double variantSeed) {
   final rotate = (variantSeed - 0.5) * 0.22;
   final skew = (variantSeed - 0.5) * 0.12;
   final matrix = Matrix4.identity()
-    ..translate(size.width * 0.5, size.height * 0.5)
+    ..translateByVector3(Vector3(size.width * 0.5, size.height * 0.5, 0.0))
     ..rotateZ(rotate)
     ..setEntry(0, 1, skew)
-    ..scale(scaleX, scaleY)
-    ..translate(-size.width * 0.5, -size.height * 0.5);
+    ..scaleByVector3(Vector3(scaleX, scaleY, 1.0))
+    ..translateByVector3(Vector3(-size.width * 0.5, -size.height * 0.5, 0.0));
   return path.transform(matrix.storage);
 }
 
@@ -9207,6 +9620,8 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
   final ScrollController _scrollController = ScrollController();
   final PageController _carouselController =
       PageController(viewportFraction: 0.8);
+  List<int> _heroIndexes = const [];
+  final Set<int> _foundHeroes = {};
   String _query = '';
   int _visibleLimit = 48;
   int _rangeFilter = 0;
@@ -9219,6 +9634,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
     super.initState();
     _scrollController.addListener(_handleScroll);
     _carouselController.addListener(_handleCarousel);
+    _heroIndexes = _pickHeroIndexes();
   }
 
   @override
@@ -9261,35 +9677,31 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
     }
   }
 
-  void _nudgeCarousel(DragEndDetails details, List<int> carouselIndexes) {
-    if (!_carouselController.hasClients || carouselIndexes.length < 2) {
-      return;
-    }
-    final velocity = details.primaryVelocity ?? 0;
-    if (velocity.abs() < 140) {
-      return;
-    }
-    final current =
-        (_carouselController.page ?? _carouselController.initialPage.toDouble())
-            .round();
-    final dir = velocity < 0 ? 1 : -1;
-    final target = (current + dir).clamp(0, carouselIndexes.length - 1);
-    if (target == current) {
-      return;
-    }
-    _carouselController.animateToPage(
-      target,
-      duration: const Duration(milliseconds: 260),
-      curve: Curves.easeOutCubic,
-    );
-  }
-
   void _setRealism(double value) {
     final v = value.clamp(0.2, 1.0).toDouble();
     setState(() {
       _realism = v;
     });
     _globalMotionRealism.value = v;
+  }
+
+  List<int> _pickHeroIndexes() {
+    final maxItems = rapid_pack.rapidDeckBuilders.length;
+    if (maxItems <= 0) {
+      return const [];
+    }
+    final rand = math.Random(DateTime.now().millisecondsSinceEpoch);
+    final count = 2 + rand.nextInt(2);
+    final picks = <int>{};
+    while (picks.length < count && picks.length < maxItems) {
+      picks.add(rand.nextInt(maxItems));
+    }
+    final out = picks.toList()..sort();
+    return out;
+  }
+
+  bool _isHeroIndex(int index) {
+    return _heroIndexes.contains(index);
   }
 
   bool _matchesIndex(int index) {
@@ -9408,9 +9820,9 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
         ),
         if (!compact) ...[
           const SizedBox(height: 8),
-          Text(
+          const Text(
             'Tap for details. Double tap: open big transformation stage',
-            style: const TextStyle(
+            style: TextStyle(
               color: Color(0xFFA9BEDA),
               fontSize: 12,
             ),
@@ -9423,6 +9835,17 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
   Future<void> _openRapidCard(int index) async {
     final label = (index + 1).toString().padLeft(3, '0');
     final scenario = rapid_pack.rapidScenarios[index];
+    final isHero = _isHeroIndex(index);
+    if (isHero && !_foundHeroes.contains(index) && mounted) {
+      setState(() {
+        _foundHeroes.add(index);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Hero card discovered: ${scenario.title}'),
+        ),
+      );
+    }
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -9520,6 +9943,80 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                     tint: const Color(0xFFB1D2FF),
                   ),
                 ],
+              ),
+              const SizedBox(height: 10),
+              const Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _SectionBadge(
+                    icon: Icons.blur_circular,
+                    label: 'Common',
+                    tint: Color(0xFF8EA7CF),
+                  ),
+                  _SectionBadge(
+                    icon: Icons.auto_awesome,
+                    label: 'Rare',
+                    tint: Color(0xFF87DFFF),
+                  ),
+                  _SectionBadge(
+                    icon: Icons.bolt,
+                    label: 'Epic',
+                    tint: Color(0xFF9AF4D8),
+                  ),
+                  _SectionBadge(
+                    icon: Icons.stars,
+                    label: 'Legendary',
+                    tint: Color(0xFFFFD88A),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Card(
+                margin: EdgeInsets.zero,
+                color: const Color(0xFF101D33),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.explore, color: Color(0xFF8AF0C8)),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Discovery mode: tap around and unlock hidden reactions.',
+                          style: TextStyle(
+                            color: Color(0xFFCFE7FF),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      FilledButton.tonal(
+                        onPressed: () {
+                          if (all.isEmpty) {
+                            return;
+                          }
+                          final pick = all[math.Random().nextInt(all.length)];
+                          _openRapidCard(pick);
+                        },
+                        child: const Text('Surprise Me'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: () {
+                          setState(() {
+                            _heroIndexes = _pickHeroIndexes();
+                            _foundHeroes.clear();
+                          });
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('New discovery hunt started.')),
+                          );
+                        },
+                        child: const Text('New Hunt'),
+                      ),
+                    ],
+                  ),
+                ),
               ),
               const SizedBox(height: 10),
               Card(
@@ -9634,6 +10131,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                           rarity: _rarityForDeckIndex(index),
                           title: scenario.title,
                           icon: scenario.icon,
+                          isHero: _isHeroIndex(index),
                           onTap: () => _openRapidCard(index),
                           child: Card(
                             color: const Color(0xFF0E1B31),
@@ -9706,6 +10204,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
 
   final List<Uint8List> _frames = [];
   final TextEditingController _nameController = TextEditingController();
+  final FaceRecognitionEngine _faceEngine = FaceRecognitionEngine();
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
       performanceMode: FaceDetectorMode.accurate,
@@ -9720,7 +10219,6 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   bool _autoRunning = false;
   int _stepIndex = 0;
   int _stepFrames = 0;
-  int _uploaded = 0;
   String _status = '';
   String _error = '';
   bool _isFrontCamera = true;
@@ -9880,6 +10378,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
   void dispose() {
     _autoRunning = false;
     _controller?.dispose();
+    unawaited(_faceEngine.dispose());
     _faceDetector.close();
     _nameController.dispose();
     _tts?.stop();
@@ -10111,7 +10610,6 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       });
     } finally {
       _autoRunning = false;
-      if (!mounted) return;
     }
   }
 
@@ -10157,11 +10655,20 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     setState(() {
       _uploading = true;
       _error = '';
-      _status = 'Queueing face samples...';
+      _status = 'Saving face samples...';
     });
     final frames = List<Uint8List>.from(_frames);
     _frames.clear();
     try {
+      try {
+        await _saveLocalEnrollment(name: name, frames: frames);
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _status = 'Local save skipped: $e';
+          });
+        }
+      }
       await _EnrollmentUploadQueue.enqueueFrames(
         personName: name,
         frames: frames,
@@ -10181,6 +10688,61 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       }
       if (mounted) {
         Navigator.of(context).pop(true);
+      }
+    }
+  }
+
+  Future<void> _saveLocalEnrollment({
+    required String name,
+    required List<Uint8List> frames,
+  }) async {
+    if (frames.isEmpty) {
+      return;
+    }
+    await _faceEngine.initialize(useGpu: false);
+    var saved = 0;
+
+    // Prepare directory to save captured images for this user
+    try {
+      for (var i = 0; i < frames.length; i++) {
+        final frame = frames[i];
+        // Save original JPEG/frame bytes for user inspection
+        try {
+          await _saveFaceSampleBytes(
+            name: name,
+            bytes: frame,
+            prefix: 'enrollment',
+            index: i,
+          );
+        } catch (_) {}
+
+        final decoded = await _decodeImageToRgbBytes(frame);
+        if (decoded == null) {
+          continue;
+        }
+        await _faceEngine.enroll(
+          name,
+          TransferableTypedData.fromList(<Uint8List>[decoded.rgbBytes]),
+          <String, dynamic>{
+            'width': decoded.width,
+            'height': decoded.height,
+          },
+        );
+        saved += 1;
+      }
+
+      if (mounted) {
+        setState(() {
+          _status = saved > 0
+              ? 'Saved $saved local face sample${saved == 1 ? '' : 's'}'
+              : 'No local samples were saved';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'Local save error: $e';
+        });
       }
     }
   }
@@ -10228,6 +10790,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
         ? 'Finish Enrollment'
         : 'Capture: ${_steps[_stepIndex]}';
 
+    // ignore: deprecated_member_use
     return WillPopScope(
       onWillPop: () async => false,
       child: Scaffold(
@@ -10290,10 +10853,7 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
                     ? Stack(
                         children: [
                           Center(
-                            child: AspectRatio(
-                              aspectRatio: _controller!.value.aspectRatio,
-                              child: CameraPreview(_controller!),
-                            ),
+                            child: _buildCameraPreview(_controller!),
                           ),
                           const Positioned.fill(child: _OvalFaceGuideOverlay()),
                           Positioned(
@@ -10931,13 +11491,18 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   final String _apiKey =
       const String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
 
+  final FaceRecognitionEngine _faceEngine = FaceRecognitionEngine();
   CameraController? _controller;
   Timer? _loopTimer;
   bool _busy = false;
+  bool _localRecognitionActive = false;
+  bool _localFrameInFlight = false;
   String _token = '';
   String _status = 'Starting camera...';
   String _topName = 'Unknown';
   double _topScore = 0.0;
+  String _localTopName = 'Unknown';
+  double _localTopScore = 0.0;
   List<Map<String, dynamic>> _liveFaces = const [];
   int _imgW = 0;
   int _imgH = 0;
@@ -10949,6 +11514,25 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   String _lastSavedInfo = 'No recognition location saved yet';
   bool _unknownPromptOpen = false;
   DateTime? _lastUnknownPromptAt;
+  DateTime _lastLocalFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
+  StreamSubscription<RecognitionResult>? _localRecognitionSubscription;
+  final Map<String, DateTime> _lastRecognitionSaveAt = {};
+  static const Duration _recognitionSaveCooldown = Duration(seconds: 12);
+
+  // Backoff state for the cloud identify loop so a struggling free-tier backend
+  // (502 / cold-start timeouts) isn't hammered every cycle.
+  int _identifyFailureStreak = 0;
+  DateTime _nextIdentifyAllowedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _registerIdentifyFailure(String message) {
+    _identifyFailureStreak += 1;
+    final backoffSeconds = math.min(3 * _identifyFailureStreak, 30);
+    _nextIdentifyAllowedAt =
+        DateTime.now().add(Duration(seconds: backoffSeconds));
+    if (mounted) {
+      setState(() => _status = message);
+    }
+  }
 
   String _firstNameOnly(String fullName) {
     final trimmed = fullName.trim();
@@ -10957,6 +11541,21 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     }
     final first = trimmed.split(RegExp(r'\s+')).first.trim();
     return first.isEmpty ? trimmed : first;
+  }
+
+  bool _shouldSaveRecognitionSnapshot(String name) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty || trimmed.toLowerCase() == 'unknown') {
+      return false;
+    }
+    final key = trimmed.toLowerCase();
+    final now = DateTime.now();
+    final last = _lastRecognitionSaveAt[key];
+    if (last != null && now.difference(last) < _recognitionSaveCooldown) {
+      return false;
+    }
+    _lastRecognitionSaveAt[key] = now;
+    return true;
   }
 
   @override
@@ -10969,7 +11568,80 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   void dispose() {
     _loopTimer?.cancel();
     _controller?.dispose();
+    _localRecognitionSubscription?.cancel();
+    unawaited(_faceEngine.dispose());
     super.dispose();
+  }
+
+  Future<void> _startLocalRecognition(CameraController controller) async {
+    if (_localRecognitionActive) {
+      return;
+    }
+
+    await _faceEngine.initialize(useGpu: false);
+    await _localRecognitionSubscription?.cancel();
+    _localRecognitionSubscription =
+        _faceEngine.recognitionStream.listen((result) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _localTopName = result.userId ?? 'Unknown';
+        _localTopScore = result.score;
+        _status = result.userId == null
+            ? 'On-device recognition: unknown'
+            : 'On-device recognition: ${result.userId}';
+      });
+    });
+
+    await controller.startImageStream((CameraImage image) {
+      final now = DateTime.now();
+      if (_localFrameInFlight ||
+          now.difference(_lastLocalFrameAt).inMilliseconds < 280) {
+        return;
+      }
+      _localFrameInFlight = true;
+      _lastLocalFrameAt = now;
+      try {
+        _faceEngine.processCameraImageWithRotation(
+          image,
+          rotationDegrees: controller.description.sensorOrientation,
+        );
+      } finally {
+        _localFrameInFlight = false;
+      }
+    });
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _localRecognitionActive = true;
+      _status = 'On-device live recognition running';
+    });
+
+    _loopTimer?.cancel();
+    _loopTimer = Timer.periodic(const Duration(days: 1), (_) {});
+  }
+
+  Future<void> _stopLocalRecognition() async {
+    if (!_localRecognitionActive) {
+      return;
+    }
+    final ctrl = _controller;
+    if (ctrl != null) {
+      try {
+        await ctrl.stopImageStream();
+      } catch (_) {}
+    }
+    _loopTimer?.cancel();
+    _loopTimer = null;
+    _localRecognitionActive = false;
+    if (mounted) {
+      setState(() {
+        _status = 'On-device live recognition paused';
+      });
+    }
   }
 
   Future<void> _setup() async {
@@ -11010,7 +11682,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         setState(() => _status = 'Live recognition running');
       }
 
-      _loopTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      _loopTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
         _captureAndRecognize();
       });
       await _captureAndRecognize();
@@ -11137,19 +11809,86 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     if (!mounted) {
       return;
     }
+    await _faceEngine.initialize(useGpu: false);
+    try {
+      final bytes = base64Decode(imageB64);
+      await _saveFaceSampleBytes(
+        name: cleanName,
+        bytes: bytes,
+        prefix: 'unknown_face',
+      );
+      if (mounted) {
+        setState(() {
+          _status = 'Saved unknown face locally as $cleanName';
+          _topName = _firstNameOnly(cleanName);
+          _topScore = 1.0;
+          _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
+        });
+      }
+      final decoded = await _decodeImageToRgbBytes(bytes);
+      if (decoded != null) {
+        await _faceEngine.enroll(
+          cleanName,
+          TransferableTypedData.fromList(<Uint8List>[decoded.rgbBytes]),
+          <String, dynamic>{
+            'width': decoded.width,
+            'height': decoded.height,
+          },
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'Local unknown save failed: $e';
+        });
+      }
+    }
+
     final api = buildBackendApi();
-    final res = await api.enrollFace(person: cleanName, imageB64: imageB64);
+    final backendUrl = api.baseUrl;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saving to backend: $backendUrl'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+
+    final remoteFilename =
+        'unknown_face_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final res = await api.enrollFace(
+      person: cleanName,
+      imageB64: imageB64,
+      filename: remoteFilename,
+    );
     if (res['ok'] != true) {
-      setState(() {
-        _status =
-            'Save unknown failed: ${(res['error'] ?? 'backend rejected').toString()}';
-      });
+      if (mounted) {
+        setState(() {
+          _status =
+              'Backend save failed: ${(res['error'] ?? 'backend rejected').toString()}';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Backend save failed on: $backendUrl'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
       return;
     }
-    setState(() {
-      _status = 'Saved unknown as $cleanName';
-      _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
-    });
+    if (mounted) {
+      setState(() {
+        _status = 'Saved unknown as $cleanName';
+        _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saved to backend: $backendUrl'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _promptAndSaveUnknownFace(String imageB64) async {
@@ -11200,6 +11939,15 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     if (!mounted || ctrl == null || !ctrl.value.isInitialized || _busy) {
       return;
     }
+    // Skip background cycles while backing off from recent backend errors. The
+    // manual "Recognize Now" button (interactive) always goes through.
+    if (!interactive && DateTime.now().isBefore(_nextIdentifyAllowedAt)) {
+      return;
+    }
+    final hadLocalStream = _localRecognitionActive;
+    if (hadLocalStream) {
+      await _stopLocalRecognition();
+    }
     _busy = true;
     try {
       if (!await _ensureToken()) {
@@ -11239,7 +11987,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                 },
               }),
             )
-            .timeout(const Duration(seconds: 8));
+            .timeout(const Duration(seconds: 20));
       }
 
       var res = await sendIdentify();
@@ -11252,11 +12000,17 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       }
 
       if (res.statusCode != 200) {
-        if (mounted) {
-          setState(() => _status = 'Identify error: ${res.statusCode}');
-        }
+        _registerIdentifyFailure(
+          (res.statusCode == 502 || res.statusCode == 503)
+              ? 'Backend waking up (HTTP ${res.statusCode})… retrying shortly'
+              : 'Identify error: ${res.statusCode}',
+        );
         return;
       }
+
+      // Got a healthy response: clear any backoff.
+      _identifyFailureStreak = 0;
+      _nextIdentifyAllowedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final data = body['data'] as Map<String, dynamic>?;
@@ -11323,6 +12077,14 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                   ? 'Already saved recently for $name at $_currentLocationLabel'
                   : 'Save pending for $name');
 
+      if (detected && _shouldSaveRecognitionSnapshot(name)) {
+        unawaited(_saveFaceSampleBytes(
+          name: name,
+          bytes: bytes,
+          prefix: 'recognition',
+        ));
+      }
+
       if (mounted) {
         setState(() {
           _topName = _firstNameOnly(name);
@@ -11351,18 +12113,23 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
         await _promptAndSaveUnknownFace(imageB64);
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _status = 'Live loop error: $e');
-      }
+      _registerIdentifyFailure(
+        e is TimeoutException
+            ? 'Backend slow to respond… retrying shortly'
+            : 'Connection issue… retrying shortly',
+      );
     } finally {
       _busy = false;
+      if (hadLocalStream && mounted) {
+        await _startLocalRecognition(ctrl);
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final ctrl = _controller;
-    final paused = _loopTimer == null;
+    final paused = !_localRecognitionActive;
     return Scaffold(
       appBar: AppBar(title: Text(widget.pageTitle)),
       body: Column(
@@ -11378,10 +12145,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                       fit: StackFit.expand,
                       children: [
                         Center(
-                          child: AspectRatio(
-                            aspectRatio: ctrl.value.aspectRatio,
-                            child: CameraPreview(ctrl),
-                          ),
+                          child: _buildCameraPreview(ctrl),
                         ),
                         Positioned.fill(
                           child: IgnorePointer(
@@ -11414,7 +12178,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                                     Text(
                                       widget.counterMode
                                           ? 'Visible Faces: ${_liveFaces.length}'
-                                          : 'Recognized: $_topName',
+                                          : 'Recognized: ${_localTopName == 'Unknown' ? _topName : _localTopName}',
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,
@@ -11424,7 +12188,7 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                                     const SizedBox(height: 2),
                                     if (!widget.counterMode)
                                       Text(
-                                        'Confidence: ${(_topScore * 100).toStringAsFixed(1)}%',
+                                        'Confidence: ${((_localTopScore > 0 ? _localTopScore : _topScore) * 100).toStringAsFixed(1)}%',
                                         style: const TextStyle(
                                             color: Colors.white70),
                                       ),
@@ -11541,24 +12305,16 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
                       label: const Text('Refresh Location'),
                     ),
                     ElevatedButton.icon(
-                      onPressed: () {
-                        if (_loopTimer == null) {
-                          _loopTimer =
-                              Timer.periodic(const Duration(seconds: 2), (_) {
-                            _captureAndRecognize();
-                          });
-                          setState(() => _status = 'Live recognition resumed');
-                        }
-                      },
+                      onPressed: ctrl == null || _localRecognitionActive
+                          ? null
+                          : () => _startLocalRecognition(ctrl),
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('Resume Live'),
                     ),
                     ElevatedButton.icon(
-                      onPressed: () {
-                        _loopTimer?.cancel();
-                        _loopTimer = null;
-                        setState(() => _status = 'Live recognition paused');
-                      },
+                      onPressed: !_localRecognitionActive
+                          ? null
+                          : _stopLocalRecognition,
                       icon: const Icon(Icons.pause),
                       label: const Text('Pause Live'),
                     ),
@@ -12257,7 +13013,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, -z * 80)
+                    ..translateByVector3(Vector3(0.0, 0.0, -z * 80))
                     ..rotateX(_activityDeckMode ? z : 0),
                   child: _TimelineActivityTile(
                     title: (a['action'] ?? 'Activity').toString(),
@@ -12344,7 +13100,11 @@ class _UsersPageState extends State<UsersPage> {
 
   int _loginCount(Map<String, dynamic> row) {
     final logs = (row['logins'] as List?) ?? const [];
-    return logs.length;
+    if (logs.isNotEmpty) {
+      return logs.length;
+    }
+    final count = int.tryParse((row['logins_count'] ?? 0).toString());
+    return count ?? 0;
   }
 
   int _createdStamp(Map<String, dynamic> row) {
@@ -12768,7 +13528,7 @@ class _UsersPageState extends State<UsersPage> {
           alignment: Alignment.center,
           transform: Matrix4.identity()
             ..setEntry(3, 2, 0.001)
-            ..translate(0.0, 0.0, zShift)
+            ..translateByVector3(Vector3(0.0, 0.0, zShift))
             ..rotateX(rotateX),
           child: _gridMode
               ? tileChild
@@ -13231,7 +13991,7 @@ class _FaceSearchPageState extends State<FaceSearchPage> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: Card(child: ListTile(title: Text(n))),
                 ),
@@ -13880,7 +14640,7 @@ class _FaceStatsPageState extends State<FaceStatsPage> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: card,
                 ),
@@ -14143,7 +14903,7 @@ class _AnalyticsPageState extends State<AnalyticsPage> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: _TimelineActivityTile(
                     title: (a['action'] ?? '-').toString(),
@@ -14279,7 +15039,7 @@ class _ServicesHubPageState extends State<ServicesHubPage> {
           alignment: Alignment.center,
           transform: Matrix4.identity()
             ..setEntry(3, 2, 0.001)
-            ..translate(0.0, 0.0, zShift)
+            ..translateByVector3(Vector3(0.0, 0.0, zShift))
             ..rotateX(rotateX),
           child: Card(
             child: ListTile(
@@ -14347,11 +15107,12 @@ class _ServicesHubPageState extends State<ServicesHubPage> {
       for (final item in filteredSecure) {
         lines.add('SECURE ${item['method'] ?? 'GET'} ${item['path'] ?? ''}');
       }
+      final messenger = ScaffoldMessenger.of(context);
       await Clipboard.setData(ClipboardData(text: lines.join('\n')));
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         const SnackBar(content: Text('Endpoint catalog copied')),
       );
     }
@@ -14963,7 +15724,7 @@ class _DatabaseBridgePageState extends State<DatabaseBridgePage> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 8),
@@ -15510,14 +16271,6 @@ class _SystemInfoPageState extends State<SystemInfoPage> {
 
   @override
   Widget build(BuildContext context) {
-    final uptimeRow = _rows.firstWhere(
-      (row) => (row['label'] ?? '').toLowerCase().contains('uptime'),
-      orElse: () => const {'label': 'Uptime', 'value': 'n/a'},
-    );
-    final envRow = _rows.firstWhere(
-      (row) => (row['label'] ?? '').toLowerCase().contains('environment'),
-      orElse: () => const {'label': 'Environment', 'value': 'production'},
-    );
     return Scaffold(
       appBar: AppBar(title: const Text('System Info')),
       body: ListView(
@@ -16948,7 +17701,8 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                             alignment: Alignment.center,
                             transform: Matrix4.identity()
                               ..setEntry(3, 2, 0.001)
-                              ..translate(offset * 1.8, 0.0, -18 * (1 - depth))
+                              ..translateByVector3(
+                                  Vector3(offset * 1.8, 0.0, -18 * (1 - depth)))
                               ..rotateY(-offset * 0.1 * effectiveDepth),
                             child: ChoiceChip(
                               label: Text(style),
@@ -17193,8 +17947,8 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                       alignment: Alignment.center,
                       transform: Matrix4.identity()
                         ..setEntry(3, 2, 0.001)
-                        ..translate(
-                            0.0, 0.0, -(1 - depthFactor) * 60 * effectiveDepth)
+                        ..translateByVector3(Vector3(
+                            0.0, 0.0, -(1 - depthFactor) * 60 * effectiveDepth))
                         ..rotateY((i - _selectedGenerationProfile) *
                             0.08 *
                             effectiveDepth),
@@ -17424,7 +18178,8 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                     alignment: Alignment.center,
                     transform: Matrix4.identity()
                       ..setEntry(3, 2, 0.001)
-                      ..translate(0.0, 0.0, -(1 - depthFactor) * 64 * global3d)
+                      ..translateByVector3(
+                          Vector3(0.0, 0.0, -(1 - depthFactor) * 64 * global3d))
                       ..rotateX((1 - depthFactor) * 0.08 * global3d),
                     child: ListTile(
                       dense: true,
@@ -18003,7 +18758,7 @@ class _AdminRunbookPanelState extends State<_AdminRunbookPanel> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: ListTile(
                     dense: true,
@@ -18032,7 +18787,7 @@ class _AdminRunbookPanelState extends State<_AdminRunbookPanel> {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 0.001)
-                    ..translate(0.0, 0.0, zShift)
+                    ..translateByVector3(Vector3(0.0, 0.0, zShift))
                     ..rotateX(rotateX),
                   child: ExpansionTile(
                     title: Text(e['q'] ?? ''),
@@ -19295,3 +20050,4 @@ class _FullScreenMapPageState extends State<FullScreenMapPage> {
     );
   }
 }
+                                                                                                                                                                                                                                                                                      

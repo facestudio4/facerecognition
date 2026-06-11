@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 class FeatureForgeNode {
   final String id;
@@ -14464,8 +14465,7 @@ class _FeatureForgePageState extends State<FeatureForgePage>
     final q = _search.text.trim().toLowerCase();
     final base = featureForgeNodes.where((n) {
       final domainOk = _domain == 'All' || n.domain == _domain;
-      final text = ('${n.id} ${n.title} ${n.detail} ${n.domain}')
-          .toLowerCase();
+      final text = ('${n.id} ${n.title} ${n.detail} ${n.domain}').toLowerCase();
       final qOk = q.isEmpty || text.contains(q);
       return domainOk && qOk;
     }).toList();
@@ -14551,7 +14551,7 @@ class _FeatureForgePageState extends State<FeatureForgePage>
                     alignment: Alignment.center,
                     transform: Matrix4.identity()
                       ..setEntry(3, 2, 0.001)
-                      ..translate(0.0, 0.0, z)
+                      ..translateByVector3(Vector3(0.0, 0.0, z))
                       ..rotateX(rx),
                     child: Container(
                       decoration: BoxDecoration(

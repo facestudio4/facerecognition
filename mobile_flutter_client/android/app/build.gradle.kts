@@ -36,6 +36,17 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Disable R8 code/resource shrinking. The on-device TensorFlow Lite
+            // face engine ships native GPU-delegate classes that R8 flags as
+            // missing and fails the build on. Keeping shrinking off avoids
+            // stripping ML/native code; proguard-rules.pro keeps the right rules
+            // ready if shrinking is re-enabled later.
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
