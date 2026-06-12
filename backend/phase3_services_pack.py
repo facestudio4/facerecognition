@@ -65,6 +65,7 @@ class Phase3ServiceHub:
         self._sync_refresh_running = False
         self._sync_refresh_error = ""
         self._seed_persistent_faces()
+        self._seed_persistent_encodings()
 
     def _faces_root(self, ensure: bool = True) -> str:
         """Single source of truth for where face images live.
@@ -113,6 +114,93 @@ class Phase3ServiceHub:
                     continue
         except Exception:
             pass
+
+    def _encodings_path(self) -> str:
+        """Where the known-face encodings cache (pickle) lives.
+
+        Mirrors the legacy module's ENCODINGS_PATH resolution: honors the
+        FACE_ENCODINGS_PATH env var, otherwise sits next to the faces folder.
+        """
+        configured = os.environ.get("FACE_ENCODINGS_PATH", "").strip()
+        if configured:
+            return configured
+        faces_root = self._faces_root(ensure=False)
+        parent = os.path.dirname(faces_root) or os.path.join(self.base_dir, "database")
+        return os.path.join(parent, "face_encodings.pkl")
+
+    def _seed_persistent_encodings(self) -> None:
+        """Seed a precomputed encodings cache onto the (persistent) encodings path.
+
+        Computing embeddings for every enrolled face is CPU/RAM heavy and, on a
+        small free-tier host, times out or OOMs the recognition request. Shipping
+        a committed baseline cache (database/face_encodings.pkl) and copying it to
+        the live encodings path lets the server load the cache instead of
+        bulk-encoding on first use. Idempotent: never overwrites an existing cache.
+        """
+        try:
+            target = self._encodings_path()
+            baseline = os.path.join(self.base_dir, "database", "face_encodings.pkl")
+            if os.path.abspath(target) == os.path.abspath(baseline):
+                return  # already reading the committed baseline directly
+            if os.path.exists(target):
+                return  # a (newer) cache is already in place
+            if not os.path.exists(baseline):
+                return
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+            shutil.copyfile(baseline, target)
+        except Exception:
+            pass
+
+    def _incremental_encode_and_cache(self, saved_items) -> int:
+        """Encode only newly-saved face images and append them to the cache.
+
+        Avoids the expensive full recompute (which times out / OOMs small hosts)
+        on every enrollment. saved_items is a list of (person, image_path).
+        Returns the number of new encodings added.
+        """
+        if not saved_items:
+            return 0
+        try:
+            from frontend import facercognition as legacy
+        except Exception:
+            # Engine unavailable: invalidate so a later read lazily rebuilds.
+            self._mobile_known_encodings = None
+            self._mobile_known_loaded_at = 0.0
+            return 0
+        import pickle
+        enc_path = self._encodings_path()
+        known = None
+        try:
+            if enc_path and os.path.exists(enc_path):
+                with open(enc_path, "rb") as f:
+                    known = pickle.load(f)
+        except Exception:
+            known = None
+        if not isinstance(known, dict):
+            known = dict(self._mobile_known_encodings) if isinstance(self._mobile_known_encodings, dict) else {}
+        added = 0
+        for person, path in saved_items:
+            try:
+                img = cv2.imread(path)
+                if img is None:
+                    continue
+                emb = legacy.compute_embedding(img)
+                if emb is None:
+                    continue
+                known.setdefault(person, []).append(emb)
+                added += 1
+            except Exception:
+                continue
+        if added:
+            try:
+                os.makedirs(os.path.dirname(enc_path) or ".", exist_ok=True)
+                with open(enc_path, "wb") as f:
+                    pickle.dump(known, f)
+            except Exception:
+                pass
+            self._mobile_known_encodings = known
+            self._mobile_known_loaded_at = time.time()
+        return added
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
@@ -1813,6 +1901,7 @@ class Phase3ServiceHub:
 
         imported_files = 0
         imported_people = set()
+        saved_items = []
         allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
         for item in entries:
@@ -1848,21 +1937,24 @@ class Phase3ServiceHub:
                 f.flush()
             imported_files += 1
             imported_people.add(person)
+            saved_items.append((person, out_path))
 
-        self._mobile_known_encodings = None
-        self._mobile_known_loaded_at = 0.0
-        try:
-            from frontend import facercognition as legacy
-            enc_path = getattr(legacy, "ENCODINGS_PATH", "")
-            if enc_path and os.path.exists(enc_path):
-                os.remove(enc_path)
-        except Exception:
-            pass
+        # Incrementally encode only the newly-saved images and append them to the
+        # cache. A full recompute of every known face is what times out / OOMs the
+        # free-tier host, so we avoid it here.
+        added_encodings = 0
+        if refresh_after:
+            added_encodings = self._incremental_encode_and_cache(saved_items)
+        else:
+            self._mobile_known_encodings = None
+            self._mobile_known_loaded_at = 0.0
 
         known_count = None
-        refresh_state = {"scheduled": False, "running": bool(self._sync_refresh_running), "error": self._sync_refresh_error}
-        if refresh_after:
-            refresh_state = self.start_sync_refresh()
+        refresh_state = {
+            "scheduled": False,
+            "running": False,
+            "error": self._sync_refresh_error,
+        }
 
         return {
             "ok": imported_files == len(entries),
@@ -1871,6 +1963,7 @@ class Phase3ServiceHub:
                 "expected_frames": len(entries),
                 "frames_missing": len(entries) - imported_files,
                 "imported_people": sorted(imported_people),
+                "encodings_added": added_encodings,
                 "known_people_after_sync": known_count,
                 "faces_root": faces_root,
                 "refresh_after": bool(refresh_after),
