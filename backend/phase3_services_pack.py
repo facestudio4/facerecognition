@@ -2360,6 +2360,9 @@ class Phase3ServiceHub:
                     logins = []
             except Exception:
                 logins = []
+            # Report the true number of recorded logins, not just the size of the
+            # last-10 preview slice we send down.
+            total_logins = len(logins)
             logins = list(reversed(logins[-10:]))
 
             if role != "admin" and requester != uname_l and privacy_mode == "private" and requester not in set(allowed):
@@ -2381,7 +2384,7 @@ class Phase3ServiceHub:
                     "role": row["role"] or "user",
                     "created": row["created"] or "",
                     "logins": logins,
-                    "logins_count": len(logins),
+                    "logins_count": total_logins,
                     "privacy_mode": privacy_mode,
                     "private_profile_allowed": requester in set(allowed) if privacy_mode == "private" else True,
                     "reenroll_required": bool(int(row["reenroll_required"] or 0)),
