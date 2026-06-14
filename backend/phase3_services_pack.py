@@ -1787,9 +1787,70 @@ class Phase3ServiceHub:
             return self._mobile_known_encodings
         from frontend import facercognition as legacy
 
-        self._mobile_known_encodings = legacy.load_and_train(False)
+        known = legacy.load_and_train(False)
+        known = self._reconcile_face_encodings(legacy, known)
+        self._mobile_known_encodings = known
         self._mobile_known_loaded_at = now
-        return self._mobile_known_encodings
+        return known
+
+    def _reconcile_face_encodings(self, legacy, known):
+        """Ensure every person with face images on disk has at least one encoding.
+
+        Covers the case where a face was saved (folder + image present) but its
+        encoding never reached the cache — e.g. the frame wasn't cleanly
+        detectable at save time, or the cache predates the save. Only the missing
+        people are encoded, so this stays cheap.
+        """
+        try:
+            if not isinstance(known, dict):
+                known = {}
+            faces_root = self._faces_root(ensure=False)
+            if not os.path.isdir(faces_root):
+                return known
+            protected = {"known_faces", "archive", "__pycache__"}
+            allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+            added = 0
+            for name in os.listdir(faces_root):
+                if name.lower() in protected:
+                    continue
+                person_dir = os.path.join(faces_root, name)
+                if not os.path.isdir(person_dir):
+                    continue
+                if known.get(name):
+                    continue  # already has encodings
+                encs = []
+                try:
+                    imgs = [
+                        f for f in sorted(os.listdir(person_dir))
+                        if os.path.splitext(f)[1].lower() in allowed_ext
+                    ]
+                except Exception:
+                    imgs = []
+                for fname in imgs[:8]:
+                    try:
+                        img = cv2.imread(os.path.join(person_dir, fname))
+                        if img is None:
+                            continue
+                        emb = legacy.compute_embedding(img)
+                        if emb is not None:
+                            encs.append(emb)
+                    except Exception:
+                        continue
+                if encs:
+                    known[name] = encs
+                    added += 1
+            if added:
+                try:
+                    import pickle
+                    enc_path = self._encodings_path()
+                    os.makedirs(os.path.dirname(enc_path) or ".", exist_ok=True)
+                    with open(enc_path, "wb") as f:
+                        pickle.dump(known, f)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return known
 
     def _sanitize_face_name(self, value: str):
         text = str(value or "").strip()
