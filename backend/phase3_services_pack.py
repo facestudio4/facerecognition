@@ -362,6 +362,10 @@ class Phase3ServiceHub:
         if not self._column_exists(conn, "users", "gallery_scan_state"):
             # '' = never scanned, 'requested' = (re)run scan, 'done' = completed
             conn.execute("ALTER TABLE users ADD COLUMN gallery_scan_state TEXT DEFAULT ''")
+        if not self._column_exists(conn, "users", "gallery_total"):
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_total INTEGER DEFAULT 0")
+        if not self._column_exists(conn, "users", "gallery_scanned"):
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_scanned INTEGER DEFAULT 0")
         conn.execute("UPDATE users SET privacy_mode='public' WHERE privacy_mode IS NULL OR trim(privacy_mode)=''")
         conn.execute("UPDATE users SET privacy_allowed_json='[]' WHERE privacy_allowed_json IS NULL OR trim(privacy_allowed_json)=''")
         conn.execute(
@@ -1188,29 +1192,51 @@ class Phase3ServiceHub:
             if not self._table_exists(conn, "users"):
                 return {"ok": False, "error": "users table is missing"}
             self._ensure_users_privacy_columns(conn)
-            conn.execute(
-                "UPDATE users SET gallery_scan_state=? WHERE lower(username)=lower(?)",
-                (state, target),
-            )
+            if state == "requested":
+                # Reset progress so the bar restarts for the re-scan.
+                conn.execute(
+                    "UPDATE users SET gallery_scan_state=?, gallery_scanned=0 WHERE lower(username)=lower(?)",
+                    (state, target),
+                )
+            else:
+                conn.execute(
+                    "UPDATE users SET gallery_scan_state=? WHERE lower(username)=lower(?)",
+                    (state, target),
+                )
             conn.commit()
         self._log_activity("Gallery Rescan", f"state={state} for {target}", username=actor_username, role="admin")
         return {"ok": True, "data": {"username": target, "gallery_scan_state": state}}
 
-    def update_gallery_scan_state(self, username: str, state: str):
-        """Used by the app itself to mark its own scan progress."""
+    def update_gallery_scan_state(self, username: str, state: str, scanned=None, total=None):
+        """Used by the app itself to report its own scan progress."""
         uname = (username or "").strip()
         if not uname:
             return {"ok": False, "error": "username required"}
         state = (state or "").strip().lower()
         if state not in {"", "requested", "scanning", "done"}:
             state = "done"
+        sets = ["gallery_scan_state=?"]
+        vals = [state]
+        if total is not None:
+            try:
+                sets.append("gallery_total=?")
+                vals.append(max(0, int(total)))
+            except Exception:
+                pass
+        if scanned is not None:
+            try:
+                sets.append("gallery_scanned=?")
+                vals.append(max(0, int(scanned)))
+            except Exception:
+                pass
+        vals.append(uname)
         with self._connect() as conn:
             if not self._table_exists(conn, "users"):
                 return {"ok": False, "error": "users table is missing"}
             self._ensure_users_privacy_columns(conn)
             conn.execute(
-                "UPDATE users SET gallery_scan_state=? WHERE lower(username)=lower(?)",
-                (state, uname),
+                f"UPDATE users SET {', '.join(sets)} WHERE lower(username)=lower(?)",
+                vals,
             )
             conn.commit()
         return {"ok": True, "data": {"username": uname, "gallery_scan_state": state}}
@@ -2571,7 +2597,7 @@ class Phase3ServiceHub:
                 return []
             self._ensure_users_privacy_columns(conn)
             rows = conn.execute(
-                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at FROM users ORDER BY username LIMIT ?",
+                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at, gallery_scan_state, gallery_total, gallery_scanned FROM users ORDER BY username LIMIT ?",
                 (limit,),
             ).fetchall()
         out = []
@@ -2618,6 +2644,9 @@ class Phase3ServiceHub:
                     "private_profile_allowed": requester in set(allowed) if privacy_mode == "private" else True,
                     "reenroll_required": bool(int(row["reenroll_required"] or 0)),
                     "reenroll_requested_at": row["reenroll_requested_at"] or "",
+                    "gallery_scan_state": row["gallery_scan_state"] or "",
+                    "gallery_total": int(row["gallery_total"] or 0),
+                    "gallery_scanned": int(row["gallery_scanned"] or 0),
                 }
             )
         return out
@@ -3421,6 +3450,8 @@ class Phase3ServiceHub:
                         result = hub.update_gallery_scan_state(
                             username=username,
                             state=str(payload.get("state", "")).strip(),
+                            scanned=payload.get("scanned"),
+                            total=payload.get("total"),
                         )
                         self._send_json(200 if result.get("ok") else 400, result)
                         return
