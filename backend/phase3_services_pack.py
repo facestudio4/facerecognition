@@ -270,6 +270,20 @@ class Phase3ServiceHub:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_name ON recognition_location_events(recognized_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rec_loc_time ON recognition_location_events(event_time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_latest_rec_loc_name ON recognition_latest_locations(recognized_name)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gallery_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    submitted_by TEXT,
+                    candidate_name TEXT,
+                    score REAL,
+                    image_b64 TEXT NOT NULL,
+                    created TEXT,
+                    status TEXT DEFAULT 'pending'
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_reviews_status ON gallery_reviews(status)")
             self._backfill_latest_recognition_locations(conn)
             if self._table_exists(conn, "users"):
                 self._ensure_users_privacy_columns(conn)
@@ -345,6 +359,9 @@ class Phase3ServiceHub:
             conn.execute("ALTER TABLE users ADD COLUMN reenroll_required INTEGER DEFAULT 0")
         if not self._column_exists(conn, "users", "reenroll_requested_at"):
             conn.execute("ALTER TABLE users ADD COLUMN reenroll_requested_at TEXT DEFAULT ''")
+        if not self._column_exists(conn, "users", "gallery_scan_state"):
+            # '' = never scanned, 'requested' = (re)run scan, 'done' = completed
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_scan_state TEXT DEFAULT ''")
         conn.execute("UPDATE users SET privacy_mode='public' WHERE privacy_mode IS NULL OR trim(privacy_mode)=''")
         conn.execute("UPDATE users SET privacy_allowed_json='[]' WHERE privacy_allowed_json IS NULL OR trim(privacy_allowed_json)=''")
         conn.execute(
@@ -1061,6 +1078,157 @@ class Phase3ServiceHub:
             )
             conn.commit()
         return {"ok": True, "data": {"username": uname, "reenroll_required": False}}
+
+    # ---- Gallery auto-scan: review queue + rescan flag ----
+
+    def submit_gallery_review(self, submitted_by: str, candidate_name: str, score, image_b64: str):
+        """Store an uncertain gallery match for an admin to approve/reject."""
+        image_b64 = str(image_b64 or "").strip()
+        if not image_b64:
+            return {"ok": False, "error": "image_b64 required"}
+        candidate = self._sanitize_face_name(candidate_name) if candidate_name else ""
+        try:
+            score_val = float(score)
+        except Exception:
+            score_val = 0.0
+        created = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO gallery_reviews(submitted_by, candidate_name, score, image_b64, created, status) "
+                "VALUES(?,?,?,?,?, 'pending')",
+                (str(submitted_by or "").strip(), candidate, score_val, image_b64, created),
+            )
+            conn.commit()
+            review_id = cur.lastrowid
+        return {"ok": True, "data": {"id": review_id, "status": "pending"}}
+
+    def list_gallery_reviews(self, status: str = "pending", limit: int = 100, include_image: bool = True):
+        status = (status or "pending").strip().lower()
+        if status not in {"pending", "approved", "rejected", "all"}:
+            status = "pending"
+        limit = max(1, min(500, int(limit or 100)))
+        with self._connect() as conn:
+            if status == "all":
+                rows = conn.execute(
+                    "SELECT id, submitted_by, candidate_name, score, created, status, image_b64 "
+                    "FROM gallery_reviews ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, submitted_by, candidate_name, score, created, status, image_b64 "
+                    "FROM gallery_reviews WHERE status=? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+        out = []
+        for r in rows:
+            item = {
+                "id": r["id"],
+                "submitted_by": r["submitted_by"] or "",
+                "candidate_name": r["candidate_name"] or "",
+                "score": round(float(r["score"] or 0.0), 4),
+                "created": r["created"] or "",
+                "status": r["status"] or "pending",
+            }
+            if include_image:
+                item["image_b64"] = r["image_b64"] or ""
+            out.append(item)
+        return {"ok": True, "data": {"reviews": out, "count": len(out)}}
+
+    def decide_gallery_review(self, review_id, approve: bool, name_override: str, actor_username: str, actor_role: str):
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        try:
+            review_id = int(review_id)
+        except Exception:
+            return {"ok": False, "error": "invalid review id"}
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, candidate_name, image_b64, status FROM gallery_reviews WHERE id=?",
+                (review_id,),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "review not found"}
+            if (row["status"] or "pending") != "pending":
+                return {"ok": False, "error": "already decided"}
+
+        if not approve:
+            with self._connect() as conn:
+                conn.execute("UPDATE gallery_reviews SET status='rejected' WHERE id=?", (review_id,))
+                conn.commit()
+            return {"ok": True, "data": {"id": review_id, "status": "rejected"}}
+
+        person = self._sanitize_face_name(name_override) if name_override else (row["candidate_name"] or "")
+        if not person:
+            return {"ok": False, "error": "a person name is required to approve"}
+        try:
+            self.sync_known_faces(
+                [{"person": person, "filename": f"gallery_{review_id}.jpg", "image_b64": row["image_b64"]}],
+                clear_existing=False,
+                refresh_after=True,
+            )
+        except Exception as ex:
+            return {"ok": False, "error": f"save failed: {ex}"}
+        with self._connect() as conn:
+            conn.execute("UPDATE gallery_reviews SET status='approved', candidate_name=? WHERE id=?", (person, review_id))
+            conn.commit()
+        self._log_activity("Gallery Review Approved", f"#{review_id} -> {person}", username=actor_username, role="admin")
+        return {"ok": True, "data": {"id": review_id, "status": "approved", "person": person}}
+
+    def set_user_gallery_scan(self, target_username: str, state: str, actor_username: str, actor_role: str):
+        target = (target_username or "").strip()
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        if not target:
+            return {"ok": False, "error": "target username required"}
+        state = (state or "requested").strip().lower()
+        if state not in {"", "requested", "done"}:
+            state = "requested"
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": False, "error": "users table is missing"}
+            self._ensure_users_privacy_columns(conn)
+            conn.execute(
+                "UPDATE users SET gallery_scan_state=? WHERE lower(username)=lower(?)",
+                (state, target),
+            )
+            conn.commit()
+        self._log_activity("Gallery Rescan", f"state={state} for {target}", username=actor_username, role="admin")
+        return {"ok": True, "data": {"username": target, "gallery_scan_state": state}}
+
+    def update_gallery_scan_state(self, username: str, state: str):
+        """Used by the app itself to mark its own scan progress."""
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        state = (state or "").strip().lower()
+        if state not in {"", "requested", "scanning", "done"}:
+            state = "done"
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": False, "error": "users table is missing"}
+            self._ensure_users_privacy_columns(conn)
+            conn.execute(
+                "UPDATE users SET gallery_scan_state=? WHERE lower(username)=lower(?)",
+                (state, uname),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"username": uname, "gallery_scan_state": state}}
+
+    def get_gallery_scan_state(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return {"ok": True, "data": {"gallery_scan_state": ""}}
+            self._ensure_users_privacy_columns(conn)
+            row = conn.execute(
+                "SELECT gallery_scan_state FROM users WHERE lower(username)=lower(?) LIMIT 1",
+                (uname,),
+            ).fetchone()
+        state = (row["gallery_scan_state"] if row else "") or ""
+        return {"ok": True, "data": {"gallery_scan_state": state}}
 
     def update_user_privacy(self, target_username: str, privacy_mode: str, allowed_usernames, allowed_map_usernames, allowed_profile_usernames, actor_username: str, actor_role: str):
         target = (target_username or "").strip()
@@ -2722,6 +2890,23 @@ class Phase3ServiceHub:
                     self._send_json(200, {"ok": True, "data": hub.list_recent_activity(limit=limit)})
                     return
 
+                if path == "/api/mobile/gallery/scan-state":
+                    payload = self._token_payload() or {}
+                    username = (query.get("username", [""])[0]).strip() or str(payload.get("sub", "")).strip()
+                    self._send_json(200, hub.get_gallery_scan_state(username))
+                    return
+
+                if path == "/api/admin/gallery/reviews":
+                    payload = self._token_payload() or {}
+                    role = str(payload.get("role", "user")).strip().lower()
+                    if role != "admin":
+                        self._send_json(403, {"ok": False, "error": "admin role required"})
+                        return
+                    status = (query.get("status", ["pending"])[0]).strip()
+                    limit = int(query.get("limit", ["100"])[0])
+                    self._send_json(200, hub.list_gallery_reviews(status=status, limit=limit))
+                    return
+
                 if path == "/api/db/overview":
                     self._send_json(200, {"ok": True, "data": hub.get_db_overview()})
                     return
@@ -3216,6 +3401,55 @@ class Phase3ServiceHub:
                             limit = 0
                         result = hub.export_known_faces(person=person, limit=limit)
                         self._send_json(200, result)
+                        return
+
+                    if path == "/api/mobile/gallery/review":
+                        token_payload = self._token_payload() or {}
+                        submitter = str(token_payload.get("sub", "")).strip()
+                        result = hub.submit_gallery_review(
+                            submitted_by=str(payload.get("submitted_by", "")).strip() or submitter,
+                            candidate_name=str(payload.get("candidate_name", "")).strip(),
+                            score=payload.get("score", 0),
+                            image_b64=str(payload.get("image_b64", "")).strip(),
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/mobile/gallery/scan-state":
+                        token_payload = self._token_payload() or {}
+                        username = str(payload.get("username", "")).strip() or str(token_payload.get("sub", "")).strip()
+                        result = hub.update_gallery_scan_state(
+                            username=username,
+                            state=str(payload.get("state", "")).strip(),
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/gallery/review/decide":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        result = hub.decide_gallery_review(
+                            review_id=payload.get("id"),
+                            approve=bool(payload.get("approve", False)),
+                            name_override=str(payload.get("name", "")).strip(),
+                            actor_username=actor,
+                            actor_role=role,
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/gallery/rescan":
+                        token_payload = self._token_payload() or {}
+                        actor = str(token_payload.get("sub", "")).strip()
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        result = hub.set_user_gallery_scan(
+                            target_username=str(payload.get("username", "")).strip(),
+                            state=str(payload.get("state", "requested")).strip(),
+                            actor_username=actor,
+                            actor_role=role,
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
                         return
                 except ValueError as e:
                     self._send_json(400, {"ok": False, "error": str(e)})
