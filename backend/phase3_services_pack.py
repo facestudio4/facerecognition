@@ -577,7 +577,7 @@ class Phase3ServiceHub:
             return None  # not configured -> caller falls back to SMTP
         from_email = (os.environ.get("FACESTUDIO_SMTP_FROM", "").strip()
                       or os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
-                      or "shishirbhavsar4@gmail.com")
+                      or "facestudio4@gmail.com")
         from_name = os.environ.get("FACESTUDIO_EMAIL_FROM_NAME", "Face Studio").strip()
         payload = {
             "sender": {"email": from_email, "name": from_name or "Face Studio"},
@@ -619,9 +619,9 @@ class Phase3ServiceHub:
         http_error = http_result.get("error") if isinstance(http_result, dict) else None
 
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
-        user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
-        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "mlyu ajgr zorl foog") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
-        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "shishirbhavsar4@gmail.com").strip() or user
+        user = os.environ.get("FACESTUDIO_SMTP_USER", "facestudio4@gmail.com").strip()
+        password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
+        from_email = os.environ.get("FACESTUDIO_SMTP_FROM", "facestudio4@gmail.com").strip() or user
         port_text = os.environ.get("FACESTUDIO_SMTP_PORT", "587").strip()
         use_tls = os.environ.get("FACESTUDIO_SMTP_TLS", "1").strip().lower() not in ("0", "false", "no")
         use_ssl = os.environ.get("FACESTUDIO_SMTP_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
