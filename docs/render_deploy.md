@@ -33,7 +33,25 @@ FACE_STUDIO_MOBILE_UPDATE_NOTES=Face Studio mobile v0.1.0+31 fixes the stretched
 FACE_STUDIO_MOBILE_FORCE_UPDATE=false
 ```
 
-Optional (email OTP/reset):
+## Email (verification codes) — REQUIRED for signup OTP
+
+**Render blocks outbound SMTP** (you'll see `SMTP network error: [Errno 101]
+Network is unreachable`), so Gmail/SMTP can never send from Render. Use an HTTP
+email API instead. Recommended: **Brevo** (free 300 emails/day, no domain needed).
+
+Setup:
+1. Create a free account at brevo.com.
+2. Settings → Senders: add and **verify** your sender email (the same value you
+   use for `FACESTUDIO_SMTP_FROM`, e.g. your Gmail). Click the confirmation link.
+3. Settings → SMTP & API → **API Keys**: create a key.
+4. On Render set:
+   - `FACESTUDIO_BREVO_API_KEY=<the key>`
+   - `FACESTUDIO_SMTP_FROM=<your verified sender email>`
+   - `FACESTUDIO_EMAIL_FROM_NAME=Face Studio` (optional)
+5. Redeploy. When `FACESTUDIO_BREVO_API_KEY` is set, the backend sends via Brevo's
+   HTTPS API (port 443, not blocked) instead of SMTP.
+
+Optional (SMTP — local-dev fallback only, does NOT work on Render):
 - `FACESTUDIO_SMTP_HOST`
 - `FACESTUDIO_SMTP_USER`
 - `FACESTUDIO_SMTP_APP_PASSWORD`

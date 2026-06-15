@@ -7,6 +7,8 @@ import shutil
 import threading
 import time
 import urllib.parse
+import urllib.request
+import urllib.error
 import base64
 import hashlib
 import hmac
@@ -566,7 +568,56 @@ class Phase3ServiceHub:
             return True
         return password == stored
 
+    def _send_email_http(self, to_email: str, subject: str, body: str):
+        """Send email via an HTTP API (port 443). Required on hosts like Render
+        that block outbound SMTP. Currently supports Brevo (no domain needed —
+        just verify the sender address in the Brevo dashboard)."""
+        api_key = os.environ.get("FACESTUDIO_BREVO_API_KEY", "").strip()
+        if not api_key:
+            return None  # not configured -> caller falls back to SMTP
+        from_email = (os.environ.get("FACESTUDIO_SMTP_FROM", "").strip()
+                      or os.environ.get("FACESTUDIO_SMTP_USER", "").strip()
+                      or "shishirbhavsar4@gmail.com")
+        from_name = os.environ.get("FACESTUDIO_EMAIL_FROM_NAME", "Face Studio").strip()
+        payload = {
+            "sender": {"email": from_email, "name": from_name or "Face Studio"},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "textContent": body,
+        }
+        try:
+            req = urllib.request.Request(
+                "https://api.brevo.com/v3/smtp/email",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "api-key": api_key,
+                    "Content-Type": "application/json",
+                    "accept": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                if 200 <= resp.status < 300:
+                    return {"ok": True}
+                return {"ok": False, "error": f"Email API HTTP {resp.status}"}
+        except urllib.error.HTTPError as ex:
+            detail = ""
+            try:
+                detail = ex.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = ""
+            return {"ok": False, "error": f"Email API error {ex.code}: {detail}"}
+        except Exception as ex:
+            return {"ok": False, "error": f"Email API send failed: {ex}"}
+
     def _send_email(self, to_email: str, subject: str, body: str):
+        # Prefer an HTTP email API when configured (works where SMTP is blocked,
+        # e.g. Render). Falls back to SMTP for local/dev use.
+        http_result = self._send_email_http(to_email, subject, body)
+        if http_result is not None and http_result.get("ok") is True:
+            return http_result
+        http_error = http_result.get("error") if isinstance(http_result, dict) else None
+
         host = os.environ.get("FACESTUDIO_SMTP_HOST", "smtp.gmail.com").strip()
         user = os.environ.get("FACESTUDIO_SMTP_USER", "shishirbhavsar4@gmail.com").strip()
         password = (os.environ.get("FACESTUDIO_SMTP_APP_PASSWORD", "mlyu ajgr zorl foog") or os.environ.get("FACESTUDIO_SMTP_PASS", "")).strip()
@@ -649,6 +700,8 @@ class Phase3ServiceHub:
             except Exception as ex:
                 last_error = str(ex)
 
+        if http_error:
+            last_error = f"{http_error}; SMTP fallback also failed: {last_error}"
         return {"ok": False, "error": f"Failed to send email: {last_error}"}
 
     def authenticate_user(self, identifier: str, password: str):

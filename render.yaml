@@ -45,6 +45,13 @@ services:
         value: "0.03"
       - key: FACESTUDIO_SIGNUP_ALLOW_SMTP_FALLBACK
         value: "1"
+      # Render blocks outbound SMTP, so verification emails must go over an
+      # HTTP email API. Set FACESTUDIO_BREVO_API_KEY (Brevo, free 300/day) and
+      # verify the sender address (FACESTUDIO_SMTP_FROM) in the Brevo dashboard.
+      - key: FACESTUDIO_BREVO_API_KEY
+        sync: false
+      - key: FACESTUDIO_EMAIL_FROM_NAME
+        value: Face Studio
       - key: FACESTUDIO_SMTP_HOST
         sync: false
       - key: FACESTUDIO_SMTP_USER
