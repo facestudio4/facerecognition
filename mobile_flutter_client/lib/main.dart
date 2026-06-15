@@ -25,6 +25,7 @@ import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 import 'face_engine/face_recognition_engine.dart';
 import 'face_engine/recognition_result.dart';
+import 'gallery_scan_service.dart';
 import 'expansion/rapid_growth_pack.dart' as rapid_pack;
 
 const Color _kBg = Color(0xFF1A1A2E);
@@ -3709,6 +3710,141 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Identify a single face crop against the known faces. Returns the raw
+  // response (data.best.name / data.best.score). Used by the gallery scanner.
+  Future<Map<String, dynamic>> identifyFace({required String imageB64}) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/identify'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'image_b64': imageB64, 'top_k': 1}),
+        )
+        .timeout(const Duration(seconds: 25));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  // --- Gallery auto-scan ---
+
+  Future<Map<String, dynamic>> submitGalleryReview({
+    required String candidateName,
+    required double score,
+    required String imageB64,
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/gallery/review'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'candidate_name': candidateName,
+            'score': score,
+            'image_b64': imageB64,
+          }),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getGalleryScanState() async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http.get(
+      Uri.parse('$_base/api/mobile/gallery/scan-state'),
+      headers: {'Authorization': 'Bearer $_token'},
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> updateGalleryScanState(String state,
+      {int? scanned, int? total}) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final payload = <String, dynamic>{'state': state};
+    if (scanned != null) payload['scanned'] = scanned;
+    if (total != null) payload['total'] = total;
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/gallery/scan-state'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(payload),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getGalleryReviews(
+      {String status = 'pending', int limit = 100}) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http.get(
+      Uri.parse('$_base/api/admin/gallery/reviews?status=$status&limit=$limit'),
+      headers: {'Authorization': 'Bearer $_token'},
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> decideGalleryReview({
+    required int id,
+    required bool approve,
+    String name = '',
+  }) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/gallery/review/decide'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'id': id, 'approve': approve, 'name': name}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> requestGalleryRescan(String username) async {
+    final ok = await ensureToken();
+    if (!ok) {
+      return {'ok': false, 'error': 'Token unavailable'};
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/gallery/rescan'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'username': username, 'state': 'requested'}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> createFacePerson({
     required String person,
   }) async {
@@ -4145,7 +4281,7 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   bool _ready = false;
   String _username = '';
   bool _isAdmin = false;
@@ -4159,6 +4295,7 @@ class _AuthGateState extends State<AuthGate>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _sessionBannerController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 5200),
@@ -4167,6 +4304,72 @@ class _AuthGateState extends State<AuthGate>
     _checkForAppUpdate();
     _startUpdateRecheckLoop();
     _loadSession();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The gallery auto-scan only runs while the app is in the foreground.
+    if (state == AppLifecycleState.resumed) {
+      if (_username.trim().isNotEmpty) {
+        unawaited(_maybeRunGalleryScan(_username));
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      GalleryScanService.instance.stop();
+    }
+  }
+
+  // Runs the gallery auto-scan when appropriate: first time for a new account,
+  // or when an admin has requested a re-scan. Resumes across app sessions until
+  // every recent photo is processed.
+  Future<void> _maybeRunGalleryScan(String username) async {
+    final clean = username.trim();
+    if (clean.isEmpty || GalleryScanService.instance.isRunning) {
+      return;
+    }
+    final api = buildBackendApi();
+    final prefs = await SharedPreferences.getInstance();
+    final key = clean.toLowerCase();
+    final initiatedKey = 'fs_gallery_initiated_$key';
+    final pendingKey = 'fs_gallery_pending_$key';
+
+    var pending = prefs.getBool(pendingKey) ?? false;
+    var reset = false;
+
+    try {
+      final st = await api.getGalleryScanState();
+      final stateVal = (st['data']?['gallery_scan_state'] ?? '').toString();
+      if (stateVal == 'requested') {
+        pending = true;
+        reset = true; // admin re-scan: start fresh
+      }
+    } catch (_) {}
+
+    // First time ever on this device for this account -> scan once.
+    if (!pending && prefs.getBool(initiatedKey) != true) {
+      pending = true;
+    }
+    if (!pending) {
+      return;
+    }
+
+    await prefs.setBool(initiatedKey, true);
+    await prefs.setBool(pendingKey, true);
+    unawaited(api.updateGalleryScanState('scanning'));
+    unawaited(GalleryScanService.instance.start(
+      identify: (b64) => api.identifyFace(imageB64: b64),
+      enroll: (person, b64, fn) =>
+          api.enrollFace(person: person, imageB64: b64, filename: fn),
+      submitReview: (name, score, b64) => api.submitGalleryReview(
+          candidateName: name, score: score, imageB64: b64),
+      resetProcessed: reset,
+      onProgress: (scanned, total, state) =>
+          api.updateGalleryScanState(state, scanned: scanned, total: total),
+      onComplete: () async {
+        final p = await SharedPreferences.getInstance();
+        await p.setBool(pendingKey, false);
+      },
+    ));
   }
 
   void _startUpdateRecheckLoop() {
@@ -4476,6 +4679,7 @@ class _AuthGateState extends State<AuthGate>
     });
     unawaited(_EnrollmentUploadQueue.processQueue());
     await _maybeRunFirstTimeEnrollment(username);
+    unawaited(_maybeRunGalleryScan(username));
   }
 
   Future<void> _onLogout() async {
@@ -4494,6 +4698,8 @@ class _AuthGateState extends State<AuthGate>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    GalleryScanService.instance.stop();
     _updateRecheckTimer?.cancel();
     _sessionBannerController.dispose();
     super.dispose();
@@ -7428,6 +7634,7 @@ class _ThreeDDeckCard extends StatefulWidget {
   final _RapidRarity rarity;
   final String title;
   final IconData icon;
+  final Color tint;
   final bool isHero;
   final VoidCallback? onTap;
 
@@ -7437,6 +7644,7 @@ class _ThreeDDeckCard extends StatefulWidget {
     required this.rarity,
     required this.title,
     required this.icon,
+    required this.tint,
     this.isHero = false,
     this.onTap,
   });
@@ -7445,26 +7653,150 @@ class _ThreeDDeckCard extends StatefulWidget {
   State<_ThreeDDeckCard> createState() => _ThreeDDeckCardState();
 }
 
+// Distinct idle-motion personalities so no two deck cards animate alike.
+enum _DeckMotion { bob, sway, pendulum, orbit, breathe, drift, flip, figure8 }
+
 class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   int _activation = 0;
   late final AnimationController _floatController;
+  late final AnimationController _spinController;
+  late final _DeckMotion _style;
+  late final double _phase;
+  late final double _depth;
+  late final double _sweepDir;
   double _dragTiltX = 0;
   double _dragTiltY = 0;
+  bool _pressed = false;
 
   @override
   void initState() {
     super.initState();
+    final seed = widget.index;
+    // Every card gets its own movement style, rhythm, phase and 3D depth so the
+    // grid feels alive and varied instead of a wall of identical bobbing cards.
+    _style = _DeckMotion.values[seed % _DeckMotion.values.length];
+    _phase = (seed % 17) * 0.37;
+    _depth = 0.0012 + (seed % 6) * 0.00035;
+    _sweepDir = seed.isEven ? 1.0 : -1.0;
     _floatController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 6400),
+      duration: Duration(milliseconds: 4200 + (seed * 137) % 5200),
     )..repeat();
+    _spinController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
   }
 
   @override
   void dispose() {
     _floatController.dispose();
+    _spinController.dispose();
     super.dispose();
+  }
+
+  // Returns the per-style idle transform sample for animation value [t]
+  // (0..1), scaled by the global 3D intensity [g].
+  ({
+    double dx,
+    double dy,
+    double rx,
+    double ry,
+    double rz,
+    double sc
+  }) _sampleMotion(double t, double g) {
+    final a = (t * math.pi * 2) + _phase;
+    switch (_style) {
+      case _DeckMotion.bob:
+        return (
+          dx: 0,
+          dy: math.sin(a) * 5 * g,
+          rx: math.sin(a * 1.3) * 0.05 * g,
+          ry: math.cos(a) * 0.05 * g,
+          rz: 0,
+          sc: 1 + math.sin(a * 2).abs() * 0.012 * g,
+        );
+      case _DeckMotion.sway:
+        return (
+          dx: math.sin(a) * 7 * g,
+          dy: math.sin(a * 0.6) * 2 * g,
+          rx: 0.008 * g,
+          ry: math.sin(a) * 0.11 * g,
+          rz: math.sin(a) * 0.02 * g,
+          sc: 1,
+        );
+      case _DeckMotion.pendulum:
+        return (
+          dx: math.sin(a) * 4 * g,
+          dy: math.cos(a * 2).abs() * 2 * g,
+          rx: 0,
+          ry: 0,
+          rz: math.sin(a) * 0.07 * g,
+          sc: 1,
+        );
+      case _DeckMotion.orbit:
+        return (
+          dx: math.cos(a) * 5 * g,
+          dy: math.sin(a) * 5 * g,
+          rx: math.sin(a) * 0.06 * g,
+          ry: math.cos(a) * 0.06 * g,
+          rz: 0,
+          sc: 1,
+        );
+      case _DeckMotion.breathe:
+        return (
+          dx: 0,
+          dy: math.sin(a * 0.8) * 2 * g,
+          rx: math.sin(a * 0.7) * 0.03 * g,
+          ry: math.cos(a * 0.7) * 0.03 * g,
+          rz: 0,
+          sc: 1 + math.sin(a) * 0.035 * g,
+        );
+      case _DeckMotion.drift:
+        return (
+          dx: math.sin(a * 0.5) * 8 * g,
+          dy: math.cos(a * 0.4) * 5 * g,
+          rx: math.cos(a * 0.4) * 0.04 * g,
+          ry: math.sin(a * 0.5) * 0.08 * g,
+          rz: 0,
+          sc: 1,
+        );
+      case _DeckMotion.flip:
+        return (
+          dx: 0,
+          dy: math.sin(a) * 2 * g,
+          rx: 0,
+          ry: math.sin(a) * 0.20 * g,
+          rz: 0,
+          sc: 1,
+        );
+      case _DeckMotion.figure8:
+        return (
+          dx: math.sin(a) * 6 * g,
+          dy: math.sin(a * 2) * 4 * g,
+          rx: math.sin(a * 2) * 0.05 * g,
+          ry: math.sin(a) * 0.07 * g,
+          rz: math.sin(a) * 0.015 * g,
+          sc: 1,
+        );
+    }
+  }
+
+  void _setPressed(bool value) {
+    if (_pressed == value) {
+      return;
+    }
+    setState(() => _pressed = value);
+  }
+
+  Future<void> _flipSpin() async {
+    HapticFeedback.mediumImpact();
+    try {
+      await _spinController.forward(from: 0);
+    } finally {
+      _spinController.reset();
+    }
   }
 
   void _updateDragTilt(Offset local, Size size, double maxTilt) {
@@ -7506,8 +7838,8 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
         return SafeArea(
           child: Center(
             child: FractionallySizedBox(
-              widthFactor: 0.94,
-              heightFactor: 0.58,
+              widthFactor: 0.9,
+              heightFactor: 0.56,
               child: _RapidTransformPreview(
                 mode: mode,
                 rarity: widget.rarity,
@@ -7535,25 +7867,54 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
   Widget build(BuildContext context) {
     final tier = _motionTierFor(context);
     final reduceMotion = tier == _MotionTier.low;
-    final rarityAccent = switch (widget.rarity) {
-      _RapidRarity.common => const Color(0xFF8EA7CF),
-      _RapidRarity.rare => const Color(0xFF87DFFF),
-      _RapidRarity.epic => const Color(0xFF9AF4D8),
-      _RapidRarity.legendary => const Color(0xFFFFD88A),
+    // Rarity drives how much restraint vs. flair a card gets.
+    final calm = switch (widget.rarity) {
+      _RapidRarity.common => 0.12,
+      _RapidRarity.rare => 0.28,
+      _RapidRarity.epic => 0.55,
+      _RapidRarity.legendary => 0.9,
     };
-    final rarityShadow = switch (widget.rarity) {
-      _RapidRarity.common => 0.16,
-      _RapidRarity.rare => 0.22,
+    // Each card takes on its own hue so the grid reads as distinct cards, not a
+    // wall of identical navy. Higher rarity = more saturated body.
+    final tintStrength = switch (widget.rarity) {
+      _RapidRarity.common => 0.10,
+      _RapidRarity.rare => 0.18,
       _RapidRarity.epic => 0.28,
-      _RapidRarity.legendary => 0.36,
+      _RapidRarity.legendary => 0.40,
     };
-    final heroBoost = widget.isHero ? 1.35 : 1.0;
+    final bodyTop = Color.alphaBlend(
+        widget.tint.withValues(alpha: tintStrength), const Color(0xFF141F33));
+    final bodyBottom = Color.alphaBlend(
+        widget.tint.withValues(alpha: tintStrength * 0.45),
+        const Color(0xFF0A1120));
+    // Border/accent leans on the card's own colour, warmed toward gold only for
+    // legendary.
+    final rarityAccent = widget.rarity == _RapidRarity.legendary
+        ? const Color(0xFFFFD88A)
+        : Color.alphaBlend(
+            widget.tint.withValues(alpha: 0.55), const Color(0xFF5E7799));
+    final rarityShadow = switch (widget.rarity) {
+      _RapidRarity.common => 0.05,
+      _RapidRarity.rare => 0.09,
+      _RapidRarity.epic => 0.15,
+      _RapidRarity.legendary => 0.24,
+    };
+    final heroBoost = widget.isHero ? 1.2 : 1.0;
     final global3d = _global3dIntensityFor(context);
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: widget.onTap,
-      onDoubleTap: _showTransformPreview,
+      onTap: () {
+        HapticFeedback.lightImpact();
+        // Single tap now plays this card's signature transform (roll / shape /
+        // animal / plane) — re-randomised every tap, scaled by rarity.
+        _showTransformPreview();
+      },
+      onDoubleTap: widget.onTap,
+      onLongPress: reduceMotion ? null : _flipSpin,
+      onTapDown: (_) => _setPressed(true),
+      onTapUp: (_) => _setPressed(false),
+      onTapCancel: () => _setPressed(false),
       onPanUpdate: reduceMotion
           ? null
           : (details) {
@@ -7564,46 +7925,67 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
               _updateDragTilt(
                 details.localPosition,
                 box.size,
-                0.08 * global3d,
+                0.10 * global3d,
               );
             },
-      onPanEnd: (_) => _resetDragTilt(),
-      onPanCancel: _resetDragTilt,
+      onPanEnd: (_) {
+        _resetDragTilt();
+        _setPressed(false);
+      },
+      onPanCancel: () {
+        _resetDragTilt();
+        _setPressed(false);
+      },
       child: AnimatedBuilder(
-        animation: _floatController,
+        animation: Listenable.merge([_floatController, _spinController]),
         builder: (context, child) {
           final t = reduceMotion ? 0.0 : _floatController.value;
-          final wave = (math.sin(t * math.pi * 2) + 1) * 0.5;
-          final bob = (math.sin(t * math.pi * 2.2) * 4) * global3d;
-          final tiltX =
-              ((math.sin(t * math.pi * 2.6) * 0.02) * global3d) + _dragTiltX;
-          final tiltY =
-              ((math.cos(t * math.pi * 2.1) * 0.024) * global3d) + _dragTiltY;
-          final glow = (0.2 + (wave * 0.6)) * heroBoost;
-          final sweepAlign = -1.2 + (wave * 2.4);
+          // Motion is heavily damped and rarity-gated: common cards barely
+          // breathe; legendary cards drift just a little more.
+          final m = reduceMotion
+              ? (dx: 0.0, dy: 0.0, rx: 0.0, ry: 0.0, rz: 0.0, sc: 1.0)
+              : _sampleMotion(t, global3d * calm * 0.5);
+          final wave = (math.sin((t * math.pi * 2) + _phase) + 1) * 0.5;
+          final spin = _spinController.value;
+          final spinEase = Curves.easeInOutCubic.transform(spin);
+          final pressScale = _pressed ? 0.965 : 1.0;
+          final tiltX = m.rx + _dragTiltX;
+          final tiltY = m.ry + _dragTiltY + (spinEase * math.pi * 2);
+          // Much dimmer glow, scaled by rarity; the spin adds a brief flash.
+          final glow = ((0.05 + (wave * 0.13)) * heroBoost * calm) +
+              (math.sin(spin * math.pi) * 0.4);
+          final sweepAlign = _sweepDir * (-1.2 + (wave * 2.4));
+          // Parallax: shift the inner content opposite the tilt for subtle depth.
+          final parX = (m.ry + _dragTiltY) * -22;
+          final parY = (m.rx + _dragTiltX) * 22;
 
           return Transform.translate(
-            offset: Offset(0, reduceMotion ? 0 : bob),
+            offset: Offset(m.dx, reduceMotion ? 0 : m.dy),
             child: Transform(
               alignment: Alignment.center,
               transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.0016)
+                ..setEntry(3, 2, _depth)
                 ..rotateX(reduceMotion ? 0 : tiltX)
-                ..rotateY(reduceMotion ? 0 : tiltY),
+                ..rotateY(reduceMotion ? 0 : tiltY)
+                ..rotateZ(reduceMotion ? 0 : m.rz)
+                ..scaleByDouble(m.sc * pressScale, m.sc * pressScale,
+                    m.sc * pressScale, 1.0),
               child: Stack(
                 children: [
-                  Transform.translate(
-                    offset: const Offset(6, 10),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(18),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            Color(0xFF0A1222),
-                            Color(0xFF0E1A31),
-                          ],
+                  Positioned.fill(
+                    child: Transform.translate(
+                      offset: const Offset(6, 10),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          gradient: const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Color(0xFF0A1222),
+                              Color(0xFF0E1A31),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -7629,22 +8011,25 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
                       borderRadius: BorderRadius.circular(18),
                       child: Stack(
                         children: [
-                          const Positioned.fill(
+                          Positioned.fill(
                             child: DecoratedBox(
                               decoration: BoxDecoration(
                                 gradient: LinearGradient(
                                   begin: Alignment.topLeft,
                                   end: Alignment.bottomRight,
-                                  colors: [
-                                    Color(0xFF172944),
-                                    Color(0xFF0D1C33),
-                                  ],
+                                  colors: [bodyTop, bodyBottom],
                                 ),
                               ),
                             ),
                           ),
-                          Positioned.fill(
-                            child: widget.child,
+                          // Non-positioned: this is what gives the card (and the
+                          // surrounding Positioned.fill layers) their height.
+                          Transform.translate(
+                            offset: Offset(parX, parY),
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: widget.child,
+                            ),
                           ),
                           Positioned.fill(
                             child: IgnorePointer(
@@ -7664,17 +8049,18 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
                               ),
                             ),
                           ),
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: CustomPaint(
-                                painter: _RapidMeshOverlayPainter(
-                                  phase: t,
-                                  accent: rarityAccent,
-                                  intensity: glow,
+                          if (calm >= 0.5)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _RapidMeshOverlayPainter(
+                                    phase: t,
+                                    accent: rarityAccent,
+                                    intensity: glow,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
                           if (widget.isHero)
                             Positioned.fill(
                               child: IgnorePointer(
@@ -7688,38 +8074,39 @@ class _ThreeDDeckCardState extends State<_ThreeDDeckCard>
                                 ),
                               ),
                             ),
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: Align(
-                                alignment: Alignment(sweepAlign, -0.45),
-                                child: Transform.rotate(
-                                  angle: -0.55,
-                                  child: Container(
-                                    width: 120,
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(60),
-                                      gradient: LinearGradient(
-                                        begin: Alignment.topCenter,
-                                        end: Alignment.bottomCenter,
-                                        colors: [
-                                          Colors.white.withValues(alpha: 0.0),
-                                          Colors.white
-                                              .withValues(alpha: 0.35 * glow),
-                                          Colors.white.withValues(alpha: 0.0),
-                                        ],
+                          if (calm >= 0.5)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: Align(
+                                  alignment: Alignment(sweepAlign, -0.45),
+                                  child: Transform.rotate(
+                                    angle: -0.55,
+                                    child: Container(
+                                      width: 110,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(60),
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            Colors.white.withValues(alpha: 0.0),
+                                            Colors.white.withValues(
+                                                alpha: 0.18 * glow),
+                                            Colors.white.withValues(alpha: 0.0),
+                                          ],
+                                        ),
                                       ),
                                     ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
                           Positioned.fill(
                             child: IgnorePointer(
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
                                   border: Border.all(
-                                    color: rarityAccent.withValues(alpha: 0.5),
+                                    color: rarityAccent.withValues(alpha: 0.32),
                                   ),
                                   borderRadius: BorderRadius.circular(18),
                                 ),
@@ -8085,13 +8472,14 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
   void initState() {
     super.initState();
     final realism = _globalMotionRealism.value;
-    final rarityBoost = switch (widget.rarity) {
-      _RapidRarity.common => 0.75,
-      _RapidRarity.rare => 0.9,
-      _RapidRarity.epic => 1.08,
-      _RapidRarity.legendary => 1.28,
+    // Higher rarity = a longer, grander animation (more premium, not rushed).
+    final raritySpan = switch (widget.rarity) {
+      _RapidRarity.common => 0.85,
+      _RapidRarity.rare => 1.05,
+      _RapidRarity.epic => 1.3,
+      _RapidRarity.legendary => 1.65,
     };
-    final durationMs = ((3200 + (realism * 1700)) / rarityBoost).round();
+    final durationMs = ((2600 + (realism * 1200)) * raritySpan).round();
     _controller = AnimationController(
       vsync: this,
       duration: Duration(milliseconds: durationMs),
@@ -8102,6 +8490,311 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  String _animalEmoji(_RapidAnimalVariant v) {
+    switch (v) {
+      case _RapidAnimalVariant.dog:
+        return '🐕';
+      case _RapidAnimalVariant.cat:
+        return '🐈';
+      case _RapidAnimalVariant.fox:
+        return '🦊';
+      case _RapidAnimalVariant.wolf:
+        return '🐺';
+      case _RapidAnimalVariant.panther:
+        return '🐆';
+      case _RapidAnimalVariant.lynx:
+        return '🐱';
+      case _RapidAnimalVariant.horse:
+        return '🐎';
+      case _RapidAnimalVariant.deer:
+        return '🦌';
+      case _RapidAnimalVariant.rabbit:
+        return '🐇';
+      case _RapidAnimalVariant.bear:
+        return '🐻';
+      case _RapidAnimalVariant.tiger:
+        return '🐅';
+      case _RapidAnimalVariant.lion:
+        return '🦁';
+      case _RapidAnimalVariant.goat:
+        return '🐐';
+      case _RapidAnimalVariant.camel:
+        return '🐫';
+      case _RapidAnimalVariant.zebra:
+        return '🦓';
+      case _RapidAnimalVariant.elephant:
+        return '🐘';
+    }
+  }
+
+  double _premiumForRarity() {
+    return switch (widget.rarity) {
+      _RapidRarity.common => 0.0,
+      _RapidRarity.rare => 0.35,
+      _RapidRarity.epic => 0.68,
+      _RapidRarity.legendary => 1.0,
+    };
+  }
+
+  // A staged scene: an emoji "actor" that actually walks / flies across the
+  // frame, with richness (size, glow, trail, scenery) growing with rarity.
+  Widget _creatureStage({
+    required Color accent,
+    required _RapidAnimalVariant animalVariant,
+    required _RapidFlightVariant flightVariant,
+  }) {
+    final isPlane = widget.mode == _RapidDeckFxMode.plane;
+    final premium = _premiumForRarity();
+    final rarityName = switch (widget.rarity) {
+      _RapidRarity.common => 'Common',
+      _RapidRarity.rare => 'Rare',
+      _RapidRarity.epic => 'Epic',
+      _RapidRarity.legendary => 'Legendary',
+    };
+    final p = _controller.value.clamp(0.0, 1.0);
+    final emoji = isPlane ? '✈️' : _animalEmoji(animalVariant);
+    final label = isPlane
+        ? '${_flightVariantLabel(flightVariant)} Flight'
+        : _animalVariantLabel(animalVariant);
+    final dir = _flightDirectionForVariant(flightVariant);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final w = constraints.maxWidth;
+          final h = constraints.maxHeight;
+          final size = (isPlane ? 56.0 : 60.0) + premium * 104.0;
+          final groundY = h * 0.74;
+
+          // Pose for a given progress (lets us draw a motion trail behind).
+          ({double x, double y, double rot, double face, double shadow}) pose(
+              double pp) {
+            pp = pp.clamp(0.0, 1.0);
+            if (isPlane) {
+              final prog = Curves.easeInOutCubic.transform(pp);
+              final span = (prog * 2) - 1; // -1..1
+              final x = w * 0.5 + dir.dx * w * 0.62 * span;
+              final y = h * 0.46 +
+                  dir.dy * h * 0.42 * span -
+                  math.sin(prog * math.pi) * h * 0.07;
+              final rot = math.atan2(dir.dy, dir.dx) + (math.pi / 4);
+              return (x: x, y: y, rot: rot, face: 1.0, shadow: 0.5);
+            } else {
+              final goLeft = dir.dx < 0;
+              final prog = Curves.easeInOut.transform(pp);
+              final span = goLeft ? (1 - prog) : prog;
+              final x = (-0.18 + span * 1.36) * w;
+              final steps = 7 + (premium * 4).round();
+              final stepWave = math.sin(prog * math.pi * steps);
+              final bob = stepWave.abs();
+              final y = groundY - size * 0.46 - bob * (5 + premium * 11);
+              final rot = stepWave * 0.045;
+              return (
+                x: x,
+                y: y,
+                rot: rot,
+                face: goLeft ? -1.0 : 1.0,
+                shadow: 1.0 - bob * 0.4
+              );
+            }
+          }
+
+          final a = pose(p);
+          final children = <Widget>[];
+
+          children.add(Positioned.fill(
+              child: _creatureBackground(isPlane, premium, accent)));
+
+          // Ground contact shadow.
+          final shadowY = isPlane ? (a.y + size * 0.46) : (groundY - size * 0.1);
+          children.add(Positioned(
+            left: a.x - size * 0.46,
+            top: shadowY,
+            width: size * 0.92,
+            height: size * 0.26,
+            child: Opacity(
+              opacity: isPlane ? 0.18 : 0.4,
+              child: Transform.scale(
+                scaleX: a.shadow.clamp(0.5, 1.0),
+                child: Container(
+                  decoration: const BoxDecoration(
+                    borderRadius: BorderRadius.all(Radius.circular(999)),
+                    gradient: RadialGradient(colors: [
+                      Color(0xCC000000),
+                      Color(0x00000000),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+          ));
+
+          // Motion trail / dust — richer with rarity.
+          if (premium > 0.32) {
+            final ghosts = 2 + (premium * 4).round();
+            for (int i = ghosts; i >= 1; i--) {
+              final gp = pose(p - i * 0.035);
+              children.add(Positioned(
+                left: gp.x - size * 0.5,
+                top: gp.y - size * 0.5,
+                width: size,
+                height: size,
+                child: Opacity(
+                  opacity: (0.06 + premium * 0.10) * (1 - i / (ghosts + 1)),
+                  child: Transform(
+                    alignment: Alignment.center,
+                    transform: Matrix4.diagonal3Values(gp.face, 1, 1),
+                    child: Center(
+                      child: Text(isPlane ? '·' : emoji,
+                          style: TextStyle(fontSize: size * 0.82)),
+                    ),
+                  ),
+                ),
+              ));
+            }
+          }
+
+          // The actor.
+          children.add(Positioned(
+            left: a.x - size * 0.5,
+            top: a.y - size * 0.5,
+            width: size,
+            height: size,
+            child: Transform.rotate(
+              angle: a.rot,
+              child: Transform(
+                alignment: Alignment.center,
+                transform: Matrix4.diagonal3Values(a.face, 1, 1),
+                child: Center(
+                  child: Text(
+                    emoji,
+                    style: TextStyle(
+                      fontSize: size * 0.84,
+                      shadows: premium > 0.5
+                          ? [
+                              Shadow(
+                                  color: accent.withValues(alpha: 0.55),
+                                  blurRadius: 16 + premium * 14)
+                            ]
+                          : null,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ));
+
+          // Caption + rarity pips (premium signal).
+          children.add(Positioned(
+            left: 14,
+            right: 14,
+            bottom: 14,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: accent,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 16 + premium * 4,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ...List<Widget>.generate(4, (i) {
+                      final on = i <= (premium * 3).round();
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: Icon(
+                          on ? Icons.star_rounded : Icons.star_border_rounded,
+                          size: 14,
+                          color: accent.withValues(alpha: on ? 0.95 : 0.4),
+                        ),
+                      );
+                    }),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: Text(rarityName,
+                          style: TextStyle(
+                              color: accent.withValues(alpha: 0.9),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ));
+
+          return Stack(clipBehavior: Clip.hardEdge, children: children);
+        },
+      ),
+    );
+  }
+
+  // Themed backdrop behind the actor; grander for higher rarity.
+  Widget _creatureBackground(bool isPlane, double premium, Color accent) {
+    final List<Color> sky = isPlane
+        ? [const Color(0xFF14304F), const Color(0xFF0B1A2E)]
+        : [const Color(0xFF1A2C2A), const Color(0xFF0C1715)];
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: sky,
+              ),
+            ),
+          ),
+        ),
+        if (premium > 0.6)
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: RadialGradient(
+                  center: const Alignment(0, -0.2),
+                  radius: 1.1,
+                  colors: [
+                    accent.withValues(alpha: 0.18 * premium),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+        if (!isPlane)
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: FractionallySizedBox(
+              heightFactor: 0.30,
+              widthFactor: 1,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.0),
+                      Colors.black.withValues(alpha: 0.34),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   @override
@@ -8135,6 +8828,17 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, _) {
+          // Animal & plane modes use a staged scene where an emoji actor
+          // actually walks / flies across — far more lifelike than morphing the
+          // card silhouette.
+          if (widget.mode == _RapidDeckFxMode.animal ||
+              widget.mode == _RapidDeckFxMode.plane) {
+            return _creatureStage(
+              accent: accent,
+              animalVariant: animalVariant,
+              flightVariant: flightVariant,
+            );
+          }
           final realism = _globalMotionRealism.value;
           final rarityPower = switch (widget.rarity) {
             _RapidRarity.common => 0.72,
@@ -8274,10 +8978,10 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
             case _RapidDeckFxMode.animal:
               clipMorph = pulse;
               final stride = math.sin((t * math.pi * 2.2) + (seedA * 6));
-              tx = stride * (18 + (seedB * 18)) * pulse * rarityPower;
+              tx = stride * (42 + (seedB * 32)) * pulse * rarityPower;
               ty = -9 * pulse +
                   (math.sin((t * math.pi * 2.1) + seedC).abs() *
-                      16 *
+                      18 *
                       pulse *
                       rarityPower);
               rotX = math.sin((t * math.pi * 1.8) + (seedA * 3.1)) *
@@ -8323,9 +9027,9 @@ class _RapidTransformPreviewState extends State<_RapidTransformPreview>
               final dir = _flightDirectionForVariant(flightVariant);
               clipMorph = (fold * (1 - ret)).clamp(0.0, 1.0);
               final travel = (fly * (1 - ret)).clamp(0.0, 1.0);
-              tx = dir.dx * (132 + (seedA * 42)) * travel * rarityPower;
-              ty = (dir.dy * (98 + (seedB * 32)) * travel * rarityPower) -
-                  (20 * travel * rarityPower);
+              tx = dir.dx * (150 + (seedA * 48)) * travel * rarityPower;
+              ty = (dir.dy * (112 + (seedB * 38)) * travel * rarityPower) -
+                  (22 * travel * rarityPower);
               rotY = dir.dx * (0.38 + (0.22 * clipMorph));
               rotX = -dir.dy * (0.28 + (0.22 * clipMorph));
               rotZ = (dir.dx * 0.16 + dir.dy * 0.08) * (0.2 + (0.8 * travel));
@@ -9821,7 +10525,7 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
         if (!compact) ...[
           const SizedBox(height: 8),
           const Text(
-            'Tap for details. Double tap: open big transformation stage',
+            'Tap: play 3D animation • Double-tap: details • Long-press: spin',
             style: TextStyle(
               color: Color(0xFFA9BEDA),
               fontSize: 12,
@@ -10131,14 +10835,12 @@ class _RapidDeckPageState extends State<RapidDeckPage> {
                           rarity: _rarityForDeckIndex(index),
                           title: scenario.title,
                           icon: scenario.icon,
+                          tint: scenario.color,
                           isHero: _isHeroIndex(index),
                           onTap: () => _openRapidCard(index),
-                          child: Card(
-                            color: const Color(0xFF0E1B31),
-                            child: Padding(
-                              padding: const EdgeInsets.all(10),
-                              child: _buildRapidCardPreview(scenario),
-                            ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: _buildRapidCardPreview(scenario),
                           ),
                         ),
                       );
@@ -11164,6 +11866,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           icon: Icons.storage_rounded,
           page: DatabaseBridgePage(),
         ),
+        const _MenuItem(
+          title: 'Gallery Review',
+          subtitle: 'Approve or reject uncertain gallery-scan matches',
+          colorValue: 0xFF8E44AD,
+          icon: Icons.fact_check_outlined,
+          page: GalleryReviewPage(),
+        ),
       ];
 
   List<_MenuItem> get _userItems => [
@@ -11561,11 +12270,15 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
   @override
   void initState() {
     super.initState();
+    // Pause the background gallery scan while live recognition is on screen so
+    // they don't compete for the single free-tier backend.
+    GalleryScanService.liveRecognitionActive = true;
     _setup();
   }
 
   @override
   void dispose() {
+    GalleryScanService.liveRecognitionActive = false;
     _loopTimer?.cancel();
     _controller?.dispose();
     _localRecognitionSubscription?.cancel();
@@ -11896,42 +12609,154 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       return;
     }
     _unknownPromptOpen = true;
-    final nameController = TextEditingController();
     try {
-      final entered = await showDialog<String>(
-        context: context,
-        builder: (ctx) {
-          return AlertDialog(
-            title: const Text('Unknown Face Detected'),
-            content: TextField(
-              controller: nameController,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Enter person name',
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(''),
-                child: const Text('Skip'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(ctx).pop(nameController.text),
-                child: const Text('Save'),
-              ),
-            ],
-          );
-        },
-      );
-      final name = (entered ?? '').trim();
-      if (name.isEmpty) {
+      final resolved = await _resolveUnknownPersonName();
+      if (resolved == null || resolved.trim().isEmpty) {
         return;
       }
-      await _saveUnknownFaceWithName(imageB64: imageB64, personName: name);
+      await _saveUnknownFaceWithName(imageB64: imageB64, personName: resolved);
     } finally {
       _lastUnknownPromptAt = DateTime.now();
       _unknownPromptOpen = false;
     }
+  }
+
+  // Mirrors the first-time enrollment naming flow: ask for a name, and if that
+  // name already exists in the database, show that person's photo and ask "Is
+  // this you?". Yes -> reuse the existing folder; No -> ask for the full name
+  // and create a new folder. Returns the resolved person name, or null/empty if
+  // the user skipped.
+  Future<String?> _resolveUnknownPersonName() async {
+    var askFullName = false;
+    while (mounted) {
+      final entered = await _promptUnknownName(fullName: askFullName);
+      final name = (entered ?? '').trim();
+      if (name.isEmpty) {
+        return null; // skipped
+      }
+      final api = buildBackendApi();
+      try {
+        final res = await api.lookupFacePerson(person: name);
+        if (res['ok'] == true) {
+          final data = (res['data'] as Map<String, dynamic>?) ?? const {};
+          if (data['exists'] == true) {
+            final person = (data['person'] ?? name).toString();
+            final previewB64 = (data['preview_b64'] ?? '').toString();
+            final confirm =
+                await _confirmExistingPersonLive(person, previewB64);
+            if (confirm == true) {
+              return person; // reuse the existing folder
+            }
+            // "No, that's not me" -> ask again for a fuller/different name.
+            askFullName = true;
+            continue;
+          }
+        }
+      } catch (_) {
+        // Lookup failed (offline etc.) — fall through and save under the name.
+      }
+      return name; // new person
+    }
+    return null;
+  }
+
+  Future<String?> _promptUnknownName({bool fullName = false}) async {
+    final nameController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text(
+              fullName ? 'Enter your full name' : 'Unknown Face Detected'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (fullName)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 10),
+                  child: Text(
+                    'That name belongs to someone else. Enter the full name to save a new person.',
+                  ),
+                ),
+              TextField(
+                controller: nameController,
+                autofocus: true,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                  labelText: fullName ? 'Full name' : 'Enter person name',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(''),
+              child: const Text('Skip'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(nameController.text),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<bool?> _confirmExistingPersonLive(
+      String name, String previewB64) async {
+    Uint8List? previewBytes;
+    if (previewB64.trim().isNotEmpty) {
+      try {
+        previewBytes = base64Decode(previewB64);
+      } catch (_) {}
+    }
+    if (!mounted) {
+      return false;
+    }
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Is this you?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (previewBytes != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.memory(
+                    previewBytes,
+                    width: 160,
+                    height: 160,
+                    fit: BoxFit.cover,
+                  ),
+                )
+              else
+                const Icon(Icons.account_circle, size: 80),
+              const SizedBox(height: 12),
+              Text(name, style: const TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              const Text(
+                'A person with this name already exists. Save this photo to them?',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('No'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Yes'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _captureAndRecognize({bool interactive = false}) async {
@@ -13046,7 +13871,7 @@ class UsersPage extends StatefulWidget {
   State<UsersPage> createState() => _UsersPageState();
 }
 
-class _UsersPageState extends State<UsersPage> {
+class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
   bool _loading = true;
   String _error = '';
   List<Map<String, dynamic>> _users = const [];
@@ -13061,19 +13886,39 @@ class _UsersPageState extends State<UsersPage> {
   bool _usersDeckMode = true;
   double _usersDepth = 0.2;
   Map<String, dynamic>? _selectedUser;
+  Timer? _autoRefreshTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+    // Gentle auto-refresh so gallery-scan progress bars advance without the
+    // admin tapping Reload (one light /api/users query every 20s).
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (mounted) {
+        _load();
+      }
+    });
   }
 
   @override
   void dispose() {
+    _autoRefreshTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
     _roleController.dispose();
     _emailDomainController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Refresh registry data (user list, login counts) when returning to the app
+    // so it doesn't show stale numbers.
+    if (state == AppLifecycleState.resumed) {
+      _load();
+    }
   }
 
   Future<void> _load() async {
@@ -13099,12 +13944,14 @@ class _UsersPageState extends State<UsersPage> {
   String _safeLower(dynamic value) => (value ?? '').toString().toLowerCase();
 
   int _loginCount(Map<String, dynamic> row) {
-    final logs = (row['logins'] as List?) ?? const [];
-    if (logs.isNotEmpty) {
-      return logs.length;
+    // Prefer the true total from the backend; the `logins` array is only the
+    // last-10 preview slice so using its length would cap the count at 10.
+    final count = int.tryParse((row['logins_count'] ?? '').toString());
+    if (count != null) {
+      return count;
     }
-    final count = int.tryParse((row['logins_count'] ?? 0).toString());
-    return count ?? 0;
+    final logs = (row['logins'] as List?) ?? const [];
+    return logs.length;
   }
 
   int _createdStamp(Map<String, dynamic> row) {
@@ -13387,6 +14234,24 @@ class _UsersPageState extends State<UsersPage> {
                     icon: const Icon(Icons.check_circle_outline),
                     label: const Text('Clear Re-enrollment'),
                   ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final api = buildBackendApi();
+                      final res = await api.requestGalleryRescan(username);
+                      if (!context.mounted) return;
+                      final ok = res['ok'] == true;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                            content: Text(ok
+                                ? 'Gallery re-scan requested for $username'
+                                : (res['error'] ?? 'Request failed')
+                                    .toString())),
+                      );
+                    },
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Re-run Gallery Scan'),
+                  ),
                 ],
               ],
             ),
@@ -13398,6 +14263,57 @@ class _UsersPageState extends State<UsersPage> {
         setState(() => _selectedUser = null);
       }
     });
+  }
+
+  Widget _galleryProgressBar(Map<String, dynamic> u) {
+    final total = int.tryParse((u['gallery_total'] ?? 0).toString()) ?? 0;
+    final scanned = int.tryParse((u['gallery_scanned'] ?? 0).toString()) ?? 0;
+    final state = (u['gallery_scan_state'] ?? '').toString();
+    if (total <= 0 && state.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final frac = total > 0 ? (scanned / total).clamp(0.0, 1.0) : 0.0;
+    final done = state == 'done' || (total > 0 && scanned >= total);
+    final label = total <= 0
+        ? 'Gallery scan: starting…'
+        : done
+            ? 'Gallery scan: complete ($total photos)'
+            : 'Gallery scan: $scanned / $total (${(frac * 100).toStringAsFixed(0)}%)';
+    final tint =
+        done ? const Color(0xFF8AF0C8) : const Color(0xFF9FC3FF);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(done ? Icons.check_circle : Icons.photo_library_outlined,
+                  size: 12, color: tint),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: tint),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: total > 0 ? frac.toDouble() : null,
+              minHeight: 5,
+              backgroundColor: const Color(0xFF1A2C45),
+              color: done ? const Color(0xFF45D88F) : const Color(0xFF5EC8FF),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildUserCard(Map<String, dynamic> u, {required int index}) {
@@ -13477,6 +14393,7 @@ class _UsersPageState extends State<UsersPage> {
                           fontSize: 12, color: Color(0xFFA9C1E7)),
                     ),
                   ],
+                  _galleryProgressBar(u),
                 ],
               ),
             ),
@@ -14099,7 +15016,8 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
       )
       ..loadRequest(Uri.parse(_mapCandidates[_mapIndex]));
     _startMapTimeout();
-    unawaited(_loadLatestPins());
+    // No coordinates are shown by default — they only appear after the user
+    // searches a specific person by name.
   }
 
   @override
@@ -14176,46 +15094,6 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
     }
   }
 
-  Future<void> _loadLatestPins() async {
-    setState(() {
-      _loading = true;
-      _status = 'Loading latest recognition pins...';
-      _rows = const [];
-    });
-    try {
-      final api = buildBackendApi();
-      final res = await api.getLatestRecognitionLocations(limit: 500);
-      if (!mounted) {
-        return;
-      }
-      if (res['ok'] != true) {
-        setState(() {
-          _loading = false;
-          _status = (res['error'] ?? 'Load failed').toString();
-        });
-        return;
-      }
-      final data = ((res['data'] as List?) ?? const [])
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-      setState(() {
-        _loading = false;
-        _rows = data;
-        _status = data.isEmpty
-            ? 'No saved recognition pins found'
-            : 'Showing latest saved location per recognized user';
-      });
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _loading = false;
-        _status = 'Load error: $e';
-      });
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -14397,15 +15275,6 @@ class _RecognitionLocationPageState extends State<RecognitionLocationPage> {
                       onPressed: _loading ? null : _search,
                       icon: const Icon(Icons.travel_explore),
                     ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: _loading ? null : _loadLatestPins,
-                    icon: const Icon(Icons.push_pin),
-                    label: const Text('Show Latest Pins'),
                   ),
                 ),
               ],
@@ -15787,6 +16656,213 @@ class _DatabaseBridgePageState extends State<DatabaseBridgePage> {
             label: const Text('Refresh Database Snapshot'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class GalleryReviewPage extends StatefulWidget {
+  const GalleryReviewPage({super.key});
+
+  @override
+  State<GalleryReviewPage> createState() => _GalleryReviewPageState();
+}
+
+class _GalleryReviewPageState extends State<GalleryReviewPage> {
+  bool _loading = true;
+  String _error = '';
+  List<Map<String, dynamic>> _reviews = const [];
+  final Set<int> _busyIds = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    final api = buildBackendApi();
+    try {
+      final res = await api.getGalleryReviews(status: 'pending', limit: 100);
+      if (res['ok'] != true) {
+        setState(() {
+          _error = (res['error'] ?? 'Failed to load').toString();
+          _loading = false;
+        });
+        return;
+      }
+      final list = ((res['data']?['reviews'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      setState(() {
+        _reviews = list;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _decide(Map<String, dynamic> review, bool approve,
+      String name) async {
+    final id = int.tryParse((review['id'] ?? '').toString());
+    if (id == null || _busyIds.contains(id)) {
+      return;
+    }
+    setState(() => _busyIds.add(id));
+    final api = buildBackendApi();
+    final res =
+        await api.decideGalleryReview(id: id, approve: approve, name: name);
+    if (!mounted) return;
+    final ok = res['ok'] == true;
+    setState(() {
+      _busyIds.remove(id);
+      if (ok) {
+        _reviews = _reviews
+            .where((r) => (r['id'] ?? '').toString() != id.toString())
+            .toList();
+      }
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok
+            ? (approve ? 'Saved to ${name.isEmpty ? 'person' : name}' : 'Rejected')
+            : (res['error'] ?? 'Action failed').toString()),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gallery Review'),
+        actions: [
+          IconButton(
+            onPressed: _loading ? null : _load,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(child: Text(_error))
+              : _reviews.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          'No pending matches to review.\nUncertain gallery-scan matches will appear here.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Color(0xFFB9D9EE)),
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: _reviews.length,
+                      itemBuilder: (context, index) =>
+                          _buildReviewCard(_reviews[index]),
+                    ),
+    );
+  }
+
+  Widget _buildReviewCard(Map<String, dynamic> review) {
+    final id = int.tryParse((review['id'] ?? '').toString()) ?? -1;
+    final candidate = (review['candidate_name'] ?? '').toString();
+    final score = double.tryParse((review['score'] ?? 0).toString()) ?? 0.0;
+    final submittedBy = (review['submitted_by'] ?? '').toString();
+    final b64 = (review['image_b64'] ?? '').toString();
+    Uint8List? bytes;
+    if (b64.isNotEmpty) {
+      try {
+        bytes = base64Decode(b64);
+      } catch (_) {}
+    }
+    final controller = TextEditingController(text: candidate);
+    final busy = _busyIds.contains(id);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: const Color(0xFF0E1B31),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: bytes != null
+                  ? Image.memory(bytes,
+                      width: 96, height: 96, fit: BoxFit.cover)
+                  : Container(
+                      width: 96,
+                      height: 96,
+                      color: const Color(0xFF1A2C45),
+                      child: const Icon(Icons.image_not_supported),
+                    ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Match: ${(score * 100).toStringAsFixed(1)}%',
+                    style: const TextStyle(
+                        color: Color(0xFF8AF0C8), fontWeight: FontWeight.w700),
+                  ),
+                  Text('From: ${submittedBy.isEmpty ? 'unknown' : submittedBy}',
+                      style: const TextStyle(
+                          color: Color(0xFFB9D9EE), fontSize: 12)),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: controller,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'Save as (person name)',
+                      labelStyle: TextStyle(color: Color(0xFFB9D9EE)),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: busy
+                              ? null
+                              : () => _decide(
+                                  review, true, controller.text.trim()),
+                          icon: const Icon(Icons.check, size: 18),
+                          label: const Text('Approve'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              busy ? null : () => _decide(review, false, ''),
+                          icon: const Icon(Icons.close, size: 18),
+                          label: const Text('Reject'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -1,7 +1,7 @@
 name: face_studio_mobile_client
 description: Minimal mobile client for Face Studio backend API.
 publish_to: "none"
-version: 0.1.0+31
+version: 0.1.0+32
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -14,6 +14,9 @@ dependencies:
   hive: ^2.2.3
   http: ^1.2.2
   image_picker: ^1.1.2
+  photo_manager: ^3.6.4
+  image: ^4.3.0
+  video_thumbnail: ^0.5.3
   flutter_local_notifications: ^17.2.3
   flutter_tts: ^3.8.5
   geolocator: ^13.0.1
