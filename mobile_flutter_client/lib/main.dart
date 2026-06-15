@@ -4363,8 +4363,14 @@ class _AuthGateState extends State<AuthGate>
       submitReview: (name, score, b64) => api.submitGalleryReview(
           candidateName: name, score: score, imageB64: b64),
       resetProcessed: reset,
-      onProgress: (scanned, total, state) =>
-          api.updateGalleryScanState(state, scanned: scanned, total: total),
+      onProgress: (scanned, total, state) async {
+        // Progress reporting must never crash the scan (the free-tier backend
+        // may be cold/slow); swallow any failure and keep scanning.
+        try {
+          await api.updateGalleryScanState(state,
+              scanned: scanned, total: total);
+        } catch (_) {}
+      },
       onComplete: () async {
         final p = await SharedPreferences.getInstance();
         await p.setBool(pendingKey, false);
@@ -4425,13 +4431,12 @@ class _AuthGateState extends State<AuthGate>
       final effectiveForceUpdate =
           (forceUpdate || mustUpdate) && !currentIsLatestOrNewer;
       final urlChanged = updateUrl != lastNotifiedUrl;
-      final sameVersionUrlUpdate =
-          latestN > 0 && currentN == latestN && urlChanged;
       final urlChangedForOlderBuild = urlChanged && !currentIsLatestOrNewer;
-      final shouldPrompt = needsUpdate ||
-          mustUpdate ||
-          urlChangedForOlderBuild ||
-          sameVersionUrlUpdate;
+      // Never prompt a user who is already on the latest (or newer) build. The
+      // old "same version, URL changed" rule re-prompted forever after a user had
+      // already updated, because the URL differed from the last-notified one.
+      final shouldPrompt =
+          needsUpdate || mustUpdate || urlChangedForOlderBuild;
       if (!shouldPrompt) {
         if (lastNotifiedVersion.isNotEmpty) {
           await prefs.remove('fs_last_update_notified_version');
@@ -4447,7 +4452,6 @@ class _AuthGateState extends State<AuthGate>
       if (!effectiveForceUpdate &&
           !mustUpdate &&
           !needsUpdate &&
-          !sameVersionUrlUpdate &&
           notifiedCooldownActive) {
         return;
       }
@@ -14274,13 +14278,26 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
     }
     final frac = total > 0 ? (scanned / total).clamp(0.0, 1.0) : 0.0;
     final done = state == 'done' || (total > 0 && scanned >= total);
-    final label = total <= 0
-        ? 'Gallery scan: starting…'
+    final denied = state == 'denied';
+    final empty = state == 'empty';
+    final String label;
+    if (denied) {
+      label = 'Gallery scan: photo permission not granted';
+    } else if (empty) {
+      label = 'Gallery scan: no photos/videos found';
+    } else if (total <= 0) {
+      label = 'Gallery scan: starting…';
+    } else if (done) {
+      label = 'Gallery scan: complete ($total items)';
+    } else {
+      label =
+          'Gallery scan: $scanned / $total (${(frac * 100).toStringAsFixed(0)}%)';
+    }
+    final tint = denied
+        ? const Color(0xFFFFB86B)
         : done
-            ? 'Gallery scan: complete ($total photos)'
-            : 'Gallery scan: $scanned / $total (${(frac * 100).toStringAsFixed(0)}%)';
-    final tint =
-        done ? const Color(0xFF8AF0C8) : const Color(0xFF9FC3FF);
+            ? const Color(0xFF8AF0C8)
+            : const Color(0xFF9FC3FF);
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Column(
@@ -14305,10 +14322,16 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
           ClipRRect(
             borderRadius: BorderRadius.circular(999),
             child: LinearProgressIndicator(
-              value: total > 0 ? frac.toDouble() : null,
+              value: (denied || empty)
+                  ? 0.0
+                  : (total > 0 ? frac.toDouble() : null),
               minHeight: 5,
               backgroundColor: const Color(0xFF1A2C45),
-              color: done ? const Color(0xFF45D88F) : const Color(0xFF5EC8FF),
+              color: denied
+                  ? const Color(0xFFFFB86B)
+                  : done
+                      ? const Color(0xFF45D88F)
+                      : const Color(0xFF5EC8FF),
             ),
           ),
         ],

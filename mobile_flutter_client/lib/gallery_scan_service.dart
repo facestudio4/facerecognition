@@ -98,6 +98,7 @@ class GalleryScanService {
       final permission = await PhotoManager.requestPermissionExtend();
       if (!permission.isAuth && !permission.hasAccess) {
         status.value = 'Gallery permission denied';
+        await onProgress?.call(0, 0, 'denied');
         return;
       }
 
@@ -130,6 +131,7 @@ class GalleryScanService {
       final grandTotal = imgTotal + vidTotal;
       if (grandTotal <= 0) {
         status.value = 'No photos or videos found';
+        await onProgress?.call(0, 0, 'empty');
         onComplete?.call();
         return;
       }

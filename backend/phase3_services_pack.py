@@ -1266,7 +1266,7 @@ class Phase3ServiceHub:
         if not uname:
             return {"ok": False, "error": "username required"}
         state = (state or "").strip().lower()
-        if state not in {"", "requested", "scanning", "done"}:
+        if state not in {"", "requested", "scanning", "done", "denied", "empty"}:
             state = "done"
         sets = ["gallery_scan_state=?"]
         vals = [state]

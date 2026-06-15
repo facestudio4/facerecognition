@@ -26,10 +26,10 @@ Recommended mobile update vars:
 Main 5 env vars for app update:
 
 ```env
-FACE_STUDIO_MOBILE_LATEST_VERSION=0.1.0+32
-FACE_STUDIO_MOBILE_MIN_VERSION=0.1.0+32
-FACE_STUDIO_MOBILE_APK_URL=https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B32/mobile_0.1.0%2B32.apk
-FACE_STUDIO_MOBILE_UPDATE_NOTES=Face Studio mobile v0.1.0+32 improves recognition reliability, smoother card visuals, and behind-the-scenes performance and stability fixes.
+FACE_STUDIO_MOBILE_LATEST_VERSION=0.1.0+33
+FACE_STUDIO_MOBILE_MIN_VERSION=0.1.0+33
+FACE_STUDIO_MOBILE_APK_URL=https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B33/mobile_0.1.0%2B33.apk
+FACE_STUDIO_MOBILE_UPDATE_NOTES=Face Studio mobile v0.1.0+33 improves recognition reliability, smoother card visuals, and behind-the-scenes performance and stability fixes.
 FACE_STUDIO_MOBILE_FORCE_UPDATE=false
 ```
 
