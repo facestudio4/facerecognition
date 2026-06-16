@@ -56,6 +56,13 @@ class Phase3ServiceHub:
         self._scheduler_stop_event = threading.Event()
         self._scheduler_interval_seconds = 86400
         self._last_backup_at = None
+        self._cloud_uploaded_faces = {}
+        self._cloud_db_sig = None
+        self._cloud_enc_hash = None
+        # Restore the DB + encodings from Supabase BEFORE opening the DB, so a
+        # fresh/woken free-tier instance comes back with the real data instead of
+        # the committed seed.
+        self._restore_state_from_cloud_blocking()
         self._ensure_schema()
         self.api_key = self._get_or_create_api_key()
         self.token_secret = self._get_or_create_token_secret()
@@ -68,6 +75,183 @@ class Phase3ServiceHub:
         self._sync_refresh_error = ""
         self._seed_persistent_faces()
         self._seed_persistent_encodings()
+        self._start_cloud_sync()
+
+    # ---- Supabase Storage persistence (durable data on disk-less hosts) ----
+
+    def _is_valid_sqlite(self, path: str) -> bool:
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute("PRAGMA schema_version")
+                return True
+            finally:
+                conn.close()
+        except Exception:
+            return False
+
+    def _file_hash(self, path: str):
+        try:
+            h = hashlib.md5()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    def _restore_state_from_cloud_blocking(self):
+        """Download DB + encodings from Supabase before the DB is opened."""
+        try:
+            from backend import supabase_store as supa
+            if not supa.enabled():
+                return
+            tmp = f"{self.db_path}.cloud"
+            if supa.download_file("facestudio.db", tmp):
+                if self._is_valid_sqlite(tmp):
+                    os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+                    os.replace(tmp, self.db_path)
+                else:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+            try:
+                supa.download_file("face_encodings.pkl", self._encodings_path())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _start_cloud_sync(self):
+        try:
+            from backend import supabase_store as supa
+            if not supa.enabled():
+                return
+        except Exception:
+            return
+        thread = threading.Thread(target=self._cloud_sync_loop, daemon=True)
+        thread.start()
+
+    def _cloud_sync_loop(self):
+        try:
+            from backend import supabase_store as supa
+        except Exception:
+            return
+        # One-time: pull any face images that exist in the cloud but not locally.
+        try:
+            self._restore_faces_from_cloud(supa)
+        except Exception:
+            pass
+        # Periodic: upload only what changed (keeps Supabase bandwidth low).
+        while True:
+            try:
+                time.sleep(15)
+                self._backup_db_if_changed(supa)
+                self._backup_encodings_if_changed(supa)
+                self._backup_new_faces(supa)
+            except Exception:
+                pass
+
+    def _restore_faces_from_cloud(self, supa):
+        files = supa.list_files("faces")
+        if not files:
+            return
+        faces_root = self._faces_root()
+        for remote in files:
+            rel = remote.split("/", 1)[1] if "/" in remote else remote
+            local = os.path.join(faces_root, *rel.split("/"))
+            try:
+                if os.path.exists(local):
+                    self._cloud_uploaded_faces[local] = os.path.getmtime(local)
+                    continue
+                if supa.download_file(remote, local):
+                    self._cloud_uploaded_faces[local] = os.path.getmtime(local)
+            except Exception:
+                continue
+
+    def _users_signature(self):
+        """Signature of the durable user data — recognition/activity logs are
+        deliberately excluded so high-volume events don't trigger DB uploads."""
+        try:
+            with self._connect() as conn:
+                if not self._table_exists(conn, "users"):
+                    return None
+                rows = conn.execute(
+                    "SELECT username, role, created, logins_json, reenroll_required, "
+                    "email, phone FROM users ORDER BY username"
+                ).fetchall()
+                reviews = 0
+                if self._table_exists(conn, "gallery_reviews"):
+                    reviews = conn.execute(
+                        "SELECT COUNT(*) c FROM gallery_reviews WHERE status='pending'"
+                    ).fetchone()["c"]
+            h = hashlib.md5()
+            for r in rows:
+                h.update(("|".join(str(x) for x in r)).encode("utf-8", "ignore"))
+            h.update(f"#reviews={reviews}".encode("utf-8"))
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    def _backup_db_if_changed(self, supa):
+        sig = self._users_signature()
+        if sig is None or sig == self._cloud_db_sig:
+            return
+        tmp = f"{self.db_path}.bak.tmp"
+        try:
+            try:
+                with self._connect() as conn:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            src = sqlite3.connect(self.db_path)
+            dst = sqlite3.connect(tmp)
+            try:
+                with dst:
+                    src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
+            if supa.upload_file("facestudio.db", tmp):
+                self._cloud_db_sig = sig
+        except Exception:
+            pass
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+    def _backup_encodings_if_changed(self, supa):
+        enc = self._encodings_path()
+        if not os.path.exists(enc):
+            return
+        h = self._file_hash(enc)
+        if h is None or h == self._cloud_enc_hash:
+            return
+        if supa.upload_file("face_encodings.pkl", enc):
+            self._cloud_enc_hash = h
+
+    def _backup_new_faces(self, supa):
+        faces_root = self._faces_root(ensure=False)
+        if not os.path.isdir(faces_root):
+            return
+        allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        for root, _, files in os.walk(faces_root):
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() not in allowed:
+                    continue
+                local = os.path.join(root, fn)
+                try:
+                    mt = os.path.getmtime(local)
+                except Exception:
+                    continue
+                if self._cloud_uploaded_faces.get(local) == mt:
+                    continue
+                rel = os.path.relpath(local, faces_root).replace(os.sep, "/")
+                if supa.upload_file(f"faces/{rel}", local, "image/jpeg"):
+                    self._cloud_uploaded_faces[local] = mt
 
     def _faces_root(self, ensure: bool = True) -> str:
         """Single source of truth for where face images live.

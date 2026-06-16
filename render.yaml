@@ -29,6 +29,14 @@ services:
         value: /var/data/faces
       - key: FACE_ENCODINGS_PATH
         value: /var/data/face_encodings.pkl
+      # Durable persistence on the free tier (no disk): mirror the DB, encodings
+      # and face images to Supabase Storage so data survives redeploys/sleep.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
