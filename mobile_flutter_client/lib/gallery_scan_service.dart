@@ -76,6 +76,28 @@ class GalleryScanService {
     _stop = true;
   }
 
+  // Whether photo access is already granted (does NOT show the OS prompt).
+  static Future<bool> hasGalleryPermission() async {
+    try {
+      final p = await PhotoManager.getPermissionState(
+          requestOption: const PermissionRequestOption());
+      return p == PermissionState.authorized || p == PermissionState.limited;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Triggers the OS permission dialog (no-op if already granted). Returns true
+  // if access was granted.
+  static Future<bool> requestGalleryPermission() async {
+    try {
+      final p = await PhotoManager.requestPermissionExtend();
+      return p.isAuth || p.hasAccess;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> start({
     required IdentifyFn identify,
     required EnrollFn enroll,

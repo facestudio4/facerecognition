@@ -4319,6 +4319,51 @@ class _AuthGateState extends State<AuthGate>
     }
   }
 
+  // Asks the user for photo access right after sign-in (like other apps do), so
+  // they knowingly grant it instead of missing the silent request the scan makes.
+  // Shown once per account on this device; if already granted, does nothing.
+  Future<void> _maybeRequestGalleryAccess(String username) async {
+    if (kIsWeb) return;
+    final clean = username.trim();
+    if (clean.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final askedKey = 'fs_gallery_perm_asked_${clean.toLowerCase()}';
+    if (prefs.getBool(askedKey) == true) return;
+    if (await GalleryScanService.hasGalleryPermission()) {
+      await prefs.setBool(askedKey, true);
+      return;
+    }
+    if (!mounted) return;
+    final proceed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.photo_library_outlined, size: 36),
+        title: const Text('Allow access to your photos'),
+        content: const Text(
+          'Face Studio uses your photos to recognize the people you know and '
+          'give you the best experience. You can change this anytime in '
+          'Settings.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Allow'),
+          ),
+        ],
+      ),
+    );
+    // Remember we asked so we don't nag on every login.
+    await prefs.setBool(askedKey, true);
+    if (proceed == true) {
+      await GalleryScanService.requestGalleryPermission();
+    }
+  }
+
   // Runs the gallery auto-scan when appropriate: first time for a new account,
   // or when an admin has requested a re-scan. Resumes across app sessions until
   // every recent photo is processed.
@@ -4683,6 +4728,7 @@ class _AuthGateState extends State<AuthGate>
     });
     unawaited(_EnrollmentUploadQueue.processQueue());
     await _maybeRunFirstTimeEnrollment(username);
+    await _maybeRequestGalleryAccess(username);
     unawaited(_maybeRunGalleryScan(username));
   }
 
@@ -5337,14 +5383,20 @@ class _LoginPageState extends State<LoginPage> {
         const SizedBox(height: 10),
         TextField(
           controller: _signupEmailController,
+          keyboardType: TextInputType.emailAddress,
           decoration: const InputDecoration(
-              labelText: 'Email', prefixIcon: Icon(Icons.email)),
+              labelText: 'Google email (required)',
+              helperText: 'Used to sign in and recover your account',
+              prefixIcon: Icon(Icons.email)),
         ),
         const SizedBox(height: 10),
         TextField(
           controller: _signupPhoneController,
+          keyboardType: TextInputType.phone,
           decoration: const InputDecoration(
-              labelText: 'Phone', prefixIcon: Icon(Icons.phone)),
+              labelText: 'Phone (optional)',
+              helperText: 'You can skip this',
+              prefixIcon: Icon(Icons.phone)),
         ),
         const SizedBox(height: 10),
         TextField(

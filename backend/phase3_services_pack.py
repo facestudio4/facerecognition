@@ -52,6 +52,10 @@ class Phase3ServiceHub:
         self.port = int(port)
         self._api_server = None
         self._api_thread = None
+        # In-memory per-IP rate limiting (single-process server). Maps
+        # (ip, bucket) -> list of recent request timestamps.
+        self._rate_buckets = {}
+        self._rate_lock = threading.Lock()
         self._scheduler_thread = None
         self._scheduler_stop_event = threading.Event()
         self._scheduler_interval_seconds = 86400
@@ -651,6 +655,11 @@ class Phase3ServiceHub:
         return requester in set(target_row["privacy_allowed_profile"])
 
     def _get_or_create_api_key(self):
+        # Prefer an env-provided key so the real secret never has to live in the
+        # committed DB. Falls back to the stored/generated key for local dev.
+        env_key = os.environ.get("FACESTUDIO_API_KEY", "").strip()
+        if env_key:
+            return env_key
         with self._connect() as conn:
             row = conn.execute("SELECT meta_value FROM project_meta WHERE meta_key='api_key'").fetchone()
             if row and row["meta_value"]:
@@ -664,6 +673,9 @@ class Phase3ServiceHub:
             return new_key
 
     def _get_or_create_token_secret(self):
+        env_secret = os.environ.get("FACESTUDIO_TOKEN_SECRET", "").strip()
+        if env_secret:
+            return env_secret
         with self._connect() as conn:
             row = conn.execute("SELECT meta_value FROM project_meta WHERE meta_key='api_token_secret'").fetchone()
             if row and row["meta_value"]:
@@ -741,16 +753,43 @@ class Phase3ServiceHub:
     def _validate_access_token(self, token: str):
         return self.decode_access_token(token) is not None
 
+    # Passwords are stored with PBKDF2-HMAC-SHA256 + a unique per-user salt and a
+    # high iteration count (stdlib, no extra dependency so it builds on the free
+    # tier). Format: "pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>".
+    _PBKDF2_ITERATIONS = 200_000
+
     def _hash_password(self, password: str):
+        salt = secrets.token_bytes(16)
+        dk = hashlib.pbkdf2_hmac(
+            "sha256", (password or "").encode("utf-8"), salt, self._PBKDF2_ITERATIONS
+        )
+        return f"pbkdf2_sha256${self._PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
+
+    def _legacy_hash_password(self, password: str):
+        # Old scheme (single static salt, fast SHA-256). Kept ONLY so existing
+        # accounts can still log in; their hash is upgraded on next login.
         return hashlib.sha256(f"{PASSWORD_SALT}{password}".encode("utf-8")).hexdigest()
+
+    def _needs_rehash(self, hashed: str):
+        return not str(hashed or "").startswith("pbkdf2_sha256$")
 
     def _verify_password(self, password: str, hashed: str):
         if not hashed:
             return False
         stored = str(hashed)
-        if self._hash_password(password) == stored:
-            return True
-        return password == stored
+        if stored.startswith("pbkdf2_sha256$"):
+            try:
+                _, iter_s, salt_hex, hash_hex = stored.split("$", 3)
+                dk = hashlib.pbkdf2_hmac(
+                    "sha256", (password or "").encode("utf-8"),
+                    bytes.fromhex(salt_hex), int(iter_s),
+                )
+                return hmac.compare_digest(dk.hex(), hash_hex)
+            except Exception:
+                return False
+        # Legacy static-salt SHA-256, constant-time compared. No plaintext
+        # fallback (that would let a leaked hash log in as the password).
+        return hmac.compare_digest(self._legacy_hash_password(password), stored)
 
     def _send_email_http(self, to_email: str, subject: str, body: str):
         """Send email via an HTTP API (port 443). Required on hosts like Render
@@ -911,7 +950,9 @@ class Phase3ServiceHub:
             if not self._verify_password(password, row["password"]):
                 return None
 
-            if str(row["password"] or "") == password:
+            # Transparently upgrade legacy (static-salt SHA-256 or plaintext)
+            # hashes to PBKDF2 once the password has been verified.
+            if self._needs_rehash(row["password"]):
                 try:
                     conn.execute(
                         "UPDATE users SET password=? WHERE username=?",
@@ -3003,16 +3044,79 @@ class Phase3ServiceHub:
     def is_scheduler_running(self):
         return bool(self._scheduler_thread and self._scheduler_thread.is_alive())
 
+    def _allowed_origins(self):
+        """Browser CORS allowlist from FACESTUDIO_ALLOWED_ORIGINS (comma list).
+        Empty by default => no Access-Control-Allow-Origin is sent (locked down;
+        native mobile clients don't send an Origin and are unaffected). Set to
+        '*' only if you explicitly want to allow any browser origin."""
+        raw = os.environ.get("FACESTUDIO_ALLOWED_ORIGINS", "").strip()
+        if not raw:
+            return []
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    def _rate_limit_check(self, ip: str, bucket: str, max_count: int, window_s: int):
+        """Return seconds to wait (Retry-After) if over the limit, else 0."""
+        if max_count <= 0:
+            return 0
+        now = time.time()
+        key = (ip or "?", bucket)
+        with self._rate_lock:
+            hits = self._rate_buckets.get(key, [])
+            hits = [t for t in hits if now - t < window_s]
+            if len(hits) >= max_count:
+                retry = int(window_s - (now - hits[0])) + 1
+                self._rate_buckets[key] = hits
+                return max(retry, 1)
+            hits.append(now)
+            self._rate_buckets[key] = hits
+            # Opportunistic cleanup so the dict can't grow without bound.
+            if len(self._rate_buckets) > 5000:
+                for k in list(self._rate_buckets.keys()):
+                    self._rate_buckets[k] = [
+                        t for t in self._rate_buckets[k] if now - t < 1800
+                    ]
+                    if not self._rate_buckets[k]:
+                        self._rate_buckets.pop(k, None)
+        return 0
+
     def _make_handler(self):
         hub = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            # Don't leak the Python/BaseHTTPServer version string.
+            server_version = "FaceStudio"
+            sys_version = ""
+
+            def _client_ip(self):
+                xff = self.headers.get("X-Forwarded-For", "")
+                if xff:
+                    return xff.split(",")[0].strip()
+                try:
+                    return self.client_address[0]
+                except Exception:
+                    return "?"
 
             def _send_cors(self):
-                self.send_header("Access-Control-Allow-Origin", "*")
+                allowed = hub._allowed_origins()
+                origin = self.headers.get("Origin", "")
+                if allowed == ["*"]:
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                elif origin and origin in allowed:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+                # else: no ACAO header (locked down; mobile clients don't need it)
                 self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+            def _send_security_headers(self):
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+                self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+            def version_string(self):
+                return "FaceStudio"
 
             def _send_json(self, code: int, payload: dict):
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -3020,6 +3124,9 @@ class Phase3ServiceHub:
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self._send_cors()
+                self._send_security_headers()
+                # API responses never execute scripts -> lock CSP all the way down.
+                self.send_header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -3029,12 +3136,25 @@ class Phase3ServiceHub:
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self._send_cors()
+                self._send_security_headers()
+                # The only HTML page is the leaflet map; allow the resources it
+                # needs (CDN scripts/styles, inline) while still blocking framing.
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'none'",
+                )
                 self.end_headers()
                 self.wfile.write(body)
+
+            # Reject absurdly large request bodies before reading them (DoS /
+            # memory guard). Face crops are small; 16 MB is generous.
+            _MAX_BODY_BYTES = 16 * 1024 * 1024
 
             def _read_json(self):
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 if length <= 0:
+                    return {}
+                if length > self._MAX_BODY_BYTES:
                     return {}
                 body = self.rfile.read(length)
                 try:
@@ -3312,14 +3432,45 @@ class Phase3ServiceHub:
                 parsed = urllib.parse.urlparse(self.path)
                 path = parsed.path
 
-                if path.startswith("/api/") and path not in (
+                # Reject oversized bodies up front (memory / DoS guard).
+                try:
+                    clen = int(self.headers.get("Content-Length", "0") or 0)
+                except Exception:
+                    clen = 0
+                if clen > self._MAX_BODY_BYTES:
+                    self._send_json(413, {"ok": False, "error": "Payload too large"})
+                    return
+
+                # Per-IP rate limiting: strict on auth (brute-force surface),
+                # generous elsewhere so live recognition / gallery scan are fine.
+                auth_paths = (
                     "/api/auth/login",
                     "/api/auth/signup",
                     "/api/auth/signup/request",
                     "/api/auth/signup/verify",
                     "/api/auth/password/request",
                     "/api/auth/password/reset",
-                ) and not self._auth_ok():
+                )
+                ip = self._client_ip()
+                if path in auth_paths:
+                    auth_max = int(os.environ.get("FACESTUDIO_RL_AUTH_MAX", "15") or 15)
+                    retry = hub._rate_limit_check(ip, "auth", auth_max, 900)
+                else:
+                    gen_max = int(os.environ.get("FACESTUDIO_RL_API_MAX", "300") or 300)
+                    retry = hub._rate_limit_check(ip, "api", gen_max, 60)
+                if retry > 0:
+                    self.send_response(429)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Retry-After", str(retry))
+                    self._send_cors()
+                    self._send_security_headers()
+                    body = json.dumps({"ok": False, "error": "Too many requests. Please slow down."}).encode("utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if path.startswith("/api/") and path not in auth_paths and not self._auth_ok():
                     self._send_json(401, {"ok": False, "error": "Unauthorized"})
                     return
 
@@ -3723,8 +3874,13 @@ class Phase3ServiceHub:
                     self._send_json(400, {"ok": False, "error": str(e)})
                     return
                 except Exception as e:
+                    # Log the detail server-side; never leak internals to the
+                    # client in production (set FACESTUDIO_DEBUG=1 for local dev).
                     hub._log_activity("Mobile API Error", f"{path}: {e}")
-                    self._send_json(500, {"ok": False, "error": "Internal error", "detail": str(e)})
+                    resp = {"ok": False, "error": "Internal error"}
+                    if os.environ.get("FACESTUDIO_DEBUG", "").strip() in ("1", "true", "True"):
+                        resp["detail"] = str(e)
+                    self._send_json(500, resp)
                     return
 
                 self._send_json(404, {"ok": False, "error": "Not found"})

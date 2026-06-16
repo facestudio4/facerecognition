@@ -38,19 +38,34 @@ services:
       - key: SUPABASE_BUCKET
         value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+33
+        value: 0.1.0+34
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B33/mobile_0.1.0%2B33.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B34/mobile_0.1.0%2B34.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Face Studio mobile v0.1.0+33 improves recognition reliability, smoother card visuals, and behind-the-scenes performance and stability fixes.
+        value: Face Studio v0.1.0+34 — optional phone number at sign-up, a clear photo-access prompt, plus security and reliability improvements.
       - key: FACE_STUDIO_MOBILE_FORCE_UPDATE
         value: "false"
       - key: MOBILE_RECOGNITION_THRESHOLD
         value: "0.48"
       - key: MOBILE_RECOGNITION_MARGIN
         value: "0.03"
+      # --- Security hardening (see CLAUDE.md) ---
+      # Move the backend API key / token secret OUT of the committed DB. Set
+      # these to the CURRENT values to avoid breaking the app, or rotate them
+      # (rotating the token secret forces all users to log in again).
+      - key: FACESTUDIO_API_KEY
+        sync: false
+      - key: FACESTUDIO_TOKEN_SECRET
+        sync: false
+      # Browser CORS allowlist (comma-separated). Leave unset to lock it down;
+      # native mobile clients are unaffected. Only set if a web frontend needs it.
+      - key: FACESTUDIO_ALLOWED_ORIGINS
+        sync: false
+      # Must stay off in production (controls error-detail leakage).
+      - key: FACESTUDIO_DEBUG
+        value: "false"
       - key: FACESTUDIO_SIGNUP_ALLOW_SMTP_FALLBACK
         value: "1"
       # Render blocks outbound SMTP, so verification emails must go over an

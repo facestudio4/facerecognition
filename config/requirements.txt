@@ -1,5 +1,10 @@
-numpy
-opencv-contrib-python
-pillow
-requests
-kivy; platform_system == "Windows"
+# Pinned for reproducible builds (security rule #10). These match the versions
+# the previous unpinned build already resolved to, so the next deploy installs
+# the same wheels it is running now — pinning only removes the risk of a future
+# release breaking the free-tier build unexpectedly.
+# To roll back: `git checkout HEAD~1 -- config/requirements.txt`.
+numpy==2.4.3
+opencv-contrib-python==4.13.0.92
+pillow==12.1.1
+requests==2.33.1
+kivy==2.3.0; platform_system == "Windows"
