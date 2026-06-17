@@ -42,8 +42,11 @@ class GalleryScanService {
   static const int _batchSize = 500; // photos per checkpoint
   static const int _videoBatchSize = 50; // videos per checkpoint (heavier)
   static const int _videoFramesPerVideo = 6; // frames sampled before giving up
-  static const double _autoSaveThreshold = 0.52; // >= this -> auto-save
-  static const double _reviewThreshold = 0.40; // [review, auto) -> admin review
+  // Strict auto-save: only near-certain matches are saved automatically; the
+  // band below goes to the admin review queue (family lookalikes used to cross
+  // the old 0.52 bar and land in the wrong folder).
+  static const double _autoSaveThreshold = 0.66; // >= this -> auto-save
+  static const double _reviewThreshold = 0.48; // [review, auto) -> admin review
   // How much context to keep around the face in the SAVED image (fraction of the
   // face box added per side). ~1.1 ≈ head-and-shoulders + background.
   static const double _saveMargin = 1.1;

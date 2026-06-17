@@ -392,6 +392,141 @@ class Phase3ServiceHub:
             self._mobile_known_loaded_at = time.time()
         return added
 
+    _FACE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+    def _person_dir(self, person: str):
+        """Return (matched_name, dir_path) for a person folder (case-insensitive)."""
+        safe = self._sanitize_face_name(person)
+        root = self._faces_root(ensure=False)
+        if not safe or not os.path.isdir(root):
+            return "", ""
+        for entry in os.listdir(root):
+            p = os.path.join(root, entry)
+            if os.path.isdir(p) and entry.lower() == safe.lower():
+                return entry, p
+        return "", ""
+
+    def list_person_faces(self, person: str, thumb: int = 256):
+        """List a person's saved face images with small JPEG thumbnails (b64)."""
+        matched, person_dir = self._person_dir(person)
+        if not matched:
+            return {"ok": True, "data": {"person": person, "faces": []}}
+        faces = []
+        for fname in sorted(os.listdir(person_dir)):
+            if os.path.splitext(fname)[1].lower() not in self._FACE_EXTS:
+                continue
+            fpath = os.path.join(person_dir, fname)
+            b64 = ""
+            try:
+                im = cv2.imread(fpath)
+                if im is not None:
+                    h, w = im.shape[:2]
+                    m = max(h, w)
+                    if m > thumb:
+                        scale = thumb / float(m)
+                        im = cv2.resize(im, (max(1, int(w * scale)), max(1, int(h * scale))))
+                    ok, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                    if ok:
+                        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+            except Exception:
+                b64 = ""
+            faces.append({"filename": fname, "thumb_b64": b64})
+        return {"ok": True, "data": {"person": matched, "faces": faces}}
+
+    def delete_person_faces(self, person: str, filenames, actor_role: str):
+        """Delete specific saved face images for a person — from disk, from the
+        Supabase cloud backup, and from the recognition encodings — so a wrong
+        photo can't poison matches or be restored on the next sync."""
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        matched, person_dir = self._person_dir(person)
+        if not matched:
+            return {"ok": False, "error": "person not found"}
+        if not isinstance(filenames, list) or not filenames:
+            return {"ok": False, "error": "filenames must be a non-empty list"}
+        try:
+            from backend import supabase_store as supa
+        except Exception:
+            supa = None
+        faces_root = self._faces_root(ensure=False)
+        deleted = []
+        for raw in filenames:
+            fn = os.path.basename(str(raw).strip())
+            if not fn or os.path.splitext(fn)[1].lower() not in self._FACE_EXTS:
+                continue
+            fpath = os.path.join(person_dir, fn)
+            if not os.path.isfile(fpath):
+                continue
+            rel = os.path.relpath(fpath, faces_root).replace(os.sep, "/")
+            try:
+                os.remove(fpath)
+            except Exception:
+                continue
+            deleted.append(fn)
+            self._cloud_uploaded_faces.pop(fpath, None)
+            if supa is not None and supa.enabled():
+                try:
+                    supa.delete_file(f"faces/{rel}")
+                except Exception:
+                    pass
+        folder_removed = False
+        try:
+            if not any(os.path.splitext(f)[1].lower() in self._FACE_EXTS
+                       for f in os.listdir(person_dir)):
+                shutil.rmtree(person_dir, ignore_errors=True)
+                folder_removed = True
+        except Exception:
+            pass
+        self._rebuild_person_encodings(matched, removed=folder_removed)
+        self._log_activity("Face Delete", f"{matched}: removed {len(deleted)}", role="admin")
+        return {"ok": True, "data": {"person": matched, "deleted": deleted,
+                                     "folder_removed": folder_removed}}
+
+    def _rebuild_person_encodings(self, person: str, removed: bool = False):
+        """Recompute one person's embeddings from their remaining images (or drop
+        them entirely if the folder is gone). Bounded work — never a full recompute."""
+        import pickle
+        enc_path = self._encodings_path()
+        known = None
+        try:
+            if enc_path and os.path.exists(enc_path):
+                with open(enc_path, "rb") as f:
+                    known = pickle.load(f)
+        except Exception:
+            known = None
+        if not isinstance(known, dict):
+            known = {}
+        for k in list(known.keys()):
+            if str(k).lower() == person.lower():
+                known.pop(k, None)
+        if not removed:
+            matched, person_dir = self._person_dir(person)
+            if matched and person_dir:
+                try:
+                    from frontend import facercognition as legacy
+                    embs = []
+                    for fname in sorted(os.listdir(person_dir)):
+                        if os.path.splitext(fname)[1].lower() not in self._FACE_EXTS:
+                            continue
+                        im = cv2.imread(os.path.join(person_dir, fname))
+                        if im is None:
+                            continue
+                        emb = legacy.compute_embedding(im)
+                        if emb is not None:
+                            embs.append(emb)
+                    if embs:
+                        known[matched] = embs
+                except Exception:
+                    pass
+        try:
+            os.makedirs(os.path.dirname(enc_path) or ".", exist_ok=True)
+            with open(enc_path, "wb") as f:
+                pickle.dump(known, f)
+        except Exception:
+            pass
+        self._mobile_known_encodings = known
+        self._mobile_known_loaded_at = time.time()
+
     def _connect(self):
         conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
         conn.row_factory = sqlite3.Row
@@ -3879,6 +4014,28 @@ class Phase3ServiceHub:
                             target_username=str(payload.get("username", "")).strip(),
                             state=str(payload.get("state", "requested")).strip(),
                             actor_username=actor,
+                            actor_role=role,
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/faces/list":
+                        token_payload = self._token_payload() or {}
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        if role != "admin":
+                            self._send_json(403, {"ok": False, "error": "admin role required"})
+                            return
+                        result = hub.list_person_faces(
+                            str(payload.get("person", "")).strip())
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/faces/delete":
+                        token_payload = self._token_payload() or {}
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        result = hub.delete_person_faces(
+                            person=str(payload.get("person", "")).strip(),
+                            filenames=payload.get("filenames", []),
                             actor_role=role,
                         )
                         self._send_json(200 if result.get("ok") else 400, result)

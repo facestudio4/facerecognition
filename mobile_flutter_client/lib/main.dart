@@ -3848,6 +3848,42 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // List a person's saved face images (with small thumbnails) for review/cleanup.
+  Future<Map<String, dynamic>> listPersonFaces(String person) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/faces/list'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'person': person}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  // Delete specific wrong photos — removes them from the server, the cloud
+  // backup and recognition memory so they don't come back or poison matches.
+  Future<Map<String, dynamic>> deletePersonFaces(
+      String person, List<String> filenames) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/faces/delete'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'person': person, 'filenames': filenames}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> createFacePerson({
     required String person,
   }) async {
@@ -16924,6 +16960,16 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                         fontWeight: FontWeight.w600,
                         color: Colors.white)),
               ),
+              IconButton(
+                tooltip: 'View / delete saved photos',
+                visualDensity: VisualDensity.compact,
+                onPressed: () async {
+                  await Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => PersonFacesPage(person: name)));
+                  _load();
+                },
+                icon: const Icon(Icons.photo_library_outlined, size: 18),
+              ),
               TextButton.icon(
                 onPressed: () => _rescan(name),
                 icon: const Icon(Icons.refresh, size: 16),
@@ -16983,6 +17029,197 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
                   color: Colors.white)),
+        ],
+      ),
+    );
+  }
+}
+
+class PersonFacesPage extends StatefulWidget {
+  const PersonFacesPage({super.key, required this.person});
+  final String person;
+
+  @override
+  State<PersonFacesPage> createState() => _PersonFacesPageState();
+}
+
+class _PersonFacesPageState extends State<PersonFacesPage> {
+  List<Map<String, dynamic>> _faces = const [];
+  final Set<String> _selected = {};
+  bool _loading = true;
+  bool _busy = false;
+  String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final api = buildBackendApi();
+      final res = await api.listPersonFaces(widget.person);
+      final faces = (((res['data'] as Map?)?['faces'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _faces = faces;
+        _selected.clear();
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Load error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    if (_selected.isEmpty || _busy) return;
+    final names = _selected.toList();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${names.length} photo(s)?'),
+        content: const Text(
+            'These will be removed from the server, the cloud backup and the '
+            'recognition memory. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _busy = true);
+    try {
+      final api = buildBackendApi();
+      final res = await api.deletePersonFaces(widget.person, names);
+      if (!mounted) return;
+      if (res['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Deleted ${names.length} photo(s).')));
+        await _load();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Delete failed: ${res['error'] ?? 'unknown'}')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+        title: Text('${widget.person} — photos'),
+        backgroundColor: const Color(0xFF14233C),
+        actions: [
+          if (_selected.isNotEmpty)
+            IconButton(
+              tooltip: 'Delete selected',
+              onPressed: _busy ? null : _deleteSelected,
+              icon: const Icon(Icons.delete_outline),
+            ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(
+                  child: Text(_error,
+                      style: const TextStyle(color: Colors.redAccent)))
+              : _faces.isEmpty
+                  ? const Center(
+                      child: Text('No saved photos for this person.',
+                          style: TextStyle(color: Color(0xFF9FB2CF))))
+                  : Column(
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Text(
+                            'Tap the wrong photos to select, then delete. '
+                            '${_faces.length} saved · ${_selected.length} selected.',
+                            style: const TextStyle(
+                                fontSize: 12, color: Color(0xFF9FB2CF)),
+                          ),
+                        ),
+                        Expanded(
+                          child: GridView.builder(
+                            padding: const EdgeInsets.all(8),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 6,
+                              mainAxisSpacing: 6,
+                            ),
+                            itemCount: _faces.length,
+                            itemBuilder: (_, i) => _tile(_faces[i]),
+                          ),
+                        ),
+                      ],
+                    ),
+    );
+  }
+
+  Widget _tile(Map<String, dynamic> f) {
+    final fname = (f['filename'] ?? '').toString();
+    final b64 = (f['thumb_b64'] ?? '').toString();
+    final selected = _selected.contains(fname);
+    Uint8List? bytes;
+    if (b64.isNotEmpty) {
+      try {
+        bytes = base64Decode(b64);
+      } catch (_) {
+        bytes = null;
+      }
+    }
+    return GestureDetector(
+      onTap: () => setState(() {
+        if (selected) {
+          _selected.remove(fname);
+        } else {
+          _selected.add(fname);
+        }
+      }),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: bytes != null
+                ? Image.memory(bytes, fit: BoxFit.cover)
+                : Container(color: const Color(0xFF1A2C45)),
+          ),
+          if (selected)
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                color: const Color(0xAA1565C0),
+                border: Border.all(color: Colors.white, width: 2),
+              ),
+              child: const Icon(Icons.check_circle,
+                  color: Colors.white, size: 28),
+            ),
         ],
       ),
     );

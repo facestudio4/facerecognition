@@ -72,6 +72,25 @@ def upload_file(remote: str, local_path: str,
     return upload_bytes(remote, data, content_type)
 
 
+def delete_file(remote: str) -> bool:
+    """Delete a single object. Returns True on success (or if already gone)."""
+    url, _, bucket = _cfg()
+    if not enabled():
+        return False
+    req = urllib.request.Request(
+        f"{url}/storage/v1/object/{bucket}/{_encode_path(remote)}",
+        method="DELETE",
+        headers=_headers(),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return 200 <= r.status < 300
+    except urllib.error.HTTPError as e:
+        return e.code == 404  # already absent -> treat as success
+    except Exception:
+        return False
+
+
 def download_file(remote: str, local_path: str) -> bool:
     """Download remote -> local_path. Returns True only on a successful 200."""
     url, _, bucket = _cfg()
