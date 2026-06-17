@@ -32,7 +32,7 @@ typedef EnrollFn = Future<Map<String, dynamic>> Function(
 typedef ReviewFn = Future<Map<String, dynamic>> Function(
     String candidateName, double score, String imageB64);
 typedef ProgressFn = Future<void> Function(
-    int scanned, int total, String state);
+    int scanned, int total, String state, int faces, int saved, int review);
 
 class GalleryScanService {
   GalleryScanService._();
@@ -44,9 +44,14 @@ class GalleryScanService {
   static const int _videoFramesPerVideo = 6; // frames sampled before giving up
   static const double _autoSaveThreshold = 0.52; // >= this -> auto-save
   static const double _reviewThreshold = 0.40; // [review, auto) -> admin review
+  // How much context to keep around the face in the SAVED image (fraction of the
+  // face box added per side). ~1.1 ≈ head-and-shoulders + background.
+  static const double _saveMargin = 1.1;
+  // Moderate throttle: ~2x faster than before, still gentle on the free tier
+  // (well under the server's 300-req/min limit).
   static const Duration _perCallDelay =
-      Duration(seconds: 4); // protect free tier
-  static const Duration _betweenBatchDelay = Duration(seconds: 8);
+      Duration(seconds: 2); // protect free tier
+  static const Duration _betweenBatchDelay = Duration(seconds: 4);
   static const List<Duration> _serverRetryBackoffs = [
     Duration(seconds: 8),
     Duration(seconds: 20),
@@ -69,6 +74,7 @@ class GalleryScanService {
   bool _active = false;
   int _autoSaved = 0;
   int _queued = 0;
+  int _withFaces = 0; // photos/frames where at least one face was detected
 
   bool get isRunning => _active;
 
@@ -114,13 +120,14 @@ class GalleryScanService {
     running.value = true;
     _autoSaved = 0;
     _queued = 0;
+    _withFaces = 0;
     var serverNotReady = false;
     FaceDetector? detector;
     try {
       final permission = await PhotoManager.requestPermissionExtend();
       if (!permission.isAuth && !permission.hasAccess) {
         status.value = 'Gallery permission denied';
-        await onProgress?.call(0, 0, 'denied');
+        await onProgress?.call(0, 0, 'denied', 0, 0, 0);
         return;
       }
 
@@ -153,7 +160,7 @@ class GalleryScanService {
       final grandTotal = imgTotal + vidTotal;
       if (grandTotal <= 0) {
         status.value = 'No photos or videos found';
-        await onProgress?.call(0, 0, 'empty');
+        await onProgress?.call(0, 0, 'empty', 0, 0, 0);
         onComplete?.call();
         return;
       }
@@ -166,7 +173,8 @@ class GalleryScanService {
       );
       final tmpDir = await getTemporaryDirectory();
       final tmpPath = '${tmpDir.path}/gallery_scan_tmp.jpg';
-      await onProgress?.call(imgProcessed.length, grandTotal, 'scanning');
+      await onProgress?.call(imgProcessed.length, grandTotal, 'scanning',
+          _withFaces, _autoSaved, _queued);
 
       // ---------- PHASE 1: PHOTOS ----------
       if (imgRecent != null) {
@@ -192,6 +200,7 @@ class GalleryScanService {
                 imgProcessed.add(asset.id);
                 continue;
               }
+              _withFaces++;
               final decoded = img.decodeImage(bytes);
               if (decoded == null) {
                 imgProcessed.add(asset.id);
@@ -213,15 +222,16 @@ class GalleryScanService {
               await prefs.setStringList(_processedKey, imgProcessed.toList());
             }
             if (imgProcessed.length % 25 == 0) {
-              await onProgress?.call(
-                  imgProcessed.length, grandTotal, 'scanning');
+              await onProgress?.call(imgProcessed.length, grandTotal,
+                  'scanning', _withFaces, _autoSaved, _queued);
             }
           }
           await prefs.setStringList(_processedKey, imgProcessed.toList());
           if (!serverNotReady && !_stop) {
             imgOffset = end;
             await prefs.setInt(_offsetKey, imgOffset);
-            await onProgress?.call(imgProcessed.length, grandTotal, 'scanning');
+            await onProgress?.call(imgProcessed.length, grandTotal, 'scanning',
+                _withFaces, _autoSaved, _queued);
             if (imgOffset < imgTotal) {
               await Future<void>.delayed(_betweenBatchDelay);
             }
@@ -254,8 +264,8 @@ class GalleryScanService {
             } catch (_) {
               vidProcessed.add(asset.id);
             }
-            await onProgress?.call(
-                imgTotal + vidProcessed.length, grandTotal, 'scanning');
+            await onProgress?.call(imgTotal + vidProcessed.length, grandTotal,
+                'scanning', _withFaces, _autoSaved, _queued);
           }
           await prefs.setStringList(_videoProcessedKey, vidProcessed.toList());
           if (!serverNotReady && !_stop) {
@@ -272,7 +282,8 @@ class GalleryScanService {
       if (allDone && !_stop) {
         status.value =
             'Scan complete: $imgTotal photos + $vidTotal videos • saved $_autoSaved • $_queued for review';
-        await onProgress?.call(grandTotal, grandTotal, 'done');
+        await onProgress?.call(grandTotal, grandTotal, 'done',
+            _withFaces, _autoSaved, _queued);
         onComplete?.call();
       } else if (serverNotReady) {
         status.value = 'Paused — backend not ready, will continue later';
@@ -313,18 +324,23 @@ class GalleryScanService {
       IdentifyFn identify, EnrollFn enroll, ReviewFn submitReview) async {
     for (final face in faces) {
       if (_stop) break;
-      final crop = _cropFace(decoded, face.boundingBox);
-      if (crop == null) continue;
-      final cropB64 = base64Encode(img.encodeJpg(crop, quality: 85));
-      final result = await _identifyWithRetry(identify, cropB64);
+      // Tight crop for accurate recognition (avoids pulling in nearby faces).
+      final tight = _cropFace(decoded, face.boundingBox, 0.25);
+      if (tight == null) continue;
+      final tightB64 = base64Encode(img.encodeJpg(tight, quality: 85));
+      final result = await _identifyWithRetry(identify, tightB64);
       if (result == null) return false; // backend not ready
       await Future<void>.delayed(_perCallDelay);
       if (_isNoMatch(result.name, result.score)) continue;
+      // Wider head-and-shoulders crop for the image that gets saved/reviewed so
+      // it's actually viewable (still not the whole photo).
+      final wide = _cropFace(decoded, face.boundingBox, _saveMargin) ?? tight;
+      final wideB64 = base64Encode(img.encodeJpg(wide, quality: 88));
       if (result.score >= _autoSaveThreshold) {
-        await enroll(result.name, cropB64, _galleryFilename());
+        await enroll(result.name, wideB64, _galleryFilename());
         _autoSaved++;
       } else {
-        await submitReview(result.name, result.score, cropB64);
+        await submitReview(result.name, result.score, wideB64);
         _queued++;
       }
     }
@@ -345,6 +361,7 @@ class GalleryScanService {
     if (file == null) return true; // unreadable -> treat as processed
     final durationMs = asset.duration * 1000;
     ({String name, double score, String b64})? bestUncertain;
+    var countedFace = false;
 
     for (var i = 0; i < _videoFramesPerVideo; i++) {
       if (_stop) break;
@@ -370,26 +387,32 @@ class GalleryScanService {
         final faces =
             await detector.processImage(InputImage.fromFilePath(tmpPath));
         if (faces.isEmpty) continue;
+        if (!countedFace) {
+          _withFaces++;
+          countedFace = true;
+        }
         final decoded = img.decodeImage(frameBytes);
         if (decoded == null) continue;
         for (final face in faces) {
           if (_stop) break;
-          final crop = _cropFace(decoded, face.boundingBox);
-          if (crop == null) continue;
-          final cropB64 = base64Encode(img.encodeJpg(crop, quality: 85));
-          final result = await _identifyWithRetry(identify, cropB64);
+          final tight = _cropFace(decoded, face.boundingBox, 0.25);
+          if (tight == null) continue;
+          final tightB64 = base64Encode(img.encodeJpg(tight, quality: 85));
+          final result = await _identifyWithRetry(identify, tightB64);
           if (result == null) return false; // backend not ready
           await Future<void>.delayed(_perCallDelay);
           if (_isNoMatch(result.name, result.score)) continue;
+          final wide = _cropFace(decoded, face.boundingBox, _saveMargin) ?? tight;
+          final wideB64 = base64Encode(img.encodeJpg(wide, quality: 88));
           if (result.score >= _autoSaveThreshold) {
             // Confident -> save and stop this video immediately.
-            await enroll(result.name, cropB64, _galleryFilename());
+            await enroll(result.name, wideB64, _galleryFilename());
             _autoSaved++;
             return true;
           }
           if (bestUncertain == null || result.score > bestUncertain.score) {
             bestUncertain =
-                (name: result.name, score: result.score, b64: cropB64);
+                (name: result.name, score: result.score, b64: wideB64);
           }
         }
       } catch (_) {
@@ -434,8 +457,9 @@ class GalleryScanService {
     return null;
   }
 
-  img.Image? _cropFace(img.Image src, Rect box) {
-    const margin = 0.25;
+  // margin is a fraction of the face box added on every side (0.25 = tight face
+  // for recognition; ~1.1 = head-and-shoulders with context for the saved image).
+  img.Image? _cropFace(img.Image src, Rect box, [double margin = 0.25]) {
     final cx = box.left + box.width / 2;
     final cy = box.top + box.height / 2;
     final size = math.max(box.width, box.height) * (1 + margin);

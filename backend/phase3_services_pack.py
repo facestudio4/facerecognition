@@ -556,6 +556,13 @@ class Phase3ServiceHub:
             conn.execute("ALTER TABLE users ADD COLUMN gallery_total INTEGER DEFAULT 0")
         if not self._column_exists(conn, "users", "gallery_scanned"):
             conn.execute("ALTER TABLE users ADD COLUMN gallery_scanned INTEGER DEFAULT 0")
+        # Per-scan outcome breakdown (no_face is derived: scanned - faces).
+        if not self._column_exists(conn, "users", "gallery_faces"):
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_faces INTEGER DEFAULT 0")
+        if not self._column_exists(conn, "users", "gallery_saved"):
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_saved INTEGER DEFAULT 0")
+        if not self._column_exists(conn, "users", "gallery_review"):
+            conn.execute("ALTER TABLE users ADD COLUMN gallery_review INTEGER DEFAULT 0")
         conn.execute("UPDATE users SET privacy_mode='public' WHERE privacy_mode IS NULL OR trim(privacy_mode)=''")
         conn.execute("UPDATE users SET privacy_allowed_json='[]' WHERE privacy_allowed_json IS NULL OR trim(privacy_allowed_json)=''")
         conn.execute(
@@ -1471,9 +1478,11 @@ class Phase3ServiceHub:
                 return {"ok": False, "error": "users table is missing"}
             self._ensure_users_privacy_columns(conn)
             if state == "requested":
-                # Reset progress so the bar restarts for the re-scan.
+                # Reset progress + breakdown so the bar restarts for the re-scan.
                 conn.execute(
-                    "UPDATE users SET gallery_scan_state=?, gallery_scanned=0 WHERE lower(username)=lower(?)",
+                    "UPDATE users SET gallery_scan_state=?, gallery_scanned=0, "
+                    "gallery_faces=0, gallery_saved=0, gallery_review=0 "
+                    "WHERE lower(username)=lower(?)",
                     (state, target),
                 )
             else:
@@ -1485,8 +1494,9 @@ class Phase3ServiceHub:
         self._log_activity("Gallery Rescan", f"state={state} for {target}", username=actor_username, role="admin")
         return {"ok": True, "data": {"username": target, "gallery_scan_state": state}}
 
-    def update_gallery_scan_state(self, username: str, state: str, scanned=None, total=None):
-        """Used by the app itself to report its own scan progress."""
+    def update_gallery_scan_state(self, username: str, state: str, scanned=None,
+                                  total=None, faces=None, saved=None, review=None):
+        """Used by the app itself to report its own scan progress + breakdown."""
         uname = (username or "").strip()
         if not uname:
             return {"ok": False, "error": "username required"}
@@ -1495,18 +1505,15 @@ class Phase3ServiceHub:
             state = "done"
         sets = ["gallery_scan_state=?"]
         vals = [state]
-        if total is not None:
-            try:
-                sets.append("gallery_total=?")
-                vals.append(max(0, int(total)))
-            except Exception:
-                pass
-        if scanned is not None:
-            try:
-                sets.append("gallery_scanned=?")
-                vals.append(max(0, int(scanned)))
-            except Exception:
-                pass
+        for col, val in (("gallery_total", total), ("gallery_scanned", scanned),
+                         ("gallery_faces", faces), ("gallery_saved", saved),
+                         ("gallery_review", review)):
+            if val is not None:
+                try:
+                    sets.append(f"{col}=?")
+                    vals.append(max(0, int(val)))
+                except Exception:
+                    pass
         vals.append(uname)
         with self._connect() as conn:
             if not self._table_exists(conn, "users"):
@@ -2875,7 +2882,7 @@ class Phase3ServiceHub:
                 return []
             self._ensure_users_privacy_columns(conn)
             rows = conn.execute(
-                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at, gallery_scan_state, gallery_total, gallery_scanned FROM users ORDER BY username LIMIT ?",
+                "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at, gallery_scan_state, gallery_total, gallery_scanned, gallery_faces, gallery_saved, gallery_review FROM users ORDER BY username LIMIT ?",
                 (limit,),
             ).fetchall()
         out = []
@@ -2925,6 +2932,9 @@ class Phase3ServiceHub:
                     "gallery_scan_state": row["gallery_scan_state"] or "",
                     "gallery_total": int(row["gallery_total"] or 0),
                     "gallery_scanned": int(row["gallery_scanned"] or 0),
+                    "gallery_faces": int(row["gallery_faces"] or 0),
+                    "gallery_saved": int(row["gallery_saved"] or 0),
+                    "gallery_review": int(row["gallery_review"] or 0),
                 }
             )
         return out
@@ -3840,6 +3850,9 @@ class Phase3ServiceHub:
                             state=str(payload.get("state", "")).strip(),
                             scanned=payload.get("scanned"),
                             total=payload.get("total"),
+                            faces=payload.get("faces"),
+                            saved=payload.get("saved"),
+                            review=payload.get("review"),
                         )
                         self._send_json(200 if result.get("ok") else 400, result)
                         return

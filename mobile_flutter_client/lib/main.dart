@@ -3771,7 +3771,7 @@ class BackendApi {
   }
 
   Future<Map<String, dynamic>> updateGalleryScanState(String state,
-      {int? scanned, int? total}) async {
+      {int? scanned, int? total, int? faces, int? saved, int? review}) async {
     final ok = await ensureToken();
     if (!ok) {
       return {'ok': false, 'error': 'Token unavailable'};
@@ -3779,6 +3779,9 @@ class BackendApi {
     final payload = <String, dynamic>{'state': state};
     if (scanned != null) payload['scanned'] = scanned;
     if (total != null) payload['total'] = total;
+    if (faces != null) payload['faces'] = faces;
+    if (saved != null) payload['saved'] = saved;
+    if (review != null) payload['review'] = review;
     final res = await http
         .post(
           Uri.parse('$_base/api/mobile/gallery/scan-state'),
@@ -4425,12 +4428,16 @@ class _AuthGateState extends State<AuthGate>
       submitReview: (name, score, b64) => api.submitGalleryReview(
           candidateName: name, score: score, imageB64: b64),
       resetProcessed: reset,
-      onProgress: (scanned, total, state) async {
+      onProgress: (scanned, total, state, faces, saved, review) async {
         // Progress reporting must never crash the scan (the free-tier backend
         // may be cold/slow); swallow any failure and keep scanning.
         try {
           await api.updateGalleryScanState(state,
-              scanned: scanned, total: total);
+              scanned: scanned,
+              total: total,
+              faces: faces,
+              saved: saved,
+              review: review);
         } catch (_) {}
       },
       onComplete: () async {
@@ -11946,6 +11953,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           icon: Icons.fact_check_outlined,
           page: GalleryReviewPage(),
         ),
+        const _MenuItem(
+          title: 'Gallery Scan',
+          subtitle: 'Per-user scan progress and results breakdown',
+          colorValue: 0xFF2E8B8B,
+          icon: Icons.analytics_outlined,
+          page: GalleryScanStatsPage(),
+        ),
       ];
 
   List<_MenuItem> get _userItems => [
@@ -14338,7 +14352,9 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
     });
   }
 
-  Widget _galleryProgressBar(Map<String, dynamic> u) {
+  // Compact one-line status chip for the user registry (keeps the row tidy even
+  // with large counts). Full breakdown lives in the Gallery Scan section.
+  Widget _galleryScanChip(Map<String, dynamic> u) {
     final total = int.tryParse((u['gallery_total'] ?? 0).toString()) ?? 0;
     final scanned = int.tryParse((u['gallery_scanned'] ?? 0).toString()) ?? 0;
     final state = (u['gallery_scan_state'] ?? '').toString();
@@ -14350,65 +14366,42 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
     final denied = state == 'denied';
     final empty = state == 'empty';
     final requested = state == 'requested';
-    final uname = (u['username'] ?? 'this user').toString();
-    final String label;
+    final String text;
+    final Color tint;
+    final IconData icon;
     if (denied) {
-      label = 'Gallery scan: photo permission not granted';
+      text = 'Scan: no photo access';
+      tint = const Color(0xFFFFB86B);
+      icon = Icons.no_photography_outlined;
     } else if (empty) {
-      label = 'Gallery scan: no photos/videos found';
-    } else if (requested && total <= 0) {
-      // Queued, but the scan only runs on the user's own device while they're
-      // signed in — it can't run from the admin screen.
-      label = 'Gallery scan: queued — runs when $uname opens the app';
-    } else if (total <= 0) {
-      label = 'Gallery scan: starting…';
+      text = 'Scan: no media';
+      tint = const Color(0xFF9FB2CF);
+      icon = Icons.image_not_supported_outlined;
     } else if (done) {
-      label = 'Gallery scan: complete ($total items)';
+      text = 'Scan ✓';
+      tint = const Color(0xFF8AF0C8);
+      icon = Icons.check_circle;
+    } else if (requested && total <= 0) {
+      text = 'Scan queued';
+      tint = const Color(0xFF9FC3FF);
+      icon = Icons.schedule;
+    } else if (total <= 0) {
+      text = 'Scan starting…';
+      tint = const Color(0xFF9FC3FF);
+      icon = Icons.photo_library_outlined;
     } else {
-      label =
-          'Gallery scan: $scanned / $total (${(frac * 100).toStringAsFixed(0)}%)';
+      text = 'Scan ${(frac * 100).toStringAsFixed(0)}%';
+      tint = const Color(0xFF9FC3FF);
+      icon = Icons.photo_library_outlined;
     }
-    final tint = denied
-        ? const Color(0xFFFFB86B)
-        : done
-            ? const Color(0xFF8AF0C8)
-            : const Color(0xFF9FC3FF);
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Icon(done ? Icons.check_circle : Icons.photo_library_outlined,
-                  size: 12, color: tint),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11, color: tint),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 3),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(999),
-            child: LinearProgressIndicator(
-              value: (denied || empty)
-                  ? 0.0
-                  : (total > 0 ? frac.toDouble() : null),
-              minHeight: 5,
-              backgroundColor: const Color(0xFF1A2C45),
-              color: denied
-                  ? const Color(0xFFFFB86B)
-                  : done
-                      ? const Color(0xFF45D88F)
-                      : const Color(0xFF5EC8FF),
-            ),
-          ),
+          Icon(icon, size: 12, color: tint),
+          const SizedBox(width: 4),
+          Text(text, style: TextStyle(fontSize: 11, color: tint)),
         ],
       ),
     );
@@ -14491,7 +14484,7 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
                           fontSize: 12, color: Color(0xFFA9C1E7)),
                     ),
                   ],
-                  _galleryProgressBar(u),
+                  _galleryScanChip(u),
                 ],
               ),
             ),
@@ -16753,6 +16746,243 @@ class _DatabaseBridgePageState extends State<DatabaseBridgePage> {
             icon: const Icon(Icons.refresh),
             label: const Text('Refresh Database Snapshot'),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class GalleryScanStatsPage extends StatefulWidget {
+  const GalleryScanStatsPage({super.key});
+
+  @override
+  State<GalleryScanStatsPage> createState() => _GalleryScanStatsPageState();
+}
+
+class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
+  List<Map<String, dynamic>> _users = const [];
+  bool _loading = true;
+  String _error = '';
+  Timer? _refresh;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _refresh = Timer.periodic(const Duration(seconds: 20), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _refresh?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final api = buildBackendApi();
+      final res = await api.getUsers(limit: 500);
+      final rows = ((res['data'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      int activity(Map m) {
+        final s = (m['gallery_scan_state'] ?? '').toString();
+        final t = int.tryParse((m['gallery_total'] ?? 0).toString()) ?? 0;
+        return (s.isNotEmpty || t > 0) ? 0 : 1; // active users first
+      }
+
+      rows.sort((a, b) {
+        final c = activity(a).compareTo(activity(b));
+        if (c != 0) return c;
+        return (a['username'] ?? '')
+            .toString()
+            .toLowerCase()
+            .compareTo((b['username'] ?? '').toString().toLowerCase());
+      });
+      if (!mounted) return;
+      setState(() {
+        _users = rows;
+        _loading = false;
+        _error = '';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Load error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _rescan(String username) async {
+    final api = buildBackendApi();
+    try {
+      await api.requestGalleryRescan(username);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'Rescan queued for $username — runs when they next open the app.')));
+      _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Rescan failed: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+        title: const Text('Gallery Scan'),
+        backgroundColor: const Color(0xFF14233C),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(
+                  child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(_error,
+                      style: const TextStyle(color: Colors.redAccent)),
+                ))
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          'The scan runs on each user\'s own phone while they are '
+                          'signed in. "Rescan" only queues it; progress appears '
+                          'here once their device runs it. Only matched face crops '
+                          'are saved — never whole photos.',
+                          style: TextStyle(
+                              fontSize: 12, color: Color(0xFF9FB2CF)),
+                        ),
+                      ),
+                      ..._users.map(_userCard),
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _userCard(Map<String, dynamic> u) {
+    final name = (u['username'] ?? '-').toString();
+    final state = (u['gallery_scan_state'] ?? '').toString();
+    final total = int.tryParse((u['gallery_total'] ?? 0).toString()) ?? 0;
+    final scanned = int.tryParse((u['gallery_scanned'] ?? 0).toString()) ?? 0;
+    final faces = int.tryParse((u['gallery_faces'] ?? 0).toString()) ?? 0;
+    final saved = int.tryParse((u['gallery_saved'] ?? 0).toString()) ?? 0;
+    final review = int.tryParse((u['gallery_review'] ?? 0).toString()) ?? 0;
+    final noFace = (scanned - faces).clamp(0, scanned);
+    final done = state == 'done' || (total > 0 && scanned >= total);
+    final denied = state == 'denied';
+    final empty = state == 'empty';
+    final requested = state == 'requested';
+    final frac = total > 0 ? (scanned / total).clamp(0.0, 1.0) : 0.0;
+    final hasActivity = state.isNotEmpty || total > 0 || scanned > 0;
+
+    final String status;
+    if (!hasActivity) {
+      status = 'Not scanned yet';
+    } else if (denied) {
+      status = 'Photo permission not granted';
+    } else if (empty) {
+      status = 'No photos/videos found';
+    } else if (requested && total <= 0) {
+      status = 'Queued — runs when $name opens the app';
+    } else if (total <= 0) {
+      status = 'Starting…';
+    } else if (done) {
+      status = 'Complete';
+    } else {
+      status = 'Scanning… ${(frac * 100).toStringAsFixed(0)}%';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF17253E),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF2E4D7A)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(name,
+                    style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white)),
+              ),
+              TextButton.icon(
+                onPressed: () => _rescan(name),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Rescan'),
+              ),
+            ],
+          ),
+          Text(status,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF9FC3FF))),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: (denied || empty)
+                  ? 0.0
+                  : (total > 0 ? frac.toDouble() : null),
+              minHeight: 6,
+              backgroundColor: const Color(0xFF1A2C45),
+              color: done ? const Color(0xFF45D88F) : const Color(0xFF5EC8FF),
+            ),
+          ),
+          if (hasActivity && (total > 0 || scanned > 0)) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _stat('Scanned', '$scanned / $total'),
+                _stat('Had faces', '$faces'),
+                _stat('Saved', '$saved'),
+                _stat('In review', '$review'),
+                _stat('No face', '$noFace'),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _stat(String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF12203A),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF294A77)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label,
+              style: const TextStyle(fontSize: 10, color: Color(0xFF8FA6C8))),
+          const SizedBox(height: 2),
+          Text(value,
+              style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white)),
         ],
       ),
     );
