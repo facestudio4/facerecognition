@@ -2939,9 +2939,10 @@ class Phase3ServiceHub:
                     suppressed = True
 
             if best_score < (threshold + sample_penalty) or ambiguous or suppressed:
-                best = {"name": "Unknown", "score": 0.0}
+                best = {"name": "Unknown", "score": 0.0, "margin": 0.0}
             else:
-                best = best_candidate
+                best = {"name": best_name, "score": best_score,
+                        "margin": round(best_score - second_score, 4)}
 
             if best["score"] > float(global_best.get("score", 0.0)):
                 global_best = best
@@ -2980,6 +2981,12 @@ class Phase3ServiceHub:
                 }
             )
 
+        # Gallery-scan strictness, tunable via env without an app rebuild.
+        def _envf(key, default):
+            try:
+                return float(os.getenv(key, str(default)))
+            except Exception:
+                return default
         result = {
             "detected": True,
             "threshold": threshold,
@@ -2993,6 +3000,11 @@ class Phase3ServiceHub:
             "image_height": int(frame.shape[0]),
             "best": global_best,
             "matches": global_top,
+            "gallery": {
+                "auto_save": _envf("MOBILE_GALLERY_AUTOSAVE", 0.72),
+                "review": _envf("MOBILE_GALLERY_REVIEW", 0.55),
+                "min_margin": _envf("MOBILE_GALLERY_MARGIN", 0.08),
+            },
         }
 
         track = tracking if isinstance(tracking, dict) else {}

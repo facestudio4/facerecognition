@@ -45,8 +45,11 @@ class GalleryScanService {
   // Strict auto-save: only near-certain matches are saved automatically; the
   // band below goes to the admin review queue (family lookalikes used to cross
   // the old 0.52 bar and land in the wrong folder).
-  static const double _autoSaveThreshold = 0.66; // >= this -> auto-save
-  static const double _reviewThreshold = 0.48; // [review, auto) -> admin review
+  // Fallback defaults — the live values come from the server (data.gallery) so
+  // they can be tuned via env vars without rebuilding the app.
+  static const double _autoSaveThreshold = 0.72; // >= this -> auto-save
+  static const double _reviewThreshold = 0.55; // [review, auto) -> admin review
+  static const double _autoSaveMargin = 0.08; // best must beat 2nd by this much
   // How much context to keep around the face in the SAVED image (fraction of the
   // face box added per side). ~1.1 ≈ head-and-shoulders + background.
   static const double _saveMargin = 1.1;
@@ -313,11 +316,6 @@ class GalleryScanService {
     return !_stop;
   }
 
-  bool _isNoMatch(String name, double score) =>
-      name.trim().isEmpty ||
-      name.toLowerCase() == 'unknown' ||
-      score < _reviewThreshold;
-
   String _galleryFilename() =>
       'gallery_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
@@ -334,12 +332,12 @@ class GalleryScanService {
       final result = await _identifyWithRetry(identify, tightB64);
       if (result == null) return false; // backend not ready
       await Future<void>.delayed(_perCallDelay);
-      if (_isNoMatch(result.name, result.score)) continue;
+      if (result.isNoMatch) continue;
       // Wider head-and-shoulders crop for the image that gets saved/reviewed so
       // it's actually viewable (still not the whole photo).
       final wide = _cropFace(decoded, face.boundingBox, _saveMargin) ?? tight;
       final wideB64 = base64Encode(img.encodeJpg(wide, quality: 88));
-      if (result.score >= _autoSaveThreshold) {
+      if (result.isConfident) {
         await enroll(result.name, wideB64, _galleryFilename());
         _autoSaved++;
       } else {
@@ -404,10 +402,10 @@ class GalleryScanService {
           final result = await _identifyWithRetry(identify, tightB64);
           if (result == null) return false; // backend not ready
           await Future<void>.delayed(_perCallDelay);
-          if (_isNoMatch(result.name, result.score)) continue;
+          if (result.isNoMatch) continue;
           final wide = _cropFace(decoded, face.boundingBox, _saveMargin) ?? tight;
           final wideB64 = base64Encode(img.encodeJpg(wide, quality: 88));
-          if (result.score >= _autoSaveThreshold) {
+          if (result.isConfident) {
             // Confident -> save and stop this video immediately.
             await enroll(result.name, wideB64, _galleryFilename());
             _autoSaved++;
@@ -432,9 +430,10 @@ class GalleryScanService {
   }
 
   // Identify a crop, riding out a cold/overloaded backend with backoff. Returns
-  // null only if the backend is still unreachable after all retries.
-  Future<({String name, double score})?> _identifyWithRetry(
-      IdentifyFn identify, String b64) async {
+  // null only if the backend is still unreachable after all retries. Also carries
+  // the runner-up margin and the server-tunable gallery thresholds so accuracy
+  // can be adjusted via env vars without rebuilding the app.
+  Future<_MatchResult?> _identifyWithRetry(IdentifyFn identify, String b64) async {
     for (var attempt = 0; attempt <= _serverRetryBackoffs.length; attempt++) {
       if (_stop) {
         return null;
@@ -444,10 +443,17 @@ class GalleryScanService {
         final data = res['data'];
         if (data is Map) {
           final best = (data['best'] as Map?) ?? const {};
-          final name = (best['name'] ?? 'Unknown').toString();
-          final score =
-              double.tryParse((best['score'] ?? 0).toString()) ?? 0.0;
-          return (name: name, score: score);
+          final gallery = (data['gallery'] as Map?) ?? const {};
+          double f(dynamic v, double dflt) =>
+              double.tryParse((v ?? '').toString()) ?? dflt;
+          return _MatchResult(
+            name: (best['name'] ?? 'Unknown').toString(),
+            score: f(best['score'], 0.0),
+            margin: f(best['margin'], 0.0),
+            autoSave: f(gallery['auto_save'], _autoSaveThreshold),
+            review: f(gallery['review'], _reviewThreshold),
+            minMargin: f(gallery['min_margin'], _autoSaveMargin),
+          );
         }
       } catch (_) {
         // 502 / timeout / non-JSON -> backend not ready.
@@ -480,4 +486,31 @@ class GalleryScanService {
     }
     return img.copyCrop(src, x: x, y: y, width: s, height: s);
   }
+}
+
+// One identify result plus the server-driven gallery thresholds for that call.
+class _MatchResult {
+  _MatchResult({
+    required this.name,
+    required this.score,
+    required this.margin,
+    required this.autoSave,
+    required this.review,
+    required this.minMargin,
+  });
+
+  final String name;
+  final double score; // similarity to the best person
+  final double margin; // gap to the 2nd-best person (clear-winner signal)
+  final double autoSave; // >= this (and margin ok) -> auto-save
+  final double review; // [review, autoSave) -> admin review queue
+  final double minMargin; // required gap over 2nd-best for an auto-save
+
+  bool get isNoMatch {
+    final n = name.trim().toLowerCase();
+    return n.isEmpty || n == 'unknown' || score < review;
+  }
+
+  // Auto-save only a clear, confident winner; everything else goes to review.
+  bool get isConfident => score >= autoSave && margin >= minMargin;
 }
