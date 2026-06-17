@@ -63,6 +63,10 @@ class Phase3ServiceHub:
         self._cloud_uploaded_faces = {}
         self._cloud_db_sig = None
         self._cloud_enc_hash = None
+        self._cloud_neg_hash = None
+        # Hard-negative memory: {person_lower: [embeddings]} of faces an admin
+        # rejected/deleted as wrong, used to suppress repeat look-alike matches.
+        self._mobile_negatives = None
         # Restore the DB + encodings from Supabase BEFORE opening the DB, so a
         # fresh/woken free-tier instance comes back with the real data instead of
         # the committed seed.
@@ -124,6 +128,10 @@ class Phase3ServiceHub:
                 supa.download_file("face_encodings.pkl", self._encodings_path())
             except Exception:
                 pass
+            try:
+                supa.download_file("face_negatives.pkl", self._negatives_path())
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -153,6 +161,7 @@ class Phase3ServiceHub:
                 time.sleep(15)
                 self._backup_db_if_changed(supa)
                 self._backup_encodings_if_changed(supa)
+                self._backup_negatives_if_changed(supa)
                 self._backup_new_faces(supa)
             except Exception:
                 pass
@@ -236,6 +245,16 @@ class Phase3ServiceHub:
             return
         if supa.upload_file("face_encodings.pkl", enc):
             self._cloud_enc_hash = h
+
+    def _backup_negatives_if_changed(self, supa):
+        neg = self._negatives_path()
+        if not os.path.exists(neg):
+            return
+        h = self._file_hash(neg)
+        if h is None or h == self._cloud_neg_hash:
+            return
+        if supa.upload_file("face_negatives.pkl", neg):
+            self._cloud_neg_hash = h
 
     def _backup_new_faces(self, supa):
         faces_root = self._faces_root(ensure=False)
@@ -394,6 +413,71 @@ class Phase3ServiceHub:
 
     _FACE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
+    def _negatives_path(self):
+        enc = self._encodings_path()
+        parent = os.path.dirname(enc) or "."
+        return os.path.join(parent, "face_negatives.pkl")
+
+    def _load_negatives(self):
+        if isinstance(self._mobile_negatives, dict):
+            return self._mobile_negatives
+        import pickle
+        neg = {}
+        try:
+            path = self._negatives_path()
+            if path and os.path.exists(path):
+                with open(path, "rb") as f:
+                    loaded = pickle.load(f)
+                if isinstance(loaded, dict):
+                    neg = loaded
+        except Exception:
+            neg = {}
+        self._mobile_negatives = neg
+        return neg
+
+    def _add_negative_embedding(self, person: str, image_b64: str = "", image_path: str = ""):
+        """Remember a face as a NEGATIVE example for `person` (a match the admin
+        rejected/deleted). Future faces that look at least as much like this as
+        like the person's real photos won't be matched to them."""
+        try:
+            from frontend import facercognition as legacy
+        except Exception:
+            return False
+        img = None
+        try:
+            if image_path and os.path.exists(image_path):
+                img = cv2.imread(image_path)
+            elif image_b64:
+                img = self._decode_image_b64(image_b64)
+        except Exception:
+            img = None
+        if img is None:
+            return False
+        try:
+            emb = legacy.compute_embedding(img)
+        except Exception:
+            emb = None
+        if emb is None:
+            return False
+        key = self._sanitize_face_name(person).lower()
+        if not key:
+            return False
+        neg = self._load_negatives()
+        lst = neg.setdefault(key, [])
+        lst.append(emb)
+        if len(lst) > 50:  # cap per-person to bound size
+            del lst[: len(lst) - 50]
+        self._mobile_negatives = neg
+        import pickle
+        try:
+            path = self._negatives_path()
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "wb") as f:
+                pickle.dump(neg, f)
+        except Exception:
+            pass
+        return True
+
     def _person_dir(self, person: str):
         """Return (matched_name, dir_path) for a person folder (case-insensitive)."""
         safe = self._sanitize_face_name(person)
@@ -458,6 +542,12 @@ class Phase3ServiceHub:
             if not os.path.isfile(fpath):
                 continue
             rel = os.path.relpath(fpath, faces_root).replace(os.sep, "/")
+            # Learn from the deletion: record this wrong photo as a negative for
+            # the person BEFORE removing the file (needs the image to embed).
+            try:
+                self._add_negative_embedding(matched, image_path=fpath)
+            except Exception:
+                pass
             try:
                 os.remove(fpath)
             except Exception:
@@ -1580,6 +1670,13 @@ class Phase3ServiceHub:
             with self._connect() as conn:
                 conn.execute("UPDATE gallery_reviews SET status='rejected' WHERE id=?", (review_id,))
                 conn.commit()
+            # Learn from the rejection: remember this face as a negative for the
+            # candidate so the same look-alike stops getting matched to them.
+            try:
+                self._add_negative_embedding(
+                    row["candidate_name"] or "", image_b64=row["image_b64"] or "")
+            except Exception:
+                pass
             return {"ok": True, "data": {"id": review_id, "status": "rejected"}}
 
         person = self._sanitize_face_name(name_override) if name_override else (row["candidate_name"] or "")
@@ -2819,7 +2916,29 @@ class Phase3ServiceHub:
             required_margin = margin + (0.02 if insufficient_samples else 0.0)
             ambiguous = len(top) > 1 and (best_score - second_score) < required_margin
 
-            if best_score < (threshold + sample_penalty) or ambiguous:
+            # Hard-negative suppression: if this face is about as similar to a
+            # previously rejected/deleted example for the top candidate as it is
+            # to that person's real photos, treat it as not-a-match. This is how
+            # the system "learns" from rejections — the look-alike stops matching.
+            suppressed = False
+            neg_for = self._load_negatives().get(best_name.lower(), []) if best_name else []
+            if neg_for:
+                neg_sim = 0.0
+                for ne in neg_for:
+                    try:
+                        ns = legacy._sface_recognizer.match(
+                            embedding.reshape(1, -1),
+                            np.asarray(ne, dtype=np.float32).reshape(1, -1),
+                            cv2.FaceRecognizerSF_FR_COSINE,
+                        )
+                        if float(ns) > neg_sim:
+                            neg_sim = float(ns)
+                    except Exception:
+                        pass
+                if neg_sim >= best_score - margin:
+                    suppressed = True
+
+            if best_score < (threshold + sample_penalty) or ambiguous or suppressed:
                 best = {"name": "Unknown", "score": 0.0}
             else:
                 best = best_candidate
