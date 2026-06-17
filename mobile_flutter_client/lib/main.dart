@@ -4380,18 +4380,35 @@ class _AuthGateState extends State<AuthGate>
 
     var pending = prefs.getBool(pendingKey) ?? false;
     var reset = false;
+    var stateKnown = false;
 
+    // The backend's per-account scan state is the source of truth — this works
+    // even for a re-created account on a device that still holds old local flags
+    // (the bug that stopped re-created users from ever scanning).
     try {
       final st = await api.getGalleryScanState();
       final stateVal = (st['data']?['gallery_scan_state'] ?? '').toString();
+      stateKnown = true;
       if (stateVal == 'requested') {
         pending = true;
         reset = true; // admin re-scan: start fresh
+      } else if (stateVal.isEmpty) {
+        // Fresh or re-created account -> full scan, ignoring any stale local
+        // checkpoint left by a previous account on this device.
+        pending = true;
+        reset = true;
+      } else if (stateVal == 'scanning') {
+        // Interrupted mid-scan -> resume from the local checkpoint.
+        pending = true;
+      } else if (stateVal == 'denied') {
+        // Was blocked before; retry now if access has since been granted.
+        if (await GalleryScanService.hasGalleryPermission()) pending = true;
       }
+      // 'done' / 'empty' -> nothing to do.
     } catch (_) {}
 
-    // First time ever on this device for this account -> scan once.
-    if (!pending && prefs.getBool(initiatedKey) != true) {
+    // Offline fallback: first time on this device for this account.
+    if (!stateKnown && !pending && prefs.getBool(initiatedKey) != true) {
       pending = true;
     }
     if (!pending) {
@@ -14332,11 +14349,17 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
     final done = state == 'done' || (total > 0 && scanned >= total);
     final denied = state == 'denied';
     final empty = state == 'empty';
+    final requested = state == 'requested';
+    final uname = (u['username'] ?? 'this user').toString();
     final String label;
     if (denied) {
       label = 'Gallery scan: photo permission not granted';
     } else if (empty) {
       label = 'Gallery scan: no photos/videos found';
+    } else if (requested && total <= 0) {
+      // Queued, but the scan only runs on the user's own device while they're
+      // signed in — it can't run from the admin screen.
+      label = 'Gallery scan: queued — runs when $uname opens the app';
     } else if (total <= 0) {
       label = 'Gallery scan: starting…';
     } else if (done) {
