@@ -435,7 +435,8 @@ class Phase3ServiceHub:
         self._mobile_negatives = neg
         return neg
 
-    def _add_negative_embedding(self, person: str, image_b64: str = "", image_path: str = ""):
+    def _add_negative_embedding(self, person: str, image_b64: str = "",
+                                image_path: str = "", image_bytes: bytes = b""):
         """Remember a face as a NEGATIVE example for `person` (a match the admin
         rejected/deleted). Future faces that look at least as much like this as
         like the person's real photos won't be matched to them."""
@@ -445,7 +446,10 @@ class Phase3ServiceHub:
             return False
         img = None
         try:
-            if image_path and os.path.exists(image_path):
+            if image_bytes:
+                arr = np.frombuffer(image_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            elif image_path and os.path.exists(image_path):
                 img = cv2.imread(image_path)
             elif image_b64:
                 img = self._decode_image_b64(image_b64)
@@ -489,6 +493,25 @@ class Phase3ServiceHub:
             if os.path.isdir(p) and entry.lower() == safe.lower():
                 return entry, p
         return "", ""
+
+    def list_face_people(self):
+        """List every saved face folder (the recognized person's name) with a
+        photo count, so the admin can browse/clean by person — not by username."""
+        root = self._faces_root(ensure=False)
+        people = []
+        if os.path.isdir(root):
+            for entry in sorted(os.listdir(root), key=lambda s: s.lower()):
+                p = os.path.join(root, entry)
+                if not os.path.isdir(p):
+                    continue
+                try:
+                    cnt = sum(1 for f in os.listdir(p)
+                              if os.path.splitext(f)[1].lower() in self._FACE_EXTS)
+                except Exception:
+                    cnt = 0
+                if cnt > 0:
+                    people.append({"person": entry, "count": cnt})
+        return {"ok": True, "data": {"people": people}}
 
     def list_person_faces(self, person: str, thumb: int = 256):
         """List a person's saved face images with small JPEG thumbnails (b64)."""
@@ -534,6 +557,7 @@ class Phase3ServiceHub:
             supa = None
         faces_root = self._faces_root(ensure=False)
         deleted = []
+        pending = []  # (rel, image_bytes) for async negative-learning + cloud delete
         for raw in filenames:
             fn = os.path.basename(str(raw).strip())
             if not fn or os.path.splitext(fn)[1].lower() not in self._FACE_EXTS:
@@ -542,23 +566,20 @@ class Phase3ServiceHub:
             if not os.path.isfile(fpath):
                 continue
             rel = os.path.relpath(fpath, faces_root).replace(os.sep, "/")
-            # Learn from the deletion: record this wrong photo as a negative for
-            # the person BEFORE removing the file (needs the image to embed).
+            # Read the bytes (for negative-learning) BEFORE removing the file.
+            data = None
             try:
-                self._add_negative_embedding(matched, image_path=fpath)
+                with open(fpath, "rb") as f:
+                    data = f.read()
             except Exception:
-                pass
+                data = None
             try:
                 os.remove(fpath)
             except Exception:
                 continue
             deleted.append(fn)
             self._cloud_uploaded_faces.pop(fpath, None)
-            if supa is not None and supa.enabled():
-                try:
-                    supa.delete_file(f"faces/{rel}")
-                except Exception:
-                    pass
+            pending.append((rel, data))
         folder_removed = False
         try:
             if not any(os.path.splitext(f)[1].lower() in self._FACE_EXTS
@@ -567,7 +588,32 @@ class Phase3ServiceHub:
                 folder_removed = True
         except Exception:
             pass
-        self._rebuild_person_encodings(matched, removed=folder_removed)
+
+        # The slow parts (cloud delete, embedding the negatives, rebuilding the
+        # person's encodings) run in the background so the app's request returns
+        # immediately instead of timing out on the free tier.
+        def _finish_delete():
+            try:
+                from backend import supabase_store as supa2
+            except Exception:
+                supa2 = None
+            for rel, data in pending:
+                if data:
+                    try:
+                        self._add_negative_embedding(matched, image_bytes=data)
+                    except Exception:
+                        pass
+                if supa2 is not None and supa2.enabled():
+                    try:
+                        supa2.delete_file(f"faces/{rel}")
+                    except Exception:
+                        pass
+            try:
+                self._rebuild_person_encodings(matched, removed=folder_removed)
+            except Exception:
+                pass
+
+        threading.Thread(target=_finish_delete, daemon=True).start()
         self._log_activity("Face Delete", f"{matched}: removed {len(deleted)}", role="admin")
         return {"ok": True, "data": {"person": matched, "deleted": deleted,
                                      "folder_removed": folder_removed}}
@@ -4148,6 +4194,15 @@ class Phase3ServiceHub:
                             actor_role=role,
                         )
                         self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/faces/people":
+                        token_payload = self._token_payload() or {}
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        if role != "admin":
+                            self._send_json(403, {"ok": False, "error": "admin role required"})
+                            return
+                        self._send_json(200, hub.list_face_people())
                         return
 
                     if path == "/api/admin/faces/list":

@@ -3848,6 +3848,23 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // List every saved face folder (by recognized person name) with photo counts.
+  Future<Map<String, dynamic>> listFacePeople() async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/faces/people'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // List a person's saved face images (with small thumbnails) for review/cleanup.
   Future<Map<String, dynamic>> listPersonFaces(String person) async {
     final ok = await ensureToken();
@@ -11996,6 +12013,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           icon: Icons.analytics_outlined,
           page: GalleryScanStatsPage(),
         ),
+        const _MenuItem(
+          title: 'Saved Faces',
+          subtitle: 'Browse saved photos by person and delete wrong ones',
+          colorValue: 0xFF3A7BD5,
+          icon: Icons.folder_shared_outlined,
+          page: FaceFoldersPage(),
+        ),
       ];
 
   List<_MenuItem> get _userItems => [
@@ -16960,16 +16984,6 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                         fontWeight: FontWeight.w600,
                         color: Colors.white)),
               ),
-              IconButton(
-                tooltip: 'View / delete saved photos',
-                visualDensity: VisualDensity.compact,
-                onPressed: () async {
-                  await Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => PersonFacesPage(person: name)));
-                  _load();
-                },
-                icon: const Icon(Icons.photo_library_outlined, size: 18),
-              ),
               TextButton.icon(
                 onPressed: () => _rescan(name),
                 icon: const Icon(Icons.refresh, size: 16),
@@ -17031,6 +17045,119 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                   color: Colors.white)),
         ],
       ),
+    );
+  }
+}
+
+class FaceFoldersPage extends StatefulWidget {
+  const FaceFoldersPage({super.key});
+
+  @override
+  State<FaceFoldersPage> createState() => _FaceFoldersPageState();
+}
+
+class _FaceFoldersPageState extends State<FaceFoldersPage> {
+  List<Map<String, dynamic>> _people = const [];
+  bool _loading = true;
+  String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final api = buildBackendApi();
+      final res = await api.listFacePeople();
+      final people = (((res['data'] as Map?)?['people'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _people = people;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Load error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+        title: const Text('Saved Faces'),
+        backgroundColor: const Color(0xFF14233C),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(
+                  child: Text(_error,
+                      style: const TextStyle(color: Colors.redAccent)))
+              : _people.isEmpty
+                  ? const Center(
+                      child: Text('No saved face folders yet.',
+                          style: TextStyle(color: Color(0xFF9FB2CF))))
+                  : RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              'Folders are named by the recognized person. Tap one '
+                              'to see its photos and delete any that are the wrong '
+                              'person.',
+                              style: TextStyle(
+                                  fontSize: 12, color: Color(0xFF9FB2CF)),
+                            ),
+                          ),
+                          ..._people.map((p) {
+                            final person = (p['person'] ?? '-').toString();
+                            final count =
+                                int.tryParse((p['count'] ?? 0).toString()) ?? 0;
+                            return Card(
+                              color: const Color(0xFF17253E),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                              child: ListTile(
+                                leading: const Icon(Icons.person_outline,
+                                    color: Color(0xFF9FC3FF)),
+                                title: Text(person,
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                subtitle: Text('$count photo(s)',
+                                    style: const TextStyle(
+                                        color: Color(0xFF9FB2CF))),
+                                trailing: const Icon(Icons.chevron_right,
+                                    color: Color(0xFF6F86AD)),
+                                onTap: () async {
+                                  await Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                          builder: (_) =>
+                                              PersonFacesPage(person: person)));
+                                  _load();
+                                },
+                              ),
+                            );
+                          }),
+                        ],
+                      ),
+                    ),
     );
   }
 }
