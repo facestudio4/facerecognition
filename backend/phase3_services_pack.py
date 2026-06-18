@@ -990,6 +990,112 @@ class Phase3ServiceHub:
         self._log_activity("Token Secret Rotated", "API token secret rotated")
         return secret
 
+    # ----- Customer API keys (sellable, per-developer) -----
+    # Distinct from the single bootstrap key: each has its own label, rate limit,
+    # usage counter, and can be revoked individually. Stored hashed (the raw key
+    # is shown only once at creation).
+    def _ensure_api_keys_table(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key_hash TEXT UNIQUE NOT NULL,
+                    prefix TEXT NOT NULL,
+                    label TEXT DEFAULT '',
+                    active INTEGER DEFAULT 1,
+                    rate_per_min INTEGER DEFAULT 60,
+                    request_count INTEGER DEFAULT 0,
+                    created TEXT DEFAULT '',
+                    last_used TEXT DEFAULT ''
+                )
+                """
+            )
+            conn.commit()
+
+    def _hash_api_key(self, key: str) -> str:
+        # High-entropy random keys -> a fast SHA-256 is sufficient for lookup.
+        return hashlib.sha256((key or "").encode("utf-8")).hexdigest()
+
+    def create_customer_api_key(self, label: str, rate_per_min, actor_role: str):
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        try:
+            rpm = max(1, min(100000, int(rate_per_min)))
+        except Exception:
+            rpm = 60
+        self._ensure_api_keys_table()
+        raw = "fsk_" + secrets.token_hex(24)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO api_keys(key_hash, prefix, label, active, rate_per_min, request_count, created, last_used) "
+                "VALUES (?,?,?,1,?,0,?,'')",
+                (self._hash_api_key(raw), raw[:12], (label or "").strip()[:80], rpm, now),
+            )
+            conn.commit()
+        self._log_activity("API Key Created", f"label={label}", role="admin")
+        # The raw key is returned ONCE; only its hash is stored.
+        return {"ok": True, "data": {"api_key": raw, "prefix": raw[:12],
+                                     "label": (label or "").strip(), "rate_per_min": rpm,
+                                     "note": "Store this key now — it is not shown again."}}
+
+    def list_customer_api_keys(self, actor_role: str):
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        self._ensure_api_keys_table()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, prefix, label, active, rate_per_min, request_count, created, last_used "
+                "FROM api_keys ORDER BY id DESC"
+            ).fetchall()
+        keys = [{
+            "id": r["id"], "prefix": r["prefix"], "label": r["label"] or "",
+            "active": bool(r["active"]), "rate_per_min": int(r["rate_per_min"] or 0),
+            "request_count": int(r["request_count"] or 0),
+            "created": r["created"] or "", "last_used": r["last_used"] or "",
+        } for r in rows]
+        return {"ok": True, "data": {"keys": keys}}
+
+    def revoke_customer_api_key(self, key_id, actor_role: str):
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        try:
+            key_id = int(key_id)
+        except Exception:
+            return {"ok": False, "error": "invalid key id"}
+        self._ensure_api_keys_table()
+        with self._connect() as conn:
+            conn.execute("UPDATE api_keys SET active=0 WHERE id=?", (key_id,))
+            conn.commit()
+        self._log_activity("API Key Revoked", f"id={key_id}", role="admin")
+        return {"ok": True, "data": {"id": key_id, "active": False}}
+
+    def _check_customer_api_key(self, key: str):
+        """Return a dict for a valid+active customer key (and bump usage), else None."""
+        if not key or not key.startswith("fsk_"):
+            return None
+        try:
+            self._ensure_api_keys_table()
+            kh = self._hash_api_key(key)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT id, prefix, label, rate_per_min FROM api_keys WHERE key_hash=? AND active=1 LIMIT 1",
+                    (kh,),
+                ).fetchone()
+                if not row:
+                    return None
+                conn.execute(
+                    "UPDATE api_keys SET request_count=request_count+1, last_used=? WHERE id=?",
+                    (now, row["id"]),
+                )
+                conn.commit()
+                return {"id": row["id"], "prefix": row["prefix"],
+                        "label": row["label"] or "", "rate_per_min": int(row["rate_per_min"] or 60)}
+        except Exception:
+            return None
+
     def generate_access_token(self, subject: str = "admin", ttl_minutes: int = 120, role: str = "user"):
         if ttl_minutes < 1:
             ttl_minutes = 1
@@ -3472,6 +3578,28 @@ class Phase3ServiceHub:
             # memory guard). Face crops are small; 16 MB is generous.
             _MAX_BODY_BYTES = 16 * 1024 * 1024
 
+            # Endpoints a sold customer API key may call (recognition product only;
+            # never admin, user-management or auth).
+            _CUSTOMER_API_PATHS = {
+                "/api/mobile/identify",
+                "/api/mobile/compare",
+                "/api/mobile/face/create",
+                "/api/mobile/face/enroll",
+                "/api/mobile/face/enroll-batch",
+                "/api/mobile/face/lookup",
+            }
+
+            def _too_many(self, retry: int):
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Retry-After", str(retry))
+                self._send_cors()
+                self._send_security_headers()
+                body = json.dumps({"ok": False, "error": "Too many requests. Please slow down."}).encode("utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def _read_json(self):
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 if length <= 0:
@@ -3781,18 +3909,30 @@ class Phase3ServiceHub:
                     gen_max = int(os.environ.get("FACESTUDIO_RL_API_MAX", "300") or 300)
                     retry = hub._rate_limit_check(ip, "api", gen_max, 60)
                 if retry > 0:
-                    self.send_response(429)
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
-                    self.send_header("Retry-After", str(retry))
-                    self._send_cors()
-                    self._send_security_headers()
-                    body = json.dumps({"ok": False, "error": "Too many requests. Please slow down."}).encode("utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._too_many(retry)
                     return
 
-                if path.startswith("/api/") and path not in auth_paths and not self._auth_ok():
+                # Customer API keys (sold per developer): valid ONLY for the public
+                # recognition endpoints, never admin/auth. The bootstrap key and
+                # JWT sessions keep working exactly as before.
+                api_key_hdr = self.headers.get("X-API-Key", "")
+                customer_ok = False
+                if api_key_hdr and api_key_hdr != hub.api_key:
+                    crow = hub._check_customer_api_key(api_key_hdr)
+                    if crow is not None:
+                        if path not in self._CUSTOMER_API_PATHS:
+                            self._send_json(403, {"ok": False, "error": "This API key cannot access that endpoint"})
+                            return
+                        ck_retry = hub._rate_limit_check(
+                            "ck:" + str(crow["prefix"]), "ckey",
+                            int(crow["rate_per_min"] or 60), 60)
+                        if ck_retry > 0:
+                            self._too_many(ck_retry)
+                            return
+                        customer_ok = True
+
+                if (path.startswith("/api/") and path not in auth_paths
+                        and not customer_ok and not self._auth_ok()):
                     self._send_json(401, {"ok": False, "error": "Unauthorized"})
                     return
 
@@ -4225,6 +4365,29 @@ class Phase3ServiceHub:
                             actor_role=role,
                         )
                         self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/keys/create":
+                        role = str((self._token_payload() or {}).get("role", "user")).strip().lower()
+                        result = hub.create_customer_api_key(
+                            label=str(payload.get("label", "")).strip(),
+                            rate_per_min=payload.get("rate_per_min", 60),
+                            actor_role=role,
+                        )
+                        self._send_json(200 if result.get("ok") else 403, result)
+                        return
+
+                    if path == "/api/admin/keys/list":
+                        role = str((self._token_payload() or {}).get("role", "user")).strip().lower()
+                        result = hub.list_customer_api_keys(actor_role=role)
+                        self._send_json(200 if result.get("ok") else 403, result)
+                        return
+
+                    if path == "/api/admin/keys/revoke":
+                        role = str((self._token_payload() or {}).get("role", "user")).strip().lower()
+                        result = hub.revoke_customer_api_key(
+                            key_id=payload.get("id"), actor_role=role)
+                        self._send_json(200 if result.get("ok") else 403, result)
                         return
                 except ValueError as e:
                     self._send_json(400, {"ok": False, "error": str(e)})

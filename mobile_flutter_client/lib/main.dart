@@ -3848,6 +3848,55 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // --- Customer API keys (sellable, per-developer) ---
+  Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/keys/create'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'label': label, 'rate_per_min': ratePerMin}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> listApiKeys() async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/keys/list'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> revokeApiKey(int id) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/keys/revoke'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'id': id}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // List every saved face folder (by recognized person name) with photo counts.
   Future<Map<String, dynamic>> listFacePeople() async {
     final ok = await ensureToken();
@@ -12020,6 +12069,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           icon: Icons.folder_shared_outlined,
           page: FaceFoldersPage(),
         ),
+        const _MenuItem(
+          title: 'API Keys',
+          subtitle: 'Issue and revoke API keys for other developers',
+          colorValue: 0xFF6C5CE7,
+          icon: Icons.vpn_key_outlined,
+          page: ApiKeysPage(),
+        ),
       ];
 
   List<_MenuItem> get _userItems => [
@@ -17044,6 +17100,248 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                   fontWeight: FontWeight.w600,
                   color: Colors.white)),
         ],
+      ),
+    );
+  }
+}
+
+class ApiKeysPage extends StatefulWidget {
+  const ApiKeysPage({super.key});
+
+  @override
+  State<ApiKeysPage> createState() => _ApiKeysPageState();
+}
+
+class _ApiKeysPageState extends State<ApiKeysPage> {
+  List<Map<String, dynamic>> _keys = const [];
+  bool _loading = true;
+  bool _busy = false;
+  String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final api = buildBackendApi();
+      final res = await api.listApiKeys();
+      final keys = (((res['data'] as Map?)?['keys'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _keys = keys;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Load error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _create() async {
+    final labelCtrl = TextEditingController();
+    final rateCtrl = TextEditingController(text: '60');
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New API key'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: labelCtrl,
+              decoration: const InputDecoration(
+                  labelText: 'Customer / label', hintText: 'e.g. Acme Corp'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: rateCtrl,
+              keyboardType: TextInputType.number,
+              decoration:
+                  const InputDecoration(labelText: 'Rate limit (requests/min)'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Create')),
+        ],
+      ),
+    );
+    if (go != true) return;
+    setState(() => _busy = true);
+    try {
+      final api = buildBackendApi();
+      final res = await api.createApiKey(
+          labelCtrl.text.trim(), int.tryParse(rateCtrl.text.trim()) ?? 60);
+      if (!mounted) return;
+      if (res['ok'] == true) {
+        final key = (res['data']?['api_key'] ?? '').toString();
+        await _showNewKey(key);
+        await _load();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Create failed: ${res['error'] ?? 'unknown'}')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Create failed: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _showNewKey(String key) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Copy this key now'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+                'This is the only time the full key is shown. Give it to the '
+                'customer and store it safely.'),
+            const SizedBox(height: 10),
+            SelectableText(key,
+                style: const TextStyle(
+                    fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: key));
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Key copied')));
+            },
+            child: const Text('Copy'),
+          ),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Done')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _revoke(Map<String, dynamic> k) async {
+    final id = int.tryParse((k['id'] ?? '').toString());
+    if (id == null || _busy) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Revoke key?'),
+        content: Text(
+            'Key ${k['prefix']} (${k['label']}) will stop working immediately.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Revoke')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _busy = true);
+    try {
+      await buildBackendApi().revokeApiKey(id);
+      await _load();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+        title: const Text('API Keys'),
+        backgroundColor: const Color(0xFF14233C),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _busy ? null : _create,
+        icon: const Icon(Icons.add),
+        label: const Text('New key'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(
+                  child: Text(_error,
+                      style: const TextStyle(color: Colors.redAccent)))
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          'Issue a key per customer. Each key only reaches the '
+                          'recognition endpoints (identify / compare / enroll), '
+                          'never admin. Revoke any time.',
+                          style: TextStyle(
+                              fontSize: 12, color: Color(0xFF9FB2CF)),
+                        ),
+                      ),
+                      if (_keys.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Center(
+                              child: Text('No API keys yet.',
+                                  style:
+                                      TextStyle(color: Color(0xFF9FB2CF)))),
+                        ),
+                      ..._keys.map(_keyCard),
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _keyCard(Map<String, dynamic> k) {
+    final active = k['active'] == true;
+    return Card(
+      color: const Color(0xFF17253E),
+      shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: ListTile(
+        title: Text('${k['label']?.toString().isNotEmpty == true ? k['label'] : '(no label)'}',
+            style: const TextStyle(color: Colors.white)),
+        subtitle: Text(
+          '${k['prefix']}…  ·  ${k['request_count']} calls  ·  ${k['rate_per_min']}/min'
+          '${active ? '' : '  ·  REVOKED'}',
+          style: TextStyle(
+              color: active ? const Color(0xFF9FB2CF) : const Color(0xFFFF8A8A)),
+        ),
+        trailing: active
+            ? TextButton(
+                onPressed: () => _revoke(k),
+                child: const Text('Revoke',
+                    style: TextStyle(color: Color(0xFFFF8A8A))))
+            : const Icon(Icons.block, color: Color(0xFF6F86AD), size: 18),
       ),
     );
   }
