@@ -618,6 +618,103 @@ class Phase3ServiceHub:
         return {"ok": True, "data": {"person": matched, "deleted": deleted,
                                      "folder_removed": folder_removed}}
 
+    def move_person_faces(self, from_person: str, to_person: str, filenames, actor_role: str):
+        """Move wrongly-filed photos from one person's folder to another (correct
+        a misrecognition). The moved face is also recorded as a NEGATIVE for the
+        source person (so it stops matching them) and becomes a real example for
+        the destination — disk, Supabase cloud, and recognition all stay in sync."""
+        if (actor_role or "user").strip().lower() != "admin":
+            return {"ok": False, "error": "admin role required"}
+        from_matched, from_dir = self._person_dir(from_person)
+        if not from_matched:
+            return {"ok": False, "error": "source person not found"}
+        to_safe = self._sanitize_face_name(to_person)
+        if not to_safe:
+            return {"ok": False, "error": "destination person name required"}
+        if to_safe.lower() == from_matched.lower():
+            return {"ok": False, "error": "source and destination are the same"}
+        if not isinstance(filenames, list) or not filenames:
+            return {"ok": False, "error": "filenames must be a non-empty list"}
+        faces_root = self._faces_root(ensure=True)
+        to_dir = os.path.join(faces_root, to_safe)
+        try:
+            os.makedirs(to_dir, exist_ok=True)
+        except Exception:
+            return {"ok": False, "error": "could not create destination folder"}
+        moved = []
+        pending = []  # (old_rel, new_rel, dest_path, image_bytes)
+        for raw in filenames:
+            fn = os.path.basename(str(raw).strip())
+            if not fn or os.path.splitext(fn)[1].lower() not in self._FACE_EXTS:
+                continue
+            src = os.path.join(from_dir, fn)
+            if not os.path.isfile(src):
+                continue
+            dest_fn = fn
+            dest = os.path.join(to_dir, dest_fn)
+            if os.path.exists(dest):  # avoid clobbering a same-named file
+                dest_fn = f"{int(time.time() * 1000)}_{fn}"
+                dest = os.path.join(to_dir, dest_fn)
+            data = None
+            try:
+                with open(src, "rb") as f:
+                    data = f.read()
+            except Exception:
+                data = None
+            old_rel = os.path.relpath(src, faces_root).replace(os.sep, "/")
+            new_rel = os.path.relpath(dest, faces_root).replace(os.sep, "/")
+            try:
+                shutil.move(src, dest)
+            except Exception:
+                continue
+            moved.append({"from": fn, "to": dest_fn})
+            self._cloud_uploaded_faces.pop(src, None)
+            pending.append((old_rel, new_rel, dest, data))
+        from_removed = False
+        try:
+            if not any(os.path.splitext(f)[1].lower() in self._FACE_EXTS
+                       for f in os.listdir(from_dir)):
+                shutil.rmtree(from_dir, ignore_errors=True)
+                from_removed = True
+        except Exception:
+            pass
+
+        def _finish_move():
+            try:
+                from backend import supabase_store as supa2
+            except Exception:
+                supa2 = None
+            for old_rel, new_rel, dest, data in pending:
+                # Learn: this face was NOT the source person.
+                if data:
+                    try:
+                        self._add_negative_embedding(from_matched, image_bytes=data)
+                    except Exception:
+                        pass
+                if supa2 is not None and supa2.enabled():
+                    try:
+                        supa2.delete_file(f"faces/{old_rel}")
+                    except Exception:
+                        pass
+                    try:
+                        supa2.upload_file(f"faces/{new_rel}", dest, "image/jpeg")
+                    except Exception:
+                        pass
+            # Source loses these embeddings; destination gains them.
+            try:
+                self._rebuild_person_encodings(from_matched, removed=from_removed)
+            except Exception:
+                pass
+            try:
+                self._rebuild_person_encodings(to_safe, removed=False)
+            except Exception:
+                pass
+
+        threading.Thread(target=_finish_move, daemon=True).start()
+        self._log_activity("Face Move", f"{from_matched} -> {to_safe}: {len(moved)}", role="admin")
+        return {"ok": True, "data": {"from": from_matched, "to": to_safe,
+                                     "moved": moved, "from_removed": from_removed}}
+
     def _rebuild_person_encodings(self, person: str, removed: bool = False):
         """Recompute one person's embeddings from their remaining images (or drop
         them entirely if the folder is gone). Bounded work — never a full recompute."""
@@ -4361,6 +4458,18 @@ class Phase3ServiceHub:
                         role = str(token_payload.get("role", "user")).strip().lower()
                         result = hub.delete_person_faces(
                             person=str(payload.get("person", "")).strip(),
+                            filenames=payload.get("filenames", []),
+                            actor_role=role,
+                        )
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/admin/faces/move":
+                        token_payload = self._token_payload() or {}
+                        role = str(token_payload.get("role", "user")).strip().lower()
+                        result = hub.move_person_faces(
+                            from_person=str(payload.get("from", "")).strip(),
+                            to_person=str(payload.get("to", "")).strip(),
                             filenames=payload.get("filenames", []),
                             actor_role=role,
                         )

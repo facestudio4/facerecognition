@@ -3931,6 +3931,25 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Move wrongly-filed photos from one person's folder to the correct person.
+  Future<Map<String, dynamic>> movePersonFaces(
+      String fromPerson, String toPerson, List<String> filenames) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/admin/faces/move'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(
+              {'from': fromPerson, 'to': toPerson, 'filenames': filenames}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // Delete specific wrong photos — removes them from the server, the cloud
   // backup and recognition memory so they don't come back or poison matches.
   Future<Map<String, dynamic>> deletePersonFaces(
@@ -17551,6 +17570,97 @@ class _PersonFacesPageState extends State<PersonFacesPage> {
     }
   }
 
+  Future<void> _moveSelected() async {
+    if (_selected.isEmpty || _busy) return;
+    final names = _selected.toList();
+    // Offer existing folders + a free-text option for a new person.
+    List<String> others = const [];
+    try {
+      final res = await buildBackendApi().listFacePeople();
+      others = (((res['data'] as Map?)?['people'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => (e['person'] ?? '').toString())
+          .where((p) =>
+              p.isNotEmpty &&
+              p.toLowerCase() != widget.person.toLowerCase())
+          .toList();
+    } catch (_) {}
+    if (!mounted) return;
+    final newCtrl = TextEditingController();
+    final dest = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Move ${names.length} photo(s) to…'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Pick the correct person:',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF9FB2CF))),
+              const SizedBox(height: 6),
+              Flexible(
+                child: others.isEmpty
+                    ? const SizedBox.shrink()
+                    : ListView(
+                        shrinkWrap: true,
+                        children: others
+                            .map((p) => ListTile(
+                                  dense: true,
+                                  leading: const Icon(Icons.person_outline,
+                                      size: 18),
+                                  title: Text(p),
+                                  onTap: () => Navigator.of(ctx).pop(p),
+                                ))
+                            .toList(),
+                      ),
+              ),
+              const Divider(),
+              TextField(
+                controller: newCtrl,
+                decoration: const InputDecoration(
+                    labelText: 'Or type a new person name'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () {
+                final t = newCtrl.text.trim();
+                if (t.isNotEmpty) Navigator.of(ctx).pop(t);
+              },
+              child: const Text('Move here')),
+        ],
+      ),
+    );
+    if (dest == null || dest.trim().isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      final api = buildBackendApi();
+      final res = await api.movePersonFaces(widget.person, dest.trim(), names);
+      if (!mounted) return;
+      if (res['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Moved ${names.length} photo(s) to "$dest".')));
+        await _load();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Move failed: ${res['error'] ?? 'unknown'}')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Move failed: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -17559,6 +17669,12 @@ class _PersonFacesPageState extends State<PersonFacesPage> {
         title: Text('${widget.person} — photos'),
         backgroundColor: const Color(0xFF14233C),
         actions: [
+          if (_selected.isNotEmpty)
+            IconButton(
+              tooltip: 'Move selected to another person',
+              onPressed: _busy ? null : _moveSelected,
+              icon: const Icon(Icons.drive_file_move_outline),
+            ),
           if (_selected.isNotEmpty)
             IconButton(
               tooltip: 'Delete selected',
