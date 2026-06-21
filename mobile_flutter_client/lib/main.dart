@@ -6,6 +6,8 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -3843,6 +3845,55 @@ class BackendApi {
             'Content-Type': 'application/json',
           },
           body: jsonEncode({'username': username, 'state': 'requested'}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  // --- Friend zone: match phone contacts to registered users ---
+  Future<Map<String, dynamic>> matchFriends(List<String> hashes) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/friends/match'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'hashes': hashes}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> listFriends() async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/friends/list'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({}),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> removeFriend(String friend) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base/api/mobile/friends/remove'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'friend': friend}),
         )
         .timeout(_kNetworkTimeout);
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -12132,6 +12183,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           icon: Icons.vpn_key_outlined,
           page: ApiKeysPage(),
         ),
+        const _MenuItem(
+          title: 'Friends',
+          subtitle: 'Find contacts who are on Face Studio',
+          colorValue: 0xFF577590,
+          icon: Icons.group_outlined,
+          page: FriendsPage(),
+        ),
       ];
 
   List<_MenuItem> get _userItems => [
@@ -12141,6 +12199,13 @@ class _MobileHomePageState extends State<MobileHomePage> {
           colorValue: 0xFF2A9D8F,
           icon: Icons.person,
           page: ProfilePage(),
+        ),
+        const _MenuItem(
+          title: 'Friends',
+          subtitle: 'Find contacts who are on Face Studio',
+          colorValue: 0xFF577590,
+          icon: Icons.group_outlined,
+          page: FriendsPage(),
         ),
         const _MenuItem(
           title: 'Face Search',
@@ -17156,6 +17221,214 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
                   fontWeight: FontWeight.w600,
                   color: Colors.white)),
         ],
+      ),
+    );
+  }
+}
+
+class FriendsPage extends StatefulWidget {
+  const FriendsPage({super.key});
+
+  @override
+  State<FriendsPage> createState() => _FriendsPageState();
+}
+
+class _FriendsPageState extends State<FriendsPage> {
+  // Must match the backend's _CONTACT_PEPPER and normalization exactly.
+  static const String _pepper = 'facestudio_contacts_v1';
+  List<Map<String, dynamic>> _friends = const [];
+  bool _loading = true;
+  bool _busy = false;
+  String _error = '';
+  String _status = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final res = await buildBackendApi().listFriends();
+      final fr = (((res['data'] as Map?)?['friends'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _friends = fr;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Load error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  String _hash(String v) =>
+      crypto.sha256.convert(utf8.encode('$_pepper:$v')).toString();
+
+  String _normPhone(String v) {
+    final digits = v.replaceAll(RegExp(r'\D'), '');
+    return digits.length >= 10 ? digits.substring(digits.length - 10) : '';
+  }
+
+  Future<void> _findFromContacts() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _status = 'Requesting contacts permission…';
+    });
+    try {
+      final granted = await FlutterContacts.requestPermission(readonly: true);
+      if (!granted) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Contacts permission is needed to find friends.')));
+        return;
+      }
+      setState(() => _status = 'Reading contacts…');
+      final contacts = await FlutterContacts.getContacts(withProperties: true);
+      final hashes = <String>{};
+      for (final c in contacts) {
+        for (final p in c.phones) {
+          final n = _normPhone(p.number);
+          if (n.isNotEmpty) hashes.add(_hash(n));
+        }
+        for (final e in c.emails) {
+          final em = e.address.trim().toLowerCase();
+          if (em.isNotEmpty) hashes.add(_hash(em));
+        }
+      }
+      if (hashes.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No usable contacts found.')));
+        return;
+      }
+      setState(() => _status = 'Matching ${hashes.length} contacts…');
+      final res = await buildBackendApi().matchFriends(hashes.toList());
+      if (!mounted) return;
+      if (res['ok'] == true) {
+        final fr = (((res['data'] as Map?)?['friends'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        setState(() => _friends = fr);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Found ${fr.length} friend(s) on Face Studio.')));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Match failed: ${res['error'] ?? 'unknown'}')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _status = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _remove(String friend) async {
+    try {
+      await buildBackendApi().removeFriend(friend);
+      await _load();
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+          title: const Text('Friends'),
+          backgroundColor: const Color(0xFF14233C)),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _busy ? null : _findFromContacts,
+        icon: _busy
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white))
+            : const Icon(Icons.contacts),
+        label: const Text('Find from contacts'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error.isNotEmpty
+              ? Center(
+                  child: Text(_error,
+                      style: const TextStyle(color: Colors.redAccent)))
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          _status.isNotEmpty
+                              ? _status
+                              : 'Friends are people in your phone contacts who also '
+                                  'use Face Studio. Only a scrambled (hashed) form of '
+                                  'your contacts is sent — never the raw numbers.',
+                          style: const TextStyle(
+                              fontSize: 12, color: Color(0xFF9FB2CF)),
+                        ),
+                      ),
+                      if (_friends.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Center(
+                              child: Text(
+                                  'No friends yet — tap "Find from contacts".',
+                                  style: TextStyle(color: Color(0xFF9FB2CF)))),
+                        ),
+                      ..._friends.map(_friendCard),
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _friendCard(Map<String, dynamic> f) {
+    final name = (f['username'] ?? '-').toString();
+    final mutual = f['mutual'] == true;
+    final isPublic = (f['privacy_mode'] ?? 'public').toString() == 'public';
+    return Card(
+      color: const Color(0xFF17253E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: ListTile(
+        leading: CircleAvatar(
+            backgroundColor: const Color(0xFF2E4D7A),
+            child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
+                style: const TextStyle(color: Colors.white))),
+        title: Text(name, style: const TextStyle(color: Colors.white)),
+        subtitle: Text(
+          '${mutual ? 'Mutual friend' : 'In your contacts'} · ${isPublic ? 'Public' : 'Private'}',
+          style: const TextStyle(color: Color(0xFF9FB2CF), fontSize: 12),
+        ),
+        trailing: IconButton(
+          tooltip: 'Remove',
+          icon: const Icon(Icons.person_remove_outlined,
+              color: Color(0xFFFF8A8A), size: 20),
+          onPressed: () => _remove(name),
+        ),
       ),
     );
   }

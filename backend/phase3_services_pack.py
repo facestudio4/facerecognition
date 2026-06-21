@@ -202,10 +202,14 @@ class Phase3ServiceHub:
                     reviews = conn.execute(
                         "SELECT COUNT(*) c FROM gallery_reviews WHERE status='pending'"
                     ).fetchone()["c"]
+                friends = 0
+                if self._table_exists(conn, "friends"):
+                    friends = conn.execute("SELECT COUNT(*) c FROM friends").fetchone()["c"]
             h = hashlib.md5()
             for r in rows:
                 h.update(("|".join(str(x) for x in r)).encode("utf-8", "ignore"))
             h.update(f"#reviews={reviews}".encode("utf-8"))
+            h.update(f"#friends={friends}".encode("utf-8"))
             return h.hexdigest()
         except Exception:
             return None
@@ -3537,6 +3541,121 @@ class Phase3ServiceHub:
             )
         return out
 
+    # ----- Friend zone: match a user's phone contacts to registered users -----
+    # Privacy: the app sends only SHA-256 hashes of normalized phone/email, never
+    # the raw contact book. The backend hashes its own users' phone/email the
+    # same way and matches.
+    _CONTACT_PEPPER = "facestudio_contacts_v1"
+
+    def _ensure_friends_table(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS friends (
+                    owner TEXT NOT NULL,
+                    friend TEXT NOT NULL,
+                    created TEXT DEFAULT '',
+                    PRIMARY KEY (owner, friend)
+                )
+                """
+            )
+            conn.commit()
+
+    @staticmethod
+    def _normalize_phone(value: str) -> str:
+        digits = re.sub(r"\D", "", value or "")
+        return digits[-10:] if len(digits) >= 10 else ""
+
+    def _contact_hash(self, normalized: str) -> str:
+        return hashlib.sha256(
+            f"{self._CONTACT_PEPPER}:{normalized}".encode("utf-8")).hexdigest()
+
+    def _user_contact_index(self):
+        """Map {contact_hash: username} for every registered user (phone + email)."""
+        index = {}
+        with self._connect() as conn:
+            if not self._table_exists(conn, "users"):
+                return index
+            rows = conn.execute("SELECT username, email, phone FROM users").fetchall()
+        for r in rows:
+            uname = str(r["username"] or "")
+            if not uname:
+                continue
+            ph = self._normalize_phone(str(r["phone"] or ""))
+            if ph:
+                index[self._contact_hash(ph)] = uname
+            em = str(r["email"] or "").strip().lower()
+            if em:
+                index[self._contact_hash(em)] = uname
+        return index
+
+    def find_friends_from_contacts(self, username: str, hashes):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        if not isinstance(hashes, list):
+            return {"ok": False, "error": "hashes must be a list"}
+        self._ensure_friends_table()
+        index = self._user_contact_index()
+        wanted = {str(h).strip().lower() for h in hashes if str(h).strip()}
+        matched = set()
+        for h in wanted:
+            friend = index.get(h)
+            if friend and friend.lower() != uname.lower():
+                matched.add(friend)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            for friend in matched:
+                conn.execute(
+                    "INSERT OR IGNORE INTO friends(owner, friend, created) VALUES (?,?,?)",
+                    (uname, friend, now),
+                )
+            conn.commit()
+        return self.list_friends(uname)
+
+    def list_friends(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        self._ensure_friends_table()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT friend, created FROM friends WHERE lower(owner)=lower(?) ORDER BY friend",
+                (uname,),
+            ).fetchall()
+            friends = []
+            for r in rows:
+                fname = str(r["friend"] or "")
+                if not fname:
+                    continue
+                urow = conn.execute(
+                    "SELECT privacy_mode FROM users WHERE lower(username)=lower(?) LIMIT 1",
+                    (fname,),
+                ).fetchone()
+                privacy = self._normalize_privacy_mode(urow["privacy_mode"]) if urow else "public"
+                # Reverse edge => they also have you in their contacts.
+                mutual = conn.execute(
+                    "SELECT 1 FROM friends WHERE lower(owner)=lower(?) AND lower(friend)=lower(?) LIMIT 1",
+                    (fname, uname),
+                ).fetchone() is not None
+                friends.append({"username": fname, "privacy_mode": privacy,
+                                "mutual": mutual, "since": r["created"] or ""})
+        return {"ok": True, "data": {"friends": friends, "count": len(friends)}}
+
+    def remove_friend(self, username: str, friend: str):
+        uname = (username or "").strip()
+        fname = (friend or "").strip()
+        if not uname or not fname:
+            return {"ok": False, "error": "username and friend required"}
+        self._ensure_friends_table()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM friends WHERE lower(owner)=lower(?) AND lower(friend)=lower(?)",
+                (uname, fname),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"removed": fname}}
+
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
 
@@ -4410,6 +4529,28 @@ class Phase3ServiceHub:
                             limit = 0
                         result = hub.export_known_faces(person=person, limit=limit)
                         self._send_json(200, result)
+                        return
+
+                    if path == "/api/mobile/friends/match":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip()
+                        result = hub.find_friends_from_contacts(
+                            username=username, hashes=payload.get("hashes", []))
+                        self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/mobile/friends/list":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip()
+                        self._send_json(200, hub.list_friends(username))
+                        return
+
+                    if path == "/api/mobile/friends/remove":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip()
+                        result = hub.remove_friend(
+                            username, str(payload.get("friend", "")).strip())
+                        self._send_json(200 if result.get("ok") else 400, result)
                         return
 
                     if path == "/api/mobile/gallery/review":
