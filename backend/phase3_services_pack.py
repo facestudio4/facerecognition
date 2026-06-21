@@ -190,9 +190,12 @@ class Phase3ServiceHub:
             with self._connect() as conn:
                 if not self._table_exists(conn, "users"):
                     return None
+                # gallery_scan_state is low-frequency (''→scanning→done) so it
+                # persists the scan's completion across redeploys without the
+                # high-volume churn of the live scanned-count.
                 rows = conn.execute(
                     "SELECT username, role, created, logins_json, reenroll_required, "
-                    "email, phone FROM users ORDER BY username"
+                    "email, phone, gallery_scan_state FROM users ORDER BY username"
                 ).fetchall()
                 reviews = 0
                 if self._table_exists(conn, "gallery_reviews"):
@@ -493,6 +496,76 @@ class Phase3ServiceHub:
             if os.path.isdir(p) and entry.lower() == safe.lower():
                 return entry, p
         return "", ""
+
+    def _known_people_names(self):
+        """All person names known to the system, from sources that are reliable
+        even on a cold free-tier start: the in-memory cache, the encodings .pkl
+        (restored BEFORE the server serves), and any face folders already on disk
+        (which restore from Supabase asynchronously). Used so the enrollment
+        duplicate check ('is this you?') doesn't miss an existing person just
+        because their folder hasn't finished restoring yet."""
+        names = set()
+        if isinstance(self._mobile_known_encodings, dict):
+            names.update(str(k) for k in self._mobile_known_encodings.keys())
+        try:
+            import pickle
+            enc = self._encodings_path()
+            if enc and os.path.exists(enc):
+                with open(enc, "rb") as f:
+                    d = pickle.load(f)
+                if isinstance(d, dict):
+                    names.update(str(k) for k in d.keys())
+        except Exception:
+            pass
+        try:
+            root = self._faces_root(ensure=False)
+            if os.path.isdir(root):
+                protected = {"known_faces", "archive", "__pycache__"}
+                for e in os.listdir(root):
+                    if e.lower() in protected:
+                        continue
+                    if os.path.isdir(os.path.join(root, e)):
+                        names.add(e)
+        except Exception:
+            pass
+        return names
+
+    def mobile_face_lookup(self, person: str):
+        """Does a person already exist? Checks recognition's known people (cold-
+        start safe) plus disk folders, and returns a preview image when available."""
+        safe = self._sanitize_face_name(person)
+        if not safe:
+            return {"ok": True, "data": {"exists": False}}
+        matched = ""
+        for n in self._known_people_names():
+            if str(n).strip().lower() == safe.lower():
+                matched = str(n)
+                break
+        faces_root = self._faces_root(ensure=False)
+        person_dir = ""
+        if os.path.isdir(faces_root):
+            for entry in os.listdir(faces_root):
+                p = os.path.join(faces_root, entry)
+                if os.path.isdir(p) and entry.lower() == safe.lower():
+                    person_dir = p
+                    if not matched:
+                        matched = entry
+                    break
+        if not matched:
+            return {"ok": True, "data": {"exists": False}}
+        preview_b64 = ""
+        if person_dir:
+            try:
+                for fname in sorted(os.listdir(person_dir)):
+                    if os.path.splitext(fname)[1].lower() in self._FACE_EXTS:
+                        with open(os.path.join(person_dir, fname), "rb") as f:
+                            raw = f.read()
+                        if raw:
+                            preview_b64 = base64.b64encode(raw).decode("ascii")
+                            break
+            except Exception:
+                preview_b64 = ""
+        return {"ok": True, "data": {"exists": True, "person": matched, "preview_b64": preview_b64}}
 
     def list_face_people(self):
         """List every saved face folder (the recognized person's name) with a
@@ -3165,13 +3238,23 @@ class Phase3ServiceHub:
             required_margin = margin + (0.02 if insufficient_samples else 0.0)
             ambiguous = len(top) > 1 and (best_score - second_score) < required_margin
 
-            # Hard-negative suppression: if this face is about as similar to a
-            # previously rejected/deleted example for the top candidate as it is
-            # to that person's real photos, treat it as not-a-match. This is how
-            # the system "learns" from rejections — the look-alike stops matching.
+            # Hard-negative suppression — how the system "learns" from rejections.
+            # Suppress when this face looks like a previously rejected/deleted
+            # example for the top candidate, either (a) comparably to the person's
+            # own photos (neg within a margin of the positive), or (b) strongly in
+            # absolute terms (it clearly IS that wrong look-alike). Both are env-
+            # tunable so it can be made stricter/looser without an app rebuild.
             suppressed = False
             neg_for = self._load_negatives().get(best_name.lower(), []) if best_name else []
             if neg_for:
+                try:
+                    neg_margin = float(os.getenv("MOBILE_NEG_MARGIN", "0.08"))
+                except Exception:
+                    neg_margin = 0.08
+                try:
+                    neg_abs = float(os.getenv("MOBILE_NEG_ABS", "0.55"))
+                except Exception:
+                    neg_abs = 0.55
                 neg_sim = 0.0
                 for ne in neg_for:
                     try:
@@ -3184,7 +3267,7 @@ class Phase3ServiceHub:
                             neg_sim = float(ns)
                     except Exception:
                         pass
-                if neg_sim >= best_score - margin:
+                if neg_sim >= (best_score - neg_margin) or neg_sim >= neg_abs:
                     suppressed = True
 
             if best_score < (threshold + sample_penalty) or ambiguous or suppressed:
@@ -4181,57 +4264,7 @@ class Phase3ServiceHub:
                         token_payload = self._token_payload()
                         username = str(token_payload.get("sub", "")) if token_payload else ""
                         person = str(payload.get("person", "")).strip() or username
-                        try:
-                            safe_person = hub._sanitize_face_name(person)
-                            faces_root = hub._faces_root()
-                            if not os.path.isdir(faces_root):
-                                self._send_json(200, {"ok": True, "data": {"exists": False}})
-                                return
-
-                            matched = ""
-                            person_dir = ""
-                            for entry in os.listdir(faces_root):
-                                path = os.path.join(faces_root, entry)
-                                if not os.path.isdir(path):
-                                    continue
-                                if entry.lower() == safe_person.lower():
-                                    matched = entry
-                                    person_dir = path
-                                    break
-
-                            if not matched:
-                                self._send_json(200, {"ok": True, "data": {"exists": False}})
-                                return
-
-                            allowed_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-                            preview_b64 = ""
-                            try:
-                                for fname in sorted(os.listdir(person_dir)):
-                                    ext = os.path.splitext(fname)[1].lower()
-                                    if ext not in allowed_ext:
-                                        continue
-                                    p = os.path.join(person_dir, fname)
-                                    with open(p, "rb") as f:
-                                        raw = f.read()
-                                    if raw:
-                                        preview_b64 = base64.b64encode(raw).decode("ascii")
-                                        break
-                            except Exception:
-                                preview_b64 = ""
-
-                            self._send_json(
-                                200,
-                                {
-                                    "ok": True,
-                                    "data": {
-                                        "exists": True,
-                                        "person": matched,
-                                        "preview_b64": preview_b64,
-                                    },
-                                },
-                            )
-                        except Exception as ex:
-                            self._send_json(500, {"ok": False, "error": str(ex)})
+                        self._send_json(200, hub.mobile_face_lookup(person))
                         return
 
                     if path == "/api/mobile/generate":

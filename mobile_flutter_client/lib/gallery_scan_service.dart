@@ -99,6 +99,20 @@ class GalleryScanService {
     }
   }
 
+  // Whether this device already holds scan progress (so an empty server state
+  // after a redeploy means "resume", not "start over").
+  static Future<bool> hasCheckpoint() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return (prefs.getStringList(_processedKey)?.isNotEmpty ?? false) ||
+          (prefs.getInt(_offsetKey) ?? 0) > 0 ||
+          (prefs.getStringList(_videoProcessedKey)?.isNotEmpty ?? false) ||
+          (prefs.getInt(_videoOffsetKey) ?? 0) > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // Triggers the OS permission dialog (no-op if already granted). Returns true
   // if access was granted.
   static Future<bool> requestGalleryPermission() async {

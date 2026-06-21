@@ -3996,17 +3996,34 @@ class BackendApi {
     if (!ok) {
       return {'ok': false, 'error': 'Token unavailable'};
     }
-    final res = await http
-        .post(
-          Uri.parse('$_base/api/mobile/face/lookup'),
-          headers: {
-            'Authorization': 'Bearer $_token',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({'person': person}),
-        )
-        .timeout(_kNetworkTimeout);
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    // Retry a cold/slow free-tier server instead of failing — a missed lookup
+    // would skip the duplicate "is this you?" check and create a duplicate.
+    const backoffs = [Duration(seconds: 3), Duration(seconds: 8), Duration(seconds: 15)];
+    for (var attempt = 0; attempt <= backoffs.length; attempt++) {
+      try {
+        final res = await http
+            .post(
+              Uri.parse('$_base/api/mobile/face/lookup'),
+              headers: {
+                'Authorization': 'Bearer $_token',
+                'Content-Type': 'application/json',
+              },
+              body: jsonEncode({'person': person}),
+            )
+            .timeout(_kNetworkTimeout);
+        if (res.statusCode == 200) {
+          return jsonDecode(res.body) as Map<String, dynamic>;
+        }
+      } catch (_) {
+        // cold start / timeout -> retry
+      }
+      if (attempt < backoffs.length) {
+        await Future<void>.delayed(backoffs[attempt]);
+      }
+    }
+    // Couldn't verify — signal it so the caller does NOT silently treat the
+    // name as new (which would risk a duplicate folder).
+    return {'ok': false, 'error': 'lookup_unavailable'};
   }
 
   Future<bool> ensureToken() async {
@@ -4517,10 +4534,14 @@ class _AuthGateState extends State<AuthGate>
         pending = true;
         reset = true; // admin re-scan: start fresh
       } else if (stateVal.isEmpty) {
-        // Fresh or re-created account -> full scan, ignoring any stale local
-        // checkpoint left by a previous account on this device.
         pending = true;
-        reset = true;
+        // Empty server state can mean two things: a genuinely fresh account, OR
+        // an existing account whose progress was lost on a redeploy. If THIS
+        // account already scanned on THIS device and a local checkpoint exists,
+        // resume from it instead of wiping (fixes "scan resets after updates").
+        final resumable = prefs.getBool(initiatedKey) == true &&
+            await GalleryScanService.hasCheckpoint();
+        reset = !resumable;
       } else if (stateVal == 'scanning') {
         // Interrupted mid-scan -> resume from the local checkpoint.
         pending = true;
@@ -11084,8 +11105,12 @@ class FirstTimeEnrollmentPage extends StatefulWidget {
 class _FaceNameResolution {
   final String person;
   final bool existing;
+  // True when the duplicate check could not be performed (server unreachable);
+  // the caller must NOT create a profile in that case, to avoid duplicates.
+  final bool lookupFailed;
 
-  const _FaceNameResolution({required this.person, required this.existing});
+  const _FaceNameResolution(
+      {required this.person, required this.existing, this.lookupFailed = false});
 }
 
 class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
@@ -11162,6 +11187,14 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       _setStatus('Checking name...');
       final resolved = await _resolvePersonName(clean);
       if (!mounted) return;
+      if (resolved != null && resolved.lookupFailed) {
+        setState(() {
+          _error = 'Could not reach the server to check the name. It may be '
+              'waking up — please wait a moment and tap continue again.';
+        });
+        await _showBlockingError(_error);
+        continue;
+      }
       if (resolved == null) {
         _nameController.clear();
         setState(() {
@@ -11204,7 +11237,10 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
     try {
       final res = await api.lookupFacePerson(person: name);
       if (res['ok'] != true) {
-        return _FaceNameResolution(person: name, existing: false);
+        // Couldn't verify (server waking/unreachable) — do NOT assume it's new,
+        // or we'd create a duplicate folder.
+        return _FaceNameResolution(
+            person: name, existing: false, lookupFailed: true);
       }
       final data = (res['data'] as Map<String, dynamic>?) ?? const {};
       final exists = data['exists'] == true;
@@ -11219,7 +11255,8 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
       }
       return null;
     } catch (_) {
-      return _FaceNameResolution(person: name, existing: false);
+      return _FaceNameResolution(
+          person: name, existing: false, lookupFailed: true);
     }
   }
 
