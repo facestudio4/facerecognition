@@ -3899,6 +3899,41 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // --- Social: follow graph + direct messages ---
+  Future<Map<String, dynamic>> _socialPost(
+      String path, Map<String, dynamic> body) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http
+        .post(
+          Uri.parse('$_base$path'),
+          headers: {
+            'Authorization': 'Bearer $_token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(body),
+        )
+        .timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> socialSuggestions(List<String> hashes) =>
+      _socialPost('/api/mobile/social/suggestions', {'hashes': hashes});
+  Future<Map<String, dynamic>> followUser(String user) =>
+      _socialPost('/api/mobile/social/follow', {'user': user});
+  Future<Map<String, dynamic>> unfollowUser(String user) =>
+      _socialPost('/api/mobile/social/unfollow', {'user': user});
+  Future<Map<String, dynamic>> listFollowing() =>
+      _socialPost('/api/mobile/social/following', {});
+  Future<Map<String, dynamic>> listFollowers() =>
+      _socialPost('/api/mobile/social/followers', {});
+  Future<Map<String, dynamic>> sendMessage(String to, String body) =>
+      _socialPost('/api/mobile/messages/send', {'to': to, 'body': body});
+  Future<Map<String, dynamic>> messageThread(String withUser) =>
+      _socialPost('/api/mobile/messages/thread', {'with': withUser});
+  Future<Map<String, dynamic>> messageInbox() =>
+      _socialPost('/api/mobile/messages/inbox', {});
+
   // --- Customer API keys (sellable, per-developer) ---
   Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {
     final ok = await ensureToken();
@@ -17281,69 +17316,94 @@ class FriendsPage extends StatefulWidget {
   State<FriendsPage> createState() => _FriendsPageState();
 }
 
-class _FriendsPageState extends State<FriendsPage> {
+class _FriendsPageState extends State<FriendsPage>
+    with SingleTickerProviderStateMixin {
   // Must match the backend's _CONTACT_PEPPER and normalization exactly.
   static const String _pepper = 'facestudio_contacts_v1';
-  List<Map<String, dynamic>> _friends = const [];
-  bool _loading = true;
+  late TabController _tabs;
+  List<Map<String, dynamic>> _suggestions = const [];
+  List<Map<String, dynamic>> _following = const [];
+  List<Map<String, dynamic>> _followers = const [];
+  List<Map<String, dynamic>> _inbox = const [];
+  int _followingCount = 0;
+  int _followersCount = 0;
   bool _busy = false;
-  String _error = '';
-  String _status = '';
+  String _discoverStatus = '';
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _tabs = TabController(length: 4, vsync: this);
+    _loadFollowing();
+    _loadFollowers();
+    _loadInbox();
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = '';
-    });
-    try {
-      final res = await buildBackendApi().listFriends();
-      final fr = (((res['data'] as Map?)?['friends'] as List?) ?? const [])
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-      if (!mounted) return;
-      setState(() {
-        _friends = fr;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = 'Load error: $e';
-        _loading = false;
-      });
-    }
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
   }
 
   String _hash(String v) =>
       crypto.sha256.convert(utf8.encode('$_pepper:$v')).toString();
 
   String _normPhone(String v) {
-    final digits = v.replaceAll(RegExp(r'\D'), '');
-    return digits.length >= 10 ? digits.substring(digits.length - 10) : '';
+    final d = v.replaceAll(RegExp(r'\D'), '');
+    return d.length >= 10 ? d.substring(d.length - 10) : '';
   }
 
-  Future<void> _findFromContacts() async {
+  List<Map<String, dynamic>> _rows(Map<String, dynamic> r, String key) =>
+      (((r['data'] as Map?)?[key] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+
+  Future<void> _loadFollowing() async {
+    try {
+      final r = await buildBackendApi().listFollowing();
+      if (!mounted) return;
+      final d = (r['data'] as Map?) ?? const {};
+      setState(() {
+        _following = _rows(r, 'users');
+        _followingCount = int.tryParse((d['following'] ?? 0).toString()) ?? 0;
+        _followersCount = int.tryParse((d['followers'] ?? 0).toString()) ?? 0;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _loadFollowers() async {
+    try {
+      final r = await buildBackendApi().listFollowers();
+      if (!mounted) return;
+      setState(() => _followers = _rows(r, 'users'));
+    } catch (_) {}
+  }
+
+  Future<void> _loadInbox() async {
+    try {
+      final r = await buildBackendApi().messageInbox();
+      if (!mounted) return;
+      setState(() => _inbox = _rows(r, 'threads'));
+    } catch (_) {}
+  }
+
+  Future<void> _discover() async {
     if (_busy) return;
     setState(() {
       _busy = true;
-      _status = 'Requesting contacts permission…';
+      _discoverStatus = 'Requesting contacts…';
     });
     try {
       final granted = await FlutterContacts.requestPermission(readonly: true);
       if (!granted) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Contacts permission is needed to find friends.')));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Contacts permission is needed to find people.')));
+        }
         return;
       }
-      setState(() => _status = 'Reading contacts…');
+      setState(() => _discoverStatus = 'Reading contacts…');
       final contacts = await FlutterContacts.getContacts(withProperties: true);
       final hashes = <String>{};
       for (final c in contacts) {
@@ -17357,45 +17417,57 @@ class _FriendsPageState extends State<FriendsPage> {
         }
       }
       if (hashes.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('No usable contacts found.')));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('No usable contacts found.')));
+        }
         return;
       }
-      setState(() => _status = 'Matching ${hashes.length} contacts…');
-      final res = await buildBackendApi().matchFriends(hashes.toList());
+      setState(() => _discoverStatus = 'Matching ${hashes.length} contacts…');
+      final r = await buildBackendApi().socialSuggestions(hashes.toList());
       if (!mounted) return;
-      if (res['ok'] == true) {
-        final fr = (((res['data'] as Map?)?['friends'] as List?) ?? const [])
-            .whereType<Map>()
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        setState(() => _friends = fr);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Found ${fr.length} friend(s) on Face Studio.')));
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Match failed: ${res['error'] ?? 'unknown'}')));
+      final sg = _rows(r, 'suggestions');
+      setState(() => _suggestions = sg);
+      if (sg.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('None of your contacts are on Face Studio yet.')));
       }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     } finally {
       if (mounted) {
         setState(() {
           _busy = false;
-          _status = '';
+          _discoverStatus = '';
         });
       }
     }
   }
 
-  Future<void> _remove(String friend) async {
+  Future<void> _toggleFollow(Map<String, dynamic> u) async {
+    final name = (u['username'] ?? '').toString();
+    final wasFollowing = u['following'] == true;
+    setState(() => u['following'] = !wasFollowing); // optimistic
     try {
-      await buildBackendApi().removeFriend(friend);
-      await _load();
-    } catch (_) {}
+      if (wasFollowing) {
+        await buildBackendApi().unfollowUser(name);
+      } else {
+        await buildBackendApi().followUser(name);
+      }
+    } catch (_) {
+      if (mounted) setState(() => u['following'] = wasFollowing);
+    }
+    _loadFollowing();
+    _loadFollowers();
+  }
+
+  void _openChat(String username) {
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => ChatPage(peer: username)))
+        .then((_) => _loadInbox());
   }
 
   @override
@@ -17403,61 +17475,104 @@ class _FriendsPageState extends State<FriendsPage> {
     return Scaffold(
       backgroundColor: const Color(0xFF0E1A2E),
       appBar: AppBar(
-          title: const Text('Friends'),
-          backgroundColor: const Color(0xFF14233C)),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _busy ? null : _findFromContacts,
-        icon: _busy
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white))
-            : const Icon(Icons.contacts),
-        label: const Text('Find from contacts'),
+        title: const Text('Friends'),
+        backgroundColor: const Color(0xFF14233C),
+        bottom: TabBar(
+          controller: _tabs,
+          isScrollable: true,
+          indicatorColor: const Color(0xFF5EC8FF),
+          labelColor: Colors.white,
+          unselectedLabelColor: const Color(0xFF9FB2CF),
+          tabs: [
+            const Tab(text: 'Discover'),
+            Tab(text: 'Following ($_followingCount)'),
+            Tab(text: 'Followers ($_followersCount)'),
+            const Tab(text: 'Messages'),
+          ],
+        ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error.isNotEmpty
-              ? Center(
-                  child: Text(_error,
-                      style: const TextStyle(color: Colors.redAccent)))
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView(
-                    padding: const EdgeInsets.all(12),
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          _status.isNotEmpty
-                              ? _status
-                              : 'Friends are people in your phone contacts who also '
-                                  'use Face Studio. Only a scrambled (hashed) form of '
-                                  'your contacts is sent — never the raw numbers.',
-                          style: const TextStyle(
-                              fontSize: 12, color: Color(0xFF9FB2CF)),
-                        ),
-                      ),
-                      if (_friends.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Center(
-                              child: Text(
-                                  'No friends yet — tap "Find from contacts".',
-                                  style: TextStyle(color: Color(0xFF9FB2CF)))),
-                        ),
-                      ..._friends.map(_friendCard),
-                    ],
-                  ),
-                ),
+      body: TabBarView(
+        controller: _tabs,
+        children: [
+          _discoverTab(),
+          _peopleTab(_following, 'You are not following anyone yet.'),
+          _peopleTab(_followers, 'No followers yet.'),
+          _messagesTab(),
+        ],
+      ),
     );
   }
 
-  Widget _friendCard(Map<String, dynamic> f) {
-    final name = (f['username'] ?? '-').toString();
-    final mutual = f['mutual'] == true;
-    final isPublic = (f['privacy_mode'] ?? 'public').toString() == 'public';
+  Widget _discoverTab() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _busy ? null : _discover,
+              icon: _busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.contacts),
+              label: Text(_busy
+                  ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
+                  : 'Find contacts on Face Studio'),
+            ),
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Only a scrambled (hashed) form of your contacts is sent — never '
+              'raw numbers. Tap Follow to follow someone.',
+              style: TextStyle(fontSize: 11, color: Color(0xFF9FB2CF)),
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: _suggestions.isEmpty
+              ? const Center(
+                  child: Text('Tap "Find contacts" to discover people you know.',
+                      style: TextStyle(color: Color(0xFF9FB2CF))))
+              : ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: _suggestions.map(_userTile).toList()),
+        ),
+      ],
+    );
+  }
+
+  Widget _peopleTab(List<Map<String, dynamic>> people, String emptyMsg) {
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _loadFollowing();
+        await _loadFollowers();
+      },
+      child: people.isEmpty
+          ? ListView(children: [
+              const SizedBox(height: 120),
+              Center(
+                  child: Text(emptyMsg,
+                      style: const TextStyle(color: Color(0xFF9FB2CF)))),
+            ])
+          : ListView(
+              padding: const EdgeInsets.all(12),
+              children: people.map(_userTile).toList()),
+    );
+  }
+
+  Widget _userTile(Map<String, dynamic> u) {
+    final name = (u['username'] ?? '-').toString();
+    final following = u['following'] == true;
+    final followsYou = u['follows_you'] == true;
     return Card(
       color: const Color(0xFF17253E),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -17467,15 +17582,258 @@ class _FriendsPageState extends State<FriendsPage> {
             child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
                 style: const TextStyle(color: Colors.white))),
         title: Text(name, style: const TextStyle(color: Colors.white)),
-        subtitle: Text(
-          '${mutual ? 'Mutual friend' : 'In your contacts'} · ${isPublic ? 'Public' : 'Private'}',
-          style: const TextStyle(color: Color(0xFF9FB2CF), fontSize: 12),
+        subtitle: followsYou
+            ? const Text('Follows you',
+                style: TextStyle(color: Color(0xFF8AF0C8), fontSize: 12))
+            : null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              tooltip: 'Message',
+              icon: const Icon(Icons.chat_bubble_outline,
+                  color: Color(0xFF9FC3FF), size: 20),
+              onPressed: () => _openChat(name),
+            ),
+            SizedBox(
+              height: 32,
+              child: following
+                  ? OutlinedButton(
+                      onPressed: () => _toggleFollow(u),
+                      child: const Text('Following'))
+                  : FilledButton(
+                      onPressed: () => _toggleFollow(u),
+                      child: const Text('Follow')),
+            ),
+          ],
         ),
-        trailing: IconButton(
-          tooltip: 'Remove',
-          icon: const Icon(Icons.person_remove_outlined,
-              color: Color(0xFFFF8A8A), size: 20),
-          onPressed: () => _remove(name),
+      ),
+    );
+  }
+
+  Widget _messagesTab() {
+    return RefreshIndicator(
+      onRefresh: _loadInbox,
+      child: _inbox.isEmpty
+          ? ListView(children: const [
+              SizedBox(height: 120),
+              Center(
+                  child: Text('No messages yet. Open a chat to say hi.',
+                      style: TextStyle(color: Color(0xFF9FB2CF)))),
+            ])
+          : ListView(
+              padding: const EdgeInsets.all(8),
+              children: _inbox.map((t) {
+                final name = (t['username'] ?? '-').toString();
+                final last = (t['last'] ?? '').toString();
+                final unread = int.tryParse((t['unread'] ?? 0).toString()) ?? 0;
+                final mine = t['mine'] == true;
+                return Card(
+                  color: const Color(0xFF17253E),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  child: ListTile(
+                    leading: CircleAvatar(
+                        backgroundColor: const Color(0xFF2E4D7A),
+                        child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
+                            style: const TextStyle(color: Colors.white))),
+                    title: Text(name,
+                        style: const TextStyle(color: Colors.white)),
+                    subtitle: Text('${mine ? 'You: ' : ''}$last',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Color(0xFF9FB2CF))),
+                    trailing: unread > 0
+                        ? CircleAvatar(
+                            radius: 11,
+                            backgroundColor: const Color(0xFF5EC8FF),
+                            child: Text('$unread',
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.black)))
+                        : null,
+                    onTap: () => _openChat(name),
+                  ),
+                );
+              }).toList()),
+    );
+  }
+}
+
+class ChatPage extends StatefulWidget {
+  const ChatPage({super.key, required this.peer});
+  final String peer;
+
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  final _ctrl = TextEditingController();
+  final _scroll = ScrollController();
+  List<Map<String, dynamic>> _messages = const [];
+  bool _loading = true;
+  bool _sending = false;
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _poll = Timer.periodic(
+        const Duration(seconds: 5), (_) => _load(silent: true));
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    _ctrl.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load({bool silent = false}) async {
+    try {
+      final r = await buildBackendApi().messageThread(widget.peer);
+      if (!mounted) return;
+      final msgs = (((r['data'] as Map?)?['messages'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final grew = msgs.length != _messages.length;
+      setState(() {
+        _messages = msgs;
+        _loading = false;
+      });
+      if (grew) _scrollToBottom();
+    } catch (_) {
+      if (!silent && mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(_scroll.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  Future<void> _send() async {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    _ctrl.clear();
+    try {
+      final r = await buildBackendApi().sendMessage(widget.peer, text);
+      if (r['ok'] == true) {
+        await _load();
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Send failed: ${r['error'] ?? ''}')));
+        _ctrl.text = text;
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Send failed: $e')));
+        _ctrl.text = text;
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E1A2E),
+      appBar: AppBar(
+          title: Text(widget.peer),
+          backgroundColor: const Color(0xFF14233C)),
+      body: Column(
+        children: [
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _messages.isEmpty
+                    ? const Center(
+                        child: Text('Say hi 👋',
+                            style: TextStyle(color: Color(0xFF9FB2CF))))
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: _messages.length,
+                        itemBuilder: (_, i) => _bubble(_messages[i]),
+                      ),
+          ),
+          _composer(),
+        ],
+      ),
+    );
+  }
+
+  Widget _bubble(Map<String, dynamic> m) {
+    final mine = m['mine'] == true;
+    final body = (m['body'] ?? '').toString();
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.72),
+        decoration: BoxDecoration(
+          color: mine ? const Color(0xFF2D6CDF) : const Color(0xFF17253E),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Text(body, style: const TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
+  Widget _composer() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _ctrl,
+                style: const TextStyle(color: Colors.white),
+                minLines: 1,
+                maxLines: 4,
+                textInputAction: TextInputAction.send,
+                decoration: InputDecoration(
+                  hintText: 'Message…',
+                  hintStyle: const TextStyle(color: Color(0xFF7E93B5)),
+                  filled: true,
+                  fillColor: const Color(0xFF17253E),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none),
+                ),
+                onSubmitted: (_) => _send(),
+              ),
+            ),
+            const SizedBox(width: 6),
+            CircleAvatar(
+              backgroundColor: const Color(0xFF2D6CDF),
+              child: IconButton(
+                icon: _sending
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.send, color: Colors.white, size: 20),
+                onPressed: _sending ? null : _send,
+              ),
+            ),
+          ],
         ),
       ),
     );

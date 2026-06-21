@@ -205,11 +205,17 @@ class Phase3ServiceHub:
                 friends = 0
                 if self._table_exists(conn, "friends"):
                     friends = conn.execute("SELECT COUNT(*) c FROM friends").fetchone()["c"]
+                follows = msgs = 0
+                if self._table_exists(conn, "follows"):
+                    follows = conn.execute("SELECT COUNT(*) c FROM follows").fetchone()["c"]
+                if self._table_exists(conn, "messages"):
+                    msgs = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
             h = hashlib.md5()
             for r in rows:
                 h.update(("|".join(str(x) for x in r)).encode("utf-8", "ignore"))
             h.update(f"#reviews={reviews}".encode("utf-8"))
             h.update(f"#friends={friends}".encode("utf-8"))
+            h.update(f"#follows={follows}#msgs={msgs}".encode("utf-8"))
             return h.hexdigest()
         except Exception:
             return None
@@ -3656,6 +3662,260 @@ class Phase3ServiceHub:
             conn.commit()
         return {"ok": True, "data": {"removed": fname}}
 
+    # ----- Social layer: follow graph + direct messages (Instagram-style) -----
+    def _ensure_social_tables(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS follows (
+                    follower TEXT NOT NULL,
+                    followee TEXT NOT NULL,
+                    created TEXT DEFAULT '',
+                    PRIMARY KEY (follower, followee)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created TEXT DEFAULT '',
+                    read INTEGER DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(sender, recipient, id)"
+            )
+            conn.commit()
+
+    def _real_username(self, conn, name):
+        """Resolve to the stored username casing, or '' if no such user."""
+        row = conn.execute(
+            "SELECT username FROM users WHERE lower(username)=lower(?) LIMIT 1",
+            (name,),
+        ).fetchone()
+        return str(row["username"]) if row else ""
+
+    def _social_counts(self):
+        try:
+            with self._connect() as conn:
+                f = m = 0
+                if self._table_exists(conn, "follows"):
+                    f = conn.execute("SELECT COUNT(*) c FROM follows").fetchone()["c"]
+                if self._table_exists(conn, "messages"):
+                    m = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
+                return f"{f}:{m}"
+        except Exception:
+            return "0:0"
+
+    def _is_following(self, conn, follower, followee):
+        return conn.execute(
+            "SELECT 1 FROM follows WHERE lower(follower)=lower(?) AND lower(followee)=lower(?) LIMIT 1",
+            (follower, followee),
+        ).fetchone() is not None
+
+    def friend_suggestions(self, username: str, hashes):
+        """App users found in the caller's contacts — suggestions only, NOT
+        auto-added. Each carries whether the caller already follows them."""
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        if not isinstance(hashes, list):
+            return {"ok": False, "error": "hashes must be a list"}
+        self._ensure_social_tables()
+        index = self._user_contact_index()
+        wanted = {str(h).strip().lower() for h in hashes if str(h).strip()}
+        names = []
+        seen = set()
+        for h in wanted:
+            friend = index.get(h)
+            if friend and friend.lower() != uname.lower() and friend.lower() not in seen:
+                seen.add(friend.lower())
+                names.append(friend)
+        out = []
+        with self._connect() as conn:
+            for n in names:
+                out.append({
+                    "username": n,
+                    "following": self._is_following(conn, uname, n),
+                    "follows_you": self._is_following(conn, n, uname),
+                })
+        return {"ok": True, "data": {"suggestions": out, "count": len(out)}}
+
+    def follow_user(self, follower: str, followee: str):
+        a = (follower or "").strip()
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            b = self._real_username(conn, (followee or "").strip())
+            if not a or not b:
+                return {"ok": False, "error": "user not found"}
+            if a.lower() == b.lower():
+                return {"ok": False, "error": "cannot follow yourself"}
+            conn.execute(
+                "INSERT OR IGNORE INTO follows(follower, followee, created) VALUES (?,?,?)",
+                (a, b, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"followee": b, "following": True}}
+
+    def unfollow_user(self, follower: str, followee: str):
+        a = (follower or "").strip()
+        b = (followee or "").strip()
+        if not a or not b:
+            return {"ok": False, "error": "username required"}
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM follows WHERE lower(follower)=lower(?) AND lower(followee)=lower(?)",
+                (a, b),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"followee": b, "following": False}}
+
+    def _follow_counts(self, conn, username):
+        following = conn.execute(
+            "SELECT COUNT(*) c FROM follows WHERE lower(follower)=lower(?)", (username,)
+        ).fetchone()["c"]
+        followers = conn.execute(
+            "SELECT COUNT(*) c FROM follows WHERE lower(followee)=lower(?)", (username,)
+        ).fetchone()["c"]
+        return int(following), int(followers)
+
+    def list_following(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT followee FROM follows WHERE lower(follower)=lower(?) ORDER BY followee",
+                (uname,),
+            ).fetchall()
+            people = [{"username": str(r["followee"]), "following": True,
+                       "follows_you": self._is_following(conn, str(r["followee"]), uname)}
+                      for r in rows]
+            following, followers = self._follow_counts(conn, uname)
+        return {"ok": True, "data": {"users": people, "following": following,
+                                     "followers": followers}}
+
+    def list_followers(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT follower FROM follows WHERE lower(followee)=lower(?) ORDER BY follower",
+                (uname,),
+            ).fetchall()
+            people = [{"username": str(r["follower"]),
+                       "following": self._is_following(conn, uname, str(r["follower"])),
+                       "follows_you": True}
+                      for r in rows]
+            following, followers = self._follow_counts(conn, uname)
+        return {"ok": True, "data": {"users": people, "following": following,
+                                     "followers": followers}}
+
+    def send_message(self, sender: str, recipient: str, body: str):
+        a = (sender or "").strip()
+        text = (body or "").strip()
+        if not text:
+            return {"ok": False, "error": "message is empty"}
+        if len(text) > 2000:
+            text = text[:2000]
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            b = self._real_username(conn, (recipient or "").strip())
+            if not a or not b:
+                return {"ok": False, "error": "recipient not found"}
+            if a.lower() == b.lower():
+                return {"ok": False, "error": "cannot message yourself"}
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur = conn.execute(
+                "INSERT INTO messages(sender, recipient, body, created, read) VALUES (?,?,?,?,0)",
+                (a, b, text, now),
+            )
+            conn.commit()
+            mid = cur.lastrowid
+        return {"ok": True, "data": {"id": mid, "to": b, "created": now}}
+
+    def get_thread(self, username: str, other: str, limit: int = 200):
+        a = (username or "").strip()
+        b = (other or "").strip()
+        if not a or not b:
+            return {"ok": False, "error": "username required"}
+        try:
+            limit = max(1, min(500, int(limit)))
+        except Exception:
+            limit = 200
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, sender, recipient, body, created, read FROM messages "
+                "WHERE (lower(sender)=lower(?) AND lower(recipient)=lower(?)) "
+                "   OR (lower(sender)=lower(?) AND lower(recipient)=lower(?)) "
+                "ORDER BY id DESC LIMIT ?",
+                (a, b, b, a, limit),
+            ).fetchall()
+            # Mark messages from the other person as read.
+            conn.execute(
+                "UPDATE messages SET read=1 WHERE lower(recipient)=lower(?) AND lower(sender)=lower(?) AND read=0",
+                (a, b),
+            )
+            conn.commit()
+        msgs = [{
+            "id": r["id"], "sender": str(r["sender"]), "recipient": str(r["recipient"]),
+            "body": r["body"] or "", "created": r["created"] or "",
+            "mine": str(r["sender"]).lower() == a.lower(),
+        } for r in reversed(rows)]
+        return {"ok": True, "data": {"messages": msgs, "with": b}}
+
+    def list_inbox(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": False, "error": "username required"}
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, sender, recipient, body, created, read FROM messages "
+                "WHERE lower(sender)=lower(?) OR lower(recipient)=lower(?) ORDER BY id DESC",
+                (uname, uname),
+            ).fetchall()
+        threads = {}
+        for r in rows:
+            sender = str(r["sender"])
+            recipient = str(r["recipient"])
+            other = recipient if sender.lower() == uname.lower() else sender
+            key = other.lower()
+            if key not in threads:
+                threads[key] = {
+                    "username": other,
+                    "last": r["body"] or "",
+                    "created": r["created"] or "",
+                    "mine": sender.lower() == uname.lower(),
+                    "unread": 0,
+                }
+            if recipient.lower() == uname.lower() and not int(r["read"] or 0):
+                threads[key]["unread"] += 1
+        return {"ok": True, "data": {"threads": list(threads.values()),
+                                     "count": len(threads)}}
+
+    def unread_total(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": True, "data": {"unread": 0}}
+        self._ensure_social_tables()
+        with self._connect() as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) c FROM messages WHERE lower(recipient)=lower(?) AND read=0",
+                (uname,),
+            ).fetchone()["c"]
+        return {"ok": True, "data": {"unread": int(n)}}
+
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
 
@@ -4551,6 +4811,47 @@ class Phase3ServiceHub:
                         result = hub.remove_friend(
                             username, str(payload.get("friend", "")).strip())
                         self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    # --- Social: follow graph + direct messages ---
+                    if path == "/api/mobile/social/suggestions":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.friend_suggestions(
+                            u, payload.get("hashes", [])))
+                        return
+                    if path == "/api/mobile/social/follow":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        r = hub.follow_user(u, str(payload.get("user", "")).strip())
+                        self._send_json(200 if r.get("ok") else 400, r)
+                        return
+                    if path == "/api/mobile/social/unfollow":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        r = hub.unfollow_user(u, str(payload.get("user", "")).strip())
+                        self._send_json(200 if r.get("ok") else 400, r)
+                        return
+                    if path == "/api/mobile/social/following":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.list_following(u))
+                        return
+                    if path == "/api/mobile/social/followers":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.list_followers(u))
+                        return
+                    if path == "/api/mobile/messages/send":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        r = hub.send_message(u, str(payload.get("to", "")).strip(),
+                                             str(payload.get("body", "")))
+                        self._send_json(200 if r.get("ok") else 400, r)
+                        return
+                    if path == "/api/mobile/messages/thread":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.get_thread(
+                            u, str(payload.get("with", "")).strip(),
+                            limit=payload.get("limit", 200)))
+                        return
+                    if path == "/api/mobile/messages/inbox":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.list_inbox(u))
                         return
 
                     if path == "/api/mobile/gallery/review":
