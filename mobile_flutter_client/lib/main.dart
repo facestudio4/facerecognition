@@ -4552,8 +4552,45 @@ class _AuthGateState extends State<AuthGate>
     // Remember we asked so we don't nag on every login.
     await prefs.setBool(askedKey, true);
     if (proceed == true) {
-      await GalleryScanService.requestGalleryPermission();
+      final result = await GalleryScanService.requestGalleryPermission();
+      if (result != 'full' && mounted) {
+        await _showAllowAllGalleryGuide(limited: result == 'limited');
+      }
     }
+  }
+
+  // Shown when the OS granted only partial ("Selected photos") access or set the
+  // permission to "Ask every time" — a whole-gallery scan needs "Allow all".
+  Future<void> _showAllowAllGalleryGuide({required bool limited}) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.photo_library_outlined, size: 36),
+        title: Text(limited ? 'Allow all photos' : 'Photo access needed'),
+        content: Text(
+          limited
+              ? 'Face Studio can currently see only some photos. To recognize the '
+                  'people in your gallery it needs all of them.\n\nOpen Settings → '
+                  'Permissions → Photos and videos → "Allow all".'
+              : 'To scan your gallery, photo access must be set to "Allow all" '
+                  '(not "Ask every time" or "Don\'t allow").\n\nOpen Settings → '
+                  'Permissions → Photos and videos → "Allow all".',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Later'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              GalleryScanService.openGallerySettings();
+            },
+            child: const Text('Open Settings'),
+          ),
+        ],
+      ),
+    );
   }
 
   // Runs the gallery auto-scan when appropriate: first time for a new account,
@@ -4596,9 +4633,12 @@ class _AuthGateState extends State<AuthGate>
       } else if (stateVal == 'scanning') {
         // Interrupted mid-scan -> resume from the local checkpoint.
         pending = true;
-      } else if (stateVal == 'denied') {
-        // Was blocked before; retry now if access has since been granted.
-        if (await GalleryScanService.hasGalleryPermission()) pending = true;
+      } else if (stateVal == 'denied' || stateVal == 'limited') {
+        // Was blocked / only partial before; retry now that FULL access exists.
+        if (await GalleryScanService.hasGalleryPermission()) {
+          pending = true;
+          reset = true; // start clean now that the whole gallery is visible
+        }
       }
       // 'done' / 'empty' -> nothing to do.
     } catch (_) {}
@@ -14602,6 +14642,7 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
     final done = state == 'done' || (total > 0 && scanned >= total);
     final denied = state == 'denied';
     final empty = state == 'empty';
+    final limited = state == 'limited';
     final requested = state == 'requested';
     final String text;
     final Color tint;
@@ -14610,6 +14651,10 @@ class _UsersPageState extends State<UsersPage> with WidgetsBindingObserver {
       text = 'Scan: no photo access';
       tint = const Color(0xFFFFB86B);
       icon = Icons.no_photography_outlined;
+    } else if (limited) {
+      text = 'Scan: partial access';
+      tint = const Color(0xFFFFB86B);
+      icon = Icons.rule_folder_outlined;
     } else if (empty) {
       text = 'Scan: no media';
       tint = const Color(0xFF9FB2CF);
@@ -17120,6 +17165,7 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
     final done = state == 'done' || (total > 0 && scanned >= total);
     final denied = state == 'denied';
     final empty = state == 'empty';
+    final limited = state == 'limited';
     final requested = state == 'requested';
     final frac = total > 0 ? (scanned / total).clamp(0.0, 1.0) : 0.0;
     final hasActivity = state.isNotEmpty || total > 0 || scanned > 0;
@@ -17129,6 +17175,8 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
       status = 'Not scanned yet';
     } else if (denied) {
       status = 'Photo permission not granted';
+    } else if (limited) {
+      status = 'Partial photo access — needs "Allow all"';
     } else if (empty) {
       status = 'No photos/videos found';
     } else if (requested && total <= 0) {

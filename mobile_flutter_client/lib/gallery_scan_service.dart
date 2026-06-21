@@ -88,15 +88,35 @@ class GalleryScanService {
     _stop = true;
   }
 
-  // Whether photo access is already granted (does NOT show the OS prompt).
+  // Whether FULL photo access is already granted (does NOT show the OS prompt).
+  // Note: 'limited'/partial access (Android 14 "Select photos") is NOT enough for
+  // a whole-gallery scan, so it is treated as not-granted here on purpose.
   static Future<bool> hasGalleryPermission() async {
     try {
       final p = await PhotoManager.getPermissionState(
           requestOption: const PermissionRequestOption());
-      return p == PermissionState.authorized || p == PermissionState.limited;
+      return p == PermissionState.authorized;
     } catch (_) {
       return false;
     }
+  }
+
+  // True only when access is partial ("Selected photos" / Android 14 limited).
+  static Future<bool> isGalleryAccessLimited() async {
+    try {
+      final p = await PhotoManager.getPermissionState(
+          requestOption: const PermissionRequestOption());
+      return p == PermissionState.limited;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Opens the OS app-settings page so the user can switch to "Allow all".
+  static Future<void> openGallerySettings() async {
+    try {
+      await PhotoManager.openSetting();
+    } catch (_) {}
   }
 
   // Whether this device already holds scan progress (so an empty server state
@@ -113,14 +133,16 @@ class GalleryScanService {
     }
   }
 
-  // Triggers the OS permission dialog (no-op if already granted). Returns true
-  // if access was granted.
-  static Future<bool> requestGalleryPermission() async {
+  // Triggers the OS permission dialog (no-op if already granted). Returns
+  // 'full' (Allow all), 'limited' (Selected photos only) or 'denied'.
+  static Future<String> requestGalleryPermission() async {
     try {
       final p = await PhotoManager.requestPermissionExtend();
-      return p.isAuth || p.hasAccess;
+      if (p == PermissionState.authorized) return 'full';
+      if (p == PermissionState.limited || p.hasAccess) return 'limited';
+      return 'denied';
     } catch (_) {
-      return false;
+      return 'denied';
     }
   }
 
@@ -150,6 +172,10 @@ class GalleryScanService {
         await onProgress?.call(0, 0, 'denied', 0, 0, 0);
         return;
       }
+      // Partial/"Selected photos" access (Android 14) can't see the whole
+      // gallery — surface it so the user can switch to "Allow all".
+      final isLimited =
+          permission == PermissionState.limited && !permission.isAuth;
 
       final prefs = await SharedPreferences.getInstance();
       if (resetProcessed) {
@@ -179,6 +205,13 @@ class GalleryScanService {
 
       final grandTotal = imgTotal + vidTotal;
       if (grandTotal <= 0) {
+        // With partial access this usually means the OS only shared a few/zero
+        // photos — report 'limited' so the user is told to switch to "Allow all".
+        if (isLimited) {
+          status.value = 'Partial photo access — please allow all photos';
+          await onProgress?.call(0, 0, 'limited', 0, 0, 0);
+          return;
+        }
         status.value = 'No photos or videos found';
         await onProgress?.call(0, 0, 'empty', 0, 0, 0);
         onComplete?.call();
