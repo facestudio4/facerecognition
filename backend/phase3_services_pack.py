@@ -4110,10 +4110,10 @@ class Phase3ServiceHub:
         private_key = os.environ.get("JAAS_PRIVATE_KEY", "").strip()
         if app_id and key_id and private_key:
             try:
-                from google.auth import crypto, jwt as gjwt
+                from google.auth import crypt, jwt as gjwt
                 now = int(time.time())
                 kid = key_id if "/" in key_id else f"{app_id}/{key_id}"
-                signer = crypto.RSASigner.from_string(private_key, key_id=kid)
+                signer = crypt.RSASigner.from_string(private_key, key_id=kid)
                 payload = {
                     "aud": "jitsi",
                     "iss": "chat",

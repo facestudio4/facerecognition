@@ -8,7 +8,11 @@
 config/secrets/
 *.pem
 *.key
+*.pk
+*.pub
 service-account*.json
+*firebase-adminsdk*.json
+Key *.pk
 !.env.example
 !.env.render.example
 !config/.env.example
