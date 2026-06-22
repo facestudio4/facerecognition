@@ -905,9 +905,23 @@ class CallService {
     if (_inCall) return;
     _inCall = true;
     try {
+      // Ask the server for the call config: JaaS (8x8.vc + JWT, no sign-in) when
+      // configured, otherwise free meet.jit.si.
+      var server = 'https://meet.jit.si';
+      var joinRoom = room;
+      String? token;
+      try {
+        final cfg = await buildBackendApi().callConfig(room);
+        final d = (cfg['data'] as Map?) ?? const {};
+        server = (d['server'] ?? server).toString();
+        joinRoom = (d['room'] ?? room).toString();
+        final t = (d['token'] ?? '').toString();
+        token = t.isEmpty ? null : t;
+      } catch (_) {}
       final options = JitsiMeetConferenceOptions(
-        serverURL: 'https://meet.jit.si',
-        room: room,
+        serverURL: server,
+        room: joinRoom,
+        token: token,
         configOverrides: {
           'startWithVideoMuted': audioOnly,
           'startWithAudioMuted': false,
@@ -4133,6 +4147,8 @@ class BackendApi {
       _socialPost('/api/mobile/call/invite', {'to': to, 'room': room, 'mode': mode});
   Future<Map<String, dynamic>> callPoll() =>
       _socialPost('/api/mobile/call/poll', {});
+  Future<Map<String, dynamic>> callConfig(String room) =>
+      _socialPost('/api/mobile/call/config', {'room': room});
 
   // --- Customer API keys (sellable, per-developer) ---
   Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {

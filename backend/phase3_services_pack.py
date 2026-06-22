@@ -4096,6 +4096,59 @@ class Phase3ServiceHub:
         ).start()
         return {"ok": True, "data": {"to": b, "room": room, "mode": mode}}
 
+    def call_config(self, username: str, room: str):
+        """Return the call server + room + (JaaS) token for a 1:1 call.
+
+        If JaaS env (JAAS_APP_ID / JAAS_KID / JAAS_PRIVATE_KEY) is set, returns an
+        8x8.vc room with a signed JWT so NO ONE has to sign in. Otherwise falls
+        back to the free public meet.jit.si (which may prompt the host to sign in).
+        """
+        uname = (username or "").strip() or "guest"
+        room = re.sub(r"[^A-Za-z0-9_-]", "", (room or "").strip()) or "facestudio"
+        app_id = os.environ.get("JAAS_APP_ID", "").strip()
+        key_id = os.environ.get("JAAS_KID", "").strip()
+        private_key = os.environ.get("JAAS_PRIVATE_KEY", "").strip()
+        if app_id and key_id and private_key:
+            try:
+                from google.auth import crypto, jwt as gjwt
+                now = int(time.time())
+                kid = key_id if "/" in key_id else f"{app_id}/{key_id}"
+                signer = crypto.RSASigner.from_string(private_key, key_id=kid)
+                payload = {
+                    "aud": "jitsi",
+                    "iss": "chat",
+                    "sub": app_id,
+                    "room": "*",
+                    "exp": now + 7200,
+                    "nbf": now - 10,
+                    "context": {
+                        "features": {
+                            "livestreaming": "false",
+                            "recording": "false",
+                            "transcription": "false",
+                            "outbound-call": "false",
+                        },
+                        "user": {
+                            "hidden-from-recorder": "false",
+                            "moderator": "true",
+                            "name": uname,
+                            "id": uname,
+                            "avatar": "",
+                            "email": "",
+                        },
+                    },
+                }
+                token = gjwt.encode(signer, payload).decode("ascii")
+                return {"ok": True, "data": {
+                    "server": "https://8x8.vc",
+                    "room": f"{app_id}/{room}",
+                    "token": token,
+                }}
+            except Exception:
+                pass
+        return {"ok": True, "data": {
+            "server": "https://meet.jit.si", "room": room, "token": ""}}
+
     def poll_call(self, username: str):
         """Return a fresh incoming call for this user (within ~45s) and consume it."""
         uname = (username or "").strip()
@@ -5077,6 +5130,12 @@ class Phase3ServiceHub:
                     if path == "/api/mobile/call/poll":
                         u = str((self._token_payload() or {}).get("sub", "")).strip()
                         self._send_json(200, hub.poll_call(u))
+                        return
+
+                    if path == "/api/mobile/call/config":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.call_config(
+                            u, str(payload.get("room", "")).strip()))
                         return
 
                     if path == "/api/mobile/gallery/review":
