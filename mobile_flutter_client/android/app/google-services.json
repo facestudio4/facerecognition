@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "301136302018",
+    "project_id": "face-studio-a1608",
+    "storage_bucket": "face-studio-a1608.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:301136302018:android:080ac0ba7a520517b0505b",
+        "android_client_info": {
+          "package_name": "com.example.face_studio_mobile_client"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBsY6aON_Nlbum93mIBO8lwpAS-qCtiTf4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

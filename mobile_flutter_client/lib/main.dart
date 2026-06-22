@@ -7,6 +7,8 @@ import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -845,6 +847,82 @@ class _UpdateNotificationService {
       payload: updateUrl,
     );
   }
+
+  // Used for incoming direct messages / social notifications (foreground).
+  static Future<void> showMessageNotification(
+      String title, String body) async {
+    if (kIsWeb || body.trim().isEmpty) {
+      return;
+    }
+    await initialize();
+    const androidDetails = AndroidNotificationDetails(
+      'face_studio_messages_channel',
+      'Messages',
+      channelDescription: 'Direct messages and social notifications',
+      importance: Importance.max,
+      priority: Priority.high,
+      playSound: true,
+    );
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: DarwinNotificationDetails(),
+    );
+    await _plugin.show(
+      DateTime.now().millisecondsSinceEpoch.remainder(100000),
+      title,
+      body,
+      details,
+    );
+  }
+}
+
+// Notification-type FCM messages are shown by the OS automatically when the app
+// is in the background/killed, so this top-level handler is intentionally minimal.
+@pragma('vm:entry-point')
+Future<void> _fcmBackgroundHandler(RemoteMessage message) async {}
+
+class PushMessagingService {
+  static bool _appInited = false;
+  static bool _userInited = false;
+
+  // Called once at startup: init Firebase + register the background handler.
+  static Future<void> initApp() async {
+    if (kIsWeb || _appInited) return;
+    try {
+      await Firebase.initializeApp();
+      FirebaseMessaging.onBackgroundMessage(_fcmBackgroundHandler);
+      _appInited = true;
+    } catch (_) {}
+  }
+
+  // Called after login: ask permission, register the device token, and show
+  // foreground messages as local notifications.
+  static Future<void> setupForUser(BackendApi api) async {
+    if (kIsWeb || !_appInited) return;
+    try {
+      final fm = FirebaseMessaging.instance;
+      await fm.requestPermission(alert: true, badge: true, sound: true);
+      if (!_userInited) {
+        FirebaseMessaging.onMessage.listen((m) async {
+          final n = m.notification;
+          final title =
+              (n?.title ?? m.data['title'] ?? 'Face Studio').toString();
+          final body = (n?.body ?? m.data['body'] ?? '').toString();
+          await _UpdateNotificationService.showMessageNotification(title, body);
+        });
+        fm.onTokenRefresh.listen((t) async {
+          try {
+            await api.registerPushToken(t);
+          } catch (_) {}
+        });
+        _userInited = true;
+      }
+      final token = await fm.getToken();
+      if (token != null && token.isNotEmpty) {
+        await api.registerPushToken(token);
+      }
+    } catch (_) {}
+  }
 }
 
 Future<void> main() async {
@@ -852,6 +930,7 @@ Future<void> main() async {
   await _loadMotionPreset();
   await _loadGlobal3dIntensity();
   await _UpdateNotificationService.initialize();
+  await PushMessagingService.initApp();
   unawaited(_EnrollmentUploadQueue.processQueue());
   runApp(const FaceStudioMobileClientApp());
 }
@@ -3933,6 +4012,8 @@ class BackendApi {
       _socialPost('/api/mobile/messages/thread', {'with': withUser});
   Future<Map<String, dynamic>> messageInbox() =>
       _socialPost('/api/mobile/messages/inbox', {});
+  Future<Map<String, dynamic>> registerPushToken(String token) =>
+      _socialPost('/api/mobile/push/register', {'token': token, 'platform': 'android'});
 
   // --- Customer API keys (sellable, per-developer) ---
   Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {
@@ -5019,6 +5100,7 @@ class _AuthGateState extends State<AuthGate>
       _isAdmin = role == 'admin';
     });
     unawaited(_EnrollmentUploadQueue.processQueue());
+    unawaited(PushMessagingService.setupForUser(api));
     await _maybeRunFirstTimeEnrollment(username);
     await _maybeRequestGalleryAccess(username);
     unawaited(_maybeRunGalleryScan(username));

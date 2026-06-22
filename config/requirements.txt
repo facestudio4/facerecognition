@@ -7,4 +7,6 @@ numpy==2.4.3
 opencv-contrib-python==4.13.0.92
 pillow==12.1.1
 requests==2.33.1
+# Mints OAuth tokens for FCM HTTP v1 push (pure-Python, lightweight).
+google-auth==2.35.0
 kivy==2.3.0; platform_system == "Windows"

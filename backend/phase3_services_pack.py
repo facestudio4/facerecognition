@@ -67,6 +67,10 @@ class Phase3ServiceHub:
         # Hard-negative memory: {person_lower: [embeddings]} of faces an admin
         # rejected/deleted as wrong, used to suppress repeat look-alike matches.
         self._mobile_negatives = None
+        # FCM HTTP v1 OAuth token cache (minted from the service account).
+        self._fcm_token = None
+        self._fcm_token_exp = 0.0
+        self._fcm_project = ""
         # Restore the DB + encodings from Supabase BEFORE opening the DB, so a
         # fresh/woken free-tier instance comes back with the real data instead of
         # the committed seed.
@@ -210,12 +214,15 @@ class Phase3ServiceHub:
                     follows = conn.execute("SELECT COUNT(*) c FROM follows").fetchone()["c"]
                 if self._table_exists(conn, "messages"):
                     msgs = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
+                ptoks = 0
+                if self._table_exists(conn, "push_tokens"):
+                    ptoks = conn.execute("SELECT COUNT(*) c FROM push_tokens").fetchone()["c"]
             h = hashlib.md5()
             for r in rows:
                 h.update(("|".join(str(x) for x in r)).encode("utf-8", "ignore"))
             h.update(f"#reviews={reviews}".encode("utf-8"))
             h.update(f"#friends={friends}".encode("utf-8"))
-            h.update(f"#follows={follows}#msgs={msgs}".encode("utf-8"))
+            h.update(f"#follows={follows}#msgs={msgs}#ptoks={ptoks}".encode("utf-8"))
             return h.hexdigest()
         except Exception:
             return None
@@ -3841,6 +3848,13 @@ class Phase3ServiceHub:
             )
             conn.commit()
             mid = cur.lastrowid
+        # Notify the recipient's devices (best-effort, off the response path).
+        preview = text if len(text) <= 120 else text[:117] + "…"
+        threading.Thread(
+            target=self._push_to_user,
+            args=(b, a, preview, {"type": "message", "from": a}),
+            daemon=True,
+        ).start()
         return {"ok": True, "data": {"id": mid, "to": b, "created": now}}
 
     def get_thread(self, username: str, other: str, limit: int = 200):
@@ -3915,6 +3929,124 @@ class Phase3ServiceHub:
                 (uname,),
             ).fetchone()["c"]
         return {"ok": True, "data": {"unread": int(n)}}
+
+    # ----- Push notifications: device token registry (FCM) -----
+    def _ensure_push_tokens_table(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS push_tokens (
+                    token TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    platform TEXT DEFAULT 'android',
+                    updated TEXT DEFAULT ''
+                )
+                """
+            )
+            conn.commit()
+
+    def register_push_token(self, username: str, token: str, platform: str = "android"):
+        uname = (username or "").strip()
+        tok = (token or "").strip()
+        if not uname or not tok:
+            return {"ok": False, "error": "username and token required"}
+        self._ensure_push_tokens_table()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            # A token belongs to one user/device; rebind it if it moved accounts.
+            conn.execute(
+                "INSERT INTO push_tokens(token, username, platform, updated) VALUES (?,?,?,?) "
+                "ON CONFLICT(token) DO UPDATE SET username=excluded.username, "
+                "platform=excluded.platform, updated=excluded.updated",
+                (tok, uname, (platform or "android").strip() or "android", now),
+            )
+            conn.commit()
+        return {"ok": True, "data": {"registered": True}}
+
+    def _user_push_tokens(self, username: str):
+        uname = (username or "").strip()
+        if not uname:
+            return []
+        self._ensure_push_tokens_table()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT token FROM push_tokens WHERE lower(username)=lower(?)",
+                (uname,),
+            ).fetchall()
+        return [str(r["token"]) for r in rows if r["token"]]
+
+    def _delete_push_token(self, token: str):
+        try:
+            self._ensure_push_tokens_table()
+            with self._connect() as conn:
+                conn.execute("DELETE FROM push_tokens WHERE token=?", (token,))
+                conn.commit()
+        except Exception:
+            pass
+
+    def _fcm_access_token(self):
+        """Cached OAuth2 token for FCM HTTP v1, minted from the service account
+        JSON in env FACESTUDIO_FCM_SERVICE_ACCOUNT. Returns None if unavailable."""
+        now = time.time()
+        if self._fcm_token and now < (self._fcm_token_exp - 60):
+            return self._fcm_token
+        raw = os.environ.get("FACESTUDIO_FCM_SERVICE_ACCOUNT", "").strip()
+        if not raw:
+            return None
+        try:
+            info = json.loads(raw)
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request as GRequest
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/firebase.messaging"])
+            creds.refresh(GRequest())
+            self._fcm_token = creds.token
+            self._fcm_project = info.get("project_id", "") or self._fcm_project
+            try:
+                self._fcm_token_exp = creds.expiry.timestamp()
+            except Exception:
+                self._fcm_token_exp = now + 3000
+            return self._fcm_token
+        except Exception:
+            return None
+
+    def _fcm_send(self, tokens, title: str, body: str, data=None):
+        if not tokens:
+            return
+        token = self._fcm_access_token()
+        if not token or not self._fcm_project:
+            return
+        url = f"https://fcm.googleapis.com/v1/projects/{self._fcm_project}/messages:send"
+        headers = {"Authorization": f"Bearer {token}",
+                   "Content-Type": "application/json"}
+        payload_data = {str(k): str(v) for k, v in (data or {}).items()}
+        for tok in tokens:
+            msg = {"message": {
+                "token": tok,
+                "notification": {"title": title, "body": body},
+                "data": payload_data,
+                "android": {"priority": "high"},
+            }}
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps(msg).encode("utf-8"),
+                    headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    r.read()
+            except urllib.error.HTTPError as e:
+                # Stale/unregistered token -> drop it so we stop trying.
+                if e.code in (400, 403, 404):
+                    self._delete_push_token(tok)
+            except Exception:
+                pass
+
+    def _push_to_user(self, username: str, title: str, body: str, data=None):
+        try:
+            toks = self._user_push_tokens(username)
+            if toks:
+                self._fcm_send(toks, title, body, data)
+        except Exception:
+            pass
 
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
@@ -4852,6 +4984,14 @@ class Phase3ServiceHub:
                     if path == "/api/mobile/messages/inbox":
                         u = str((self._token_payload() or {}).get("sub", "")).strip()
                         self._send_json(200, hub.list_inbox(u))
+                        return
+
+                    if path == "/api/mobile/push/register":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        r = hub.register_push_token(
+                            u, str(payload.get("token", "")).strip(),
+                            str(payload.get("platform", "android")).strip())
+                        self._send_json(200 if r.get("ok") else 400, r)
                         return
 
                     if path == "/api/mobile/gallery/review":
