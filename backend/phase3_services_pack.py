@@ -4048,6 +4048,29 @@ class Phase3ServiceHub:
         except Exception:
             pass
 
+    def send_call_invite(self, caller: str, callee: str, room: str, mode: str):
+        """Ring the callee's devices for a DM video/voice call (Jitsi room)."""
+        a = (caller or "").strip()
+        room = (room or "").strip()
+        mode = "audio" if str(mode).strip().lower() == "audio" else "video"
+        if not a or not room:
+            return {"ok": False, "error": "caller and room required"}
+        with self._connect() as conn:
+            b = self._real_username(conn, (callee or "").strip())
+        if not b:
+            return {"ok": False, "error": "callee not found"}
+        if a.lower() == b.lower():
+            return {"ok": False, "error": "cannot call yourself"}
+        title = a
+        body = f"Incoming {mode} call"
+        threading.Thread(
+            target=self._push_to_user,
+            args=(b, title, body,
+                  {"type": "call", "room": room, "mode": mode, "from": a}),
+            daemon=True,
+        ).start()
+        return {"ok": True, "data": {"to": b, "room": room, "mode": mode}}
+
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
 
@@ -4991,6 +5014,15 @@ class Phase3ServiceHub:
                         r = hub.register_push_token(
                             u, str(payload.get("token", "")).strip(),
                             str(payload.get("platform", "android")).strip())
+                        self._send_json(200 if r.get("ok") else 400, r)
+                        return
+
+                    if path == "/api/mobile/call/invite":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        r = hub.send_call_invite(
+                            u, str(payload.get("to", "")).strip(),
+                            str(payload.get("room", "")).strip(),
+                            str(payload.get("mode", "video")).strip())
                         self._send_json(200 if r.get("ok") else 400, r)
                         return
 

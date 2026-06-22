@@ -38,13 +38,13 @@ services:
       - key: SUPABASE_BUCKET
         value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+46
+        value: 0.1.0+47
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B46/mobile_0.1.0%2B46.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B47/mobile_0.1.0%2B47.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Face Studio v0.1.0+46 — push notifications! You now get a notification when someone sends you a direct message.
+        value: Face Studio v0.1.0+47 — video & voice calls in chats! Open a chat and tap the call or video icon to ring your friend.
       # Firebase Cloud Messaging service-account JSON (whole file as the value),
       # used to send push notifications. Keep secret.
       - key: FACESTUDIO_FCM_SERVICE_ACCOUNT

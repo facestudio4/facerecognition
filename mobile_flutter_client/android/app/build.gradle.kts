@@ -26,8 +26,8 @@ android {
         applicationId = "com.example.face_studio_mobile_client"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        // Firebase Messaging requires at least API 23.
-        minSdk = maxOf(23, flutter.minSdkVersion)
+        // Firebase needs API 23; the Jitsi Meet SDK needs API 26.
+        minSdk = maxOf(26, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         multiDexEnabled = true
         versionCode = flutter.versionCode

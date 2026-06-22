@@ -10,6 +10,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
+import 'package:jitsi_meet_flutter_sdk/jitsi_meet_flutter_sdk.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -876,14 +877,63 @@ class _UpdateNotificationService {
   }
 }
 
+// Lets background/global code (FCM handlers) show dialogs and navigate.
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
+
 // Notification-type FCM messages are shown by the OS automatically when the app
 // is in the background/killed, so this top-level handler is intentionally minimal.
 @pragma('vm:entry-point')
 Future<void> _fcmBackgroundHandler(RemoteMessage message) async {}
 
+// In-app video / voice calls over a shared Jitsi room.
+class CallService {
+  static final _jitsi = JitsiMeet();
+  static bool _inCall = false;
+
+  static String newRoom(String a, String b) {
+    final pair = ([a.toLowerCase(), b.toLowerCase()]..sort()).join('-');
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final clean = pair.replaceAll(RegExp(r'[^a-z0-9]+'), '');
+    return 'facestudio-$clean-$stamp';
+  }
+
+  static Future<void> join({
+    required String room,
+    required bool audioOnly,
+    required String displayName,
+  }) async {
+    if (_inCall) return;
+    _inCall = true;
+    try {
+      final options = JitsiMeetConferenceOptions(
+        serverURL: 'https://meet.jit.si',
+        room: room,
+        configOverrides: {
+          'startWithVideoMuted': audioOnly,
+          'startWithAudioMuted': false,
+          'subject': 'Face Studio call',
+        },
+        featureFlags: {
+          'welcomepage.enabled': false,
+          'prejoinpage.enabled': false,
+          'call-integration.enabled': false,
+        },
+        userInfo: JitsiMeetUserInfo(
+          displayName: displayName.isEmpty ? 'Face Studio' : displayName,
+        ),
+      );
+      await _jitsi.join(options);
+    } catch (_) {
+    } finally {
+      _inCall = false;
+    }
+  }
+}
+
 class PushMessagingService {
   static bool _appInited = false;
   static bool _userInited = false;
+  static String _displayName = '';
 
   // Called once at startup: init Firebase + register the background handler.
   static Future<void> initApp() async {
@@ -895,33 +945,90 @@ class PushMessagingService {
     } catch (_) {}
   }
 
-  // Called after login: ask permission, register the device token, and show
-  // foreground messages as local notifications.
-  static Future<void> setupForUser(BackendApi api) async {
+  // Called after login: ask permission, register the device token, handle
+  // incoming messages (notification) and incoming calls (accept/decline -> join).
+  static Future<void> setupForUser(BackendApi api, String username) async {
     if (kIsWeb || !_appInited) return;
+    _displayName = username;
     try {
       final fm = FirebaseMessaging.instance;
       await fm.requestPermission(alert: true, badge: true, sound: true);
       if (!_userInited) {
-        FirebaseMessaging.onMessage.listen((m) async {
-          final n = m.notification;
-          final title =
-              (n?.title ?? m.data['title'] ?? 'Face Studio').toString();
-          final body = (n?.body ?? m.data['body'] ?? '').toString();
-          await _UpdateNotificationService.showMessageNotification(title, body);
-        });
+        FirebaseMessaging.onMessage.listen(_handleForeground);
+        FirebaseMessaging.onMessageOpenedApp.listen(_handleOpened);
         fm.onTokenRefresh.listen((t) async {
           try {
             await api.registerPushToken(t);
           } catch (_) {}
         });
         _userInited = true;
+        final initial = await fm.getInitialMessage();
+        if (initial != null) _handleOpened(initial);
       }
       final token = await fm.getToken();
       if (token != null && token.isNotEmpty) {
         await api.registerPushToken(token);
       }
     } catch (_) {}
+  }
+
+  static bool _isCall(RemoteMessage m) =>
+      (m.data['type'] ?? '').toString() == 'call';
+
+  static Future<void> _handleForeground(RemoteMessage m) async {
+    if (_isCall(m)) {
+      _showIncomingCall(m);
+      return;
+    }
+    final n = m.notification;
+    final title = (n?.title ?? m.data['title'] ?? 'Face Studio').toString();
+    final body = (n?.body ?? m.data['body'] ?? '').toString();
+    await _UpdateNotificationService.showMessageNotification(title, body);
+  }
+
+  // Notification tapped (app was backgrounded/killed) -> join the call directly.
+  static void _handleOpened(RemoteMessage m) {
+    if (_isCall(m)) _joinFromData(m.data);
+  }
+
+  static void _joinFromData(Map<String, dynamic> data) {
+    final room = (data['room'] ?? '').toString();
+    if (room.isEmpty) return;
+    final audioOnly = (data['mode'] ?? 'video').toString() == 'audio';
+    CallService.join(
+        room: room, audioOnly: audioOnly, displayName: _displayName);
+  }
+
+  static void _showIncomingCall(RemoteMessage m) {
+    final ctx = appNavigatorKey.currentContext;
+    if (ctx == null) {
+      _joinFromData(m.data);
+      return;
+    }
+    final from = (m.data['from'] ?? 'Someone').toString();
+    final mode = (m.data['mode'] ?? 'video').toString();
+    showDialog<void>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (d) => AlertDialog(
+        icon: Icon(mode == 'audio' ? Icons.call : Icons.videocam, size: 36),
+        title: Text('Incoming $mode call'),
+        content: Text('$from is calling you'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(d).pop(),
+            child: const Text('Decline'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(d).pop();
+              _joinFromData(m.data);
+            },
+            child: const Text('Accept'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -942,6 +1049,7 @@ class FaceStudioMobileClientApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      navigatorKey: appNavigatorKey,
       title: 'Face Studio Mobile Client',
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -4014,6 +4122,8 @@ class BackendApi {
       _socialPost('/api/mobile/messages/inbox', {});
   Future<Map<String, dynamic>> registerPushToken(String token) =>
       _socialPost('/api/mobile/push/register', {'token': token, 'platform': 'android'});
+  Future<Map<String, dynamic>> callInvite(String to, String room, String mode) =>
+      _socialPost('/api/mobile/call/invite', {'to': to, 'room': room, 'mode': mode});
 
   // --- Customer API keys (sellable, per-developer) ---
   Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {
@@ -5100,7 +5210,7 @@ class _AuthGateState extends State<AuthGate>
       _isAdmin = role == 'admin';
     });
     unawaited(_EnrollmentUploadQueue.processQueue());
-    unawaited(PushMessagingService.setupForUser(api));
+    unawaited(PushMessagingService.setupForUser(api, username));
     await _maybeRunFirstTimeEnrollment(username);
     await _maybeRequestGalleryAccess(username);
     unawaited(_maybeRunGalleryScan(username));
@@ -17792,6 +17902,21 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _startCall(bool audioOnly) async {
+    final prefs = await SharedPreferences.getInstance();
+    final me = (prefs.getString('fs_username') ?? '').trim();
+    final room = CallService.newRoom(me.isEmpty ? 'me' : me, widget.peer);
+    final mode = audioOnly ? 'audio' : 'video';
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Calling ${widget.peer}…')));
+    }
+    try {
+      await buildBackendApi().callInvite(widget.peer, room, mode); // ring them
+    } catch (_) {}
+    await CallService.join(room: room, audioOnly: audioOnly, displayName: me);
+  }
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -17831,8 +17956,21 @@ class _ChatPageState extends State<ChatPage> {
     return Scaffold(
       backgroundColor: const Color(0xFF0E1A2E),
       appBar: AppBar(
-          title: Text(widget.peer),
-          backgroundColor: const Color(0xFF14233C)),
+        title: Text(widget.peer),
+        backgroundColor: const Color(0xFF14233C),
+        actions: [
+          IconButton(
+            tooltip: 'Voice call',
+            icon: const Icon(Icons.call),
+            onPressed: () => _startCall(true),
+          ),
+          IconButton(
+            tooltip: 'Video call',
+            icon: const Icon(Icons.videocam),
+            onPressed: () => _startCall(false),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(
