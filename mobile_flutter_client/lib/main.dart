@@ -972,12 +972,19 @@ class PushMessagingService {
     } catch (_) {}
   }
 
+  // Rooms we've already rung for (de-dups FCM push vs the poll-based ring).
+  static final Set<String> _handledRooms = <String>{};
+
   static bool _isCall(RemoteMessage m) =>
       (m.data['type'] ?? '').toString() == 'call';
 
   static Future<void> _handleForeground(RemoteMessage m) async {
     if (_isCall(m)) {
-      _showIncomingCall(m);
+      presentIncomingCall(
+        (m.data['from'] ?? 'Someone').toString(),
+        (m.data['room'] ?? '').toString(),
+        (m.data['mode'] ?? 'video').toString(),
+      );
       return;
     }
     final n = m.notification;
@@ -988,31 +995,30 @@ class PushMessagingService {
 
   // Notification tapped (app was backgrounded/killed) -> join the call directly.
   static void _handleOpened(RemoteMessage m) {
-    if (_isCall(m)) _joinFromData(m.data);
-  }
-
-  static void _joinFromData(Map<String, dynamic> data) {
-    final room = (data['room'] ?? '').toString();
+    if (!_isCall(m)) return;
+    final room = (m.data['room'] ?? '').toString();
     if (room.isEmpty) return;
-    final audioOnly = (data['mode'] ?? 'video').toString() == 'audio';
+    _handledRooms.add(room);
     CallService.join(
-        room: room, audioOnly: audioOnly, displayName: _displayName);
+        room: room,
+        audioOnly: (m.data['mode'] ?? 'video').toString() == 'audio',
+        displayName: _displayName);
   }
 
-  static void _showIncomingCall(RemoteMessage m) {
+  // Shows an Accept/Decline dialog for an incoming call. Safe to call from both
+  // the FCM handler and the poll loop — it rings each room only once.
+  static void presentIncomingCall(String from, String room, String mode) {
+    if (room.isEmpty || _handledRooms.contains(room)) return;
     final ctx = appNavigatorKey.currentContext;
-    if (ctx == null) {
-      _joinFromData(m.data);
-      return;
-    }
-    final from = (m.data['from'] ?? 'Someone').toString();
-    final mode = (m.data['mode'] ?? 'video').toString();
+    if (ctx == null) return;
+    _handledRooms.add(room);
+    final audioOnly = mode == 'audio';
     showDialog<void>(
       context: ctx,
       barrierDismissible: false,
       builder: (d) => AlertDialog(
-        icon: Icon(mode == 'audio' ? Icons.call : Icons.videocam, size: 36),
-        title: Text('Incoming $mode call'),
+        icon: Icon(audioOnly ? Icons.call : Icons.videocam, size: 36),
+        title: Text('Incoming ${audioOnly ? 'voice' : 'video'} call'),
         content: Text('$from is calling you'),
         actions: [
           TextButton(
@@ -1022,7 +1028,8 @@ class PushMessagingService {
           FilledButton(
             onPressed: () {
               Navigator.of(d).pop();
-              _joinFromData(m.data);
+              CallService.join(
+                  room: room, audioOnly: audioOnly, displayName: _displayName);
             },
             child: const Text('Accept'),
           ),
@@ -4124,6 +4131,8 @@ class BackendApi {
       _socialPost('/api/mobile/push/register', {'token': token, 'platform': 'android'});
   Future<Map<String, dynamic>> callInvite(String to, String room, String mode) =>
       _socialPost('/api/mobile/call/invite', {'to': to, 'room': room, 'mode': mode});
+  Future<Map<String, dynamic>> callPoll() =>
+      _socialPost('/api/mobile/call/poll', {});
 
   // --- Customer API keys (sellable, per-developer) ---
   Future<Map<String, dynamic>> createApiKey(String label, int ratePerMin) async {
@@ -4705,6 +4714,8 @@ class _AuthGateState extends State<AuthGate>
   bool _isAdmin = false;
   bool _sessionValidationRunning = false;
   Timer? _updateRecheckTimer;
+  Timer? _callPollTimer;
+  bool _callPollBusy = false;
   bool _updateCheckInFlight = false;
   bool _updateDialogOpen = false;
   bool _firstEnrollInProgress = false;
@@ -4914,6 +4925,30 @@ class _AuthGateState extends State<AuthGate>
     );
   }
 
+  // Poll for incoming calls so the ring works while the app is open even if the
+  // FCM push is delayed/undelivered (FCM still covers background/closed).
+  void _startCallPolling() {
+    _callPollTimer?.cancel();
+    _callPollTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (_callPollBusy || _username.trim().isEmpty) return;
+      _callPollBusy = true;
+      try {
+        final res = await buildBackendApi().callPoll();
+        final call = (res['data'] as Map?)?['call'];
+        if (call is Map) {
+          PushMessagingService.presentIncomingCall(
+            (call['from'] ?? 'Someone').toString(),
+            (call['room'] ?? '').toString(),
+            (call['mode'] ?? 'video').toString(),
+          );
+        }
+      } catch (_) {
+      } finally {
+        _callPollBusy = false;
+      }
+    });
+  }
+
   Future<void> _checkForAppUpdate() async {
     if (_updateCheckInFlight) {
       return;
@@ -5108,6 +5143,8 @@ class _AuthGateState extends State<AuthGate>
           });
         }
         unawaited(_EnrollmentUploadQueue.processQueue());
+        unawaited(PushMessagingService.setupForUser(api, username));
+        _startCallPolling();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _maybeRunFirstTimeEnrollment(username);
         });
@@ -5211,6 +5248,7 @@ class _AuthGateState extends State<AuthGate>
     });
     unawaited(_EnrollmentUploadQueue.processQueue());
     unawaited(PushMessagingService.setupForUser(api, username));
+    _startCallPolling();
     await _maybeRunFirstTimeEnrollment(username);
     await _maybeRequestGalleryAccess(username);
     unawaited(_maybeRunGalleryScan(username));
@@ -5219,6 +5257,7 @@ class _AuthGateState extends State<AuthGate>
   Future<void> _onLogout() async {
     final api = buildBackendApi();
     final prefs = await SharedPreferences.getInstance();
+    _callPollTimer?.cancel();
     await prefs.remove('fs_token');
     await prefs.remove('fs_username');
     await prefs.remove('fs_role');
@@ -5235,6 +5274,7 @@ class _AuthGateState extends State<AuthGate>
     WidgetsBinding.instance.removeObserver(this);
     GalleryScanService.instance.stop();
     _updateRecheckTimer?.cancel();
+    _callPollTimer?.cancel();
     _sessionBannerController.dispose();
     super.dispose();
   }
@@ -17996,6 +18036,7 @@ class _ChatPageState extends State<ChatPage> {
   Widget _bubble(Map<String, dynamic> m) {
     final mine = m['mine'] == true;
     final body = (m['body'] ?? '').toString();
+    final read = m['read'] == true;
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -18007,7 +18048,23 @@ class _ChatPageState extends State<ChatPage> {
           color: mine ? const Color(0xFF2D6CDF) : const Color(0xFF17253E),
           borderRadius: BorderRadius.circular(14),
         ),
-        child: Text(body, style: const TextStyle(color: Colors.white)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(body, style: const TextStyle(color: Colors.white)),
+            if (mine) ...[
+              const SizedBox(height: 2),
+              // WhatsApp-style ticks: single grey = sent, double = delivered,
+              // double + blue = seen by the recipient.
+              Icon(
+                read ? Icons.done_all : Icons.done,
+                size: 14,
+                color: read ? const Color(0xFF8AD3FF) : const Color(0xFFBCD0FF),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

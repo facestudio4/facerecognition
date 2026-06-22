@@ -3697,6 +3697,20 @@ class Phase3ServiceHub:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(sender, recipient, id)"
             )
+            # Short-lived incoming-call invites, polled by the callee's app so the
+            # ring works even when FCM push is delayed/undelivered.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    callee TEXT NOT NULL,
+                    caller TEXT NOT NULL,
+                    room TEXT NOT NULL,
+                    mode TEXT DEFAULT 'video',
+                    created_ts REAL DEFAULT 0
+                )
+                """
+            )
             conn.commit()
 
     def _real_username(self, conn, name):
@@ -3885,6 +3899,7 @@ class Phase3ServiceHub:
             "id": r["id"], "sender": str(r["sender"]), "recipient": str(r["recipient"]),
             "body": r["body"] or "", "created": r["created"] or "",
             "mine": str(r["sender"]).lower() == a.lower(),
+            "read": bool(int(r["read"] or 0)),
         } for r in reversed(rows)]
         return {"ok": True, "data": {"messages": msgs, "with": b}}
 
@@ -4061,15 +4076,48 @@ class Phase3ServiceHub:
             return {"ok": False, "error": "callee not found"}
         if a.lower() == b.lower():
             return {"ok": False, "error": "cannot call yourself"}
-        title = a
-        body = f"Incoming {mode} call"
+        # Store a short-lived pending call the callee's app can poll for.
+        try:
+            self._ensure_social_tables()
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO pending_calls(callee, caller, room, mode, created_ts) VALUES (?,?,?,?,?)",
+                    (b, a, room, mode, time.time()),
+                )
+                conn.commit()
+        except Exception:
+            pass
+        # Also push via FCM so it rings when the app is backgrounded/closed.
         threading.Thread(
             target=self._push_to_user,
-            args=(b, title, body,
+            args=(b, a, f"Incoming {mode} call",
                   {"type": "call", "room": room, "mode": mode, "from": a}),
             daemon=True,
         ).start()
         return {"ok": True, "data": {"to": b, "room": room, "mode": mode}}
+
+    def poll_call(self, username: str):
+        """Return a fresh incoming call for this user (within ~45s) and consume it."""
+        uname = (username or "").strip()
+        if not uname:
+            return {"ok": True, "data": {"call": None}}
+        self._ensure_social_tables()
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, caller, room, mode, created_ts FROM pending_calls "
+                "WHERE lower(callee)=lower(?) AND created_ts > ? ORDER BY id DESC LIMIT 1",
+                (uname, now - 45),
+            ).fetchone()
+            # Clear this user's pending calls (consumed + drop any stale ones).
+            conn.execute("DELETE FROM pending_calls WHERE lower(callee)=lower(?)", (uname,))
+            conn.execute("DELETE FROM pending_calls WHERE created_ts < ?", (now - 120,))
+            conn.commit()
+        if not row:
+            return {"ok": True, "data": {"call": None}}
+        return {"ok": True, "data": {"call": {
+            "from": str(row["caller"]), "room": str(row["room"]),
+            "mode": str(row["mode"] or "video")}}}
 
     def mobile_compare(self, left_image_b64: str, right_image_b64: str):
         from frontend import facercognition as legacy
@@ -5024,6 +5072,11 @@ class Phase3ServiceHub:
                             str(payload.get("room", "")).strip(),
                             str(payload.get("mode", "video")).strip())
                         self._send_json(200 if r.get("ok") else 400, r)
+                        return
+
+                    if path == "/api/mobile/call/poll":
+                        u = str((self._token_payload() or {}).get("sub", "")).strip()
+                        self._send_json(200, hub.poll_call(u))
                         return
 
                     if path == "/api/mobile/gallery/review":
