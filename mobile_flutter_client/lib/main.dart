@@ -775,6 +775,15 @@ class _UpdateNotificationService {
       final android = _plugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
       await android?.requestNotificationsPermission();
+      // High-importance channel for incoming calls (heads-up + sound = a "ring").
+      // Must match the FCM android.notification.channel_id the server sends.
+      await android?.createNotificationChannel(const AndroidNotificationChannel(
+        'face_studio_calls',
+        'Incoming calls',
+        description: 'Rings for incoming voice/video calls',
+        importance: Importance.max,
+        playSound: true,
+      ));
     }
     if (Platform.isIOS) {
       final ios = _plugin.resolvePlatformSpecificImplementation<
@@ -979,9 +988,17 @@ class PushMessagingService {
         final initial = await fm.getInitialMessage();
         if (initial != null) _handleOpened(initial);
       }
-      final token = await fm.getToken();
-      if (token != null && token.isNotEmpty) {
-        await api.registerPushToken(token);
+      // Retry getToken + register — on a fresh install/update the token or the
+      // session may not be ready on the first try, which left devices unregistered.
+      for (var attempt = 0; attempt < 4; attempt++) {
+        try {
+          final token = await fm.getToken();
+          if (token != null && token.isNotEmpty) {
+            final res = await api.registerPushToken(token);
+            if (res['ok'] == true) break;
+          }
+        } catch (_) {}
+        await Future<void>.delayed(Duration(seconds: 3 * (attempt + 1)));
       }
     } catch (_) {}
   }
@@ -4757,6 +4774,10 @@ class _AuthGateState extends State<AuthGate>
     if (state == AppLifecycleState.resumed) {
       if (_username.trim().isNotEmpty) {
         unawaited(_maybeRunGalleryScan(_username));
+        // Make sure this device is registered for push (covers a token that
+        // wasn't ready right after install/update).
+        unawaited(
+            PushMessagingService.setupForUser(buildBackendApi(), _username));
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {

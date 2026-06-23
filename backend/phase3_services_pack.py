@@ -4025,7 +4025,7 @@ class Phase3ServiceHub:
         except Exception:
             return None
 
-    def _fcm_send(self, tokens, title: str, body: str, data=None):
+    def _fcm_send(self, tokens, title: str, body: str, data=None, channel_id=None):
         if not tokens:
             return
         token = self._fcm_access_token()
@@ -4035,12 +4035,15 @@ class Phase3ServiceHub:
         headers = {"Authorization": f"Bearer {token}",
                    "Content-Type": "application/json"}
         payload_data = {str(k): str(v) for k, v in (data or {}).items()}
+        android_notif = {"sound": "default", "notification_priority": "PRIORITY_MAX"}
+        if channel_id:
+            android_notif["channel_id"] = channel_id
         for tok in tokens:
             msg = {"message": {
                 "token": tok,
                 "notification": {"title": title, "body": body},
                 "data": payload_data,
-                "android": {"priority": "high"},
+                "android": {"priority": "high", "notification": android_notif},
             }}
             try:
                 req = urllib.request.Request(
@@ -4124,9 +4127,10 @@ class Phase3ServiceHub:
             pass
         # Also push via FCM so it rings when the app is backgrounded/closed.
         threading.Thread(
-            target=self._push_to_user,
-            args=(b, a, f"Incoming {mode} call",
-                  {"type": "call", "room": room, "mode": mode, "from": a}),
+            target=self._fcm_send,
+            args=(self._user_push_tokens(b), a, f"Incoming {mode} call",
+                  {"type": "call", "room": room, "mode": mode, "from": a},
+                  "face_studio_calls"),
             daemon=True,
         ).start()
         return {"ok": True, "data": {"to": b, "room": room, "mode": mode}}
