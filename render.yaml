@@ -38,13 +38,13 @@ services:
       - key: SUPABASE_BUCKET
         value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+50
+        value: 0.1.0+51
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B50/mobile_0.1.0%2B50.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B51/mobile_0.1.0%2B51.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Face Studio v0.1.0+50 — incoming calls now ring with a notification and sound, and notifications register more reliably.
+        value: Face Studio v0.1.0+51 — incoming call notifications now reliably show and ring with sound.
       # Firebase Cloud Messaging service-account JSON (whole file as the value),
       # used to send push notifications. Keep secret.
       - key: FACESTUDIO_FCM_SERVICE_ACCOUNT

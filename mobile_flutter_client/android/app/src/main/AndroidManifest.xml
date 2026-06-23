@@ -20,6 +20,12 @@
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
         tools:replace="android:label">
+        <!-- Firebase uses this channel for incoming notification messages when
+             the app is backgrounded; it must match the high-importance channel
+             the app creates so call pushes actually display + ring. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="face_studio_calls" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
