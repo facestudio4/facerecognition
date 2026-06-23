@@ -4055,6 +4055,41 @@ class Phase3ServiceHub:
             except Exception:
                 pass
 
+    def push_diag(self, username: str = ""):
+        """Diagnostics: how many device tokens are registered, whether FCM auth
+        works, and (optionally) the result of a real test push to one user."""
+        self._ensure_push_tokens_table()
+        with self._connect() as conn:
+            by_user = [{"username": str(r["username"]), "count": int(r["c"])}
+                       for r in conn.execute(
+                           "SELECT username, COUNT(*) c FROM push_tokens GROUP BY username").fetchall()]
+        total = sum(u["count"] for u in by_user)
+        oauth = self._fcm_access_token()
+        results = []
+        uname = (username or "").strip()
+        if uname and oauth and self._fcm_project:
+            url = f"https://fcm.googleapis.com/v1/projects/{self._fcm_project}/messages:send"
+            for tok in self._user_push_tokens(uname):
+                msg = {"message": {"token": tok,
+                                   "notification": {"title": "Face Studio",
+                                                    "body": "Test notification ✅"},
+                                   "android": {"priority": "high"}}}
+                try:
+                    req = urllib.request.Request(
+                        url, data=json.dumps(msg).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {oauth}",
+                                 "Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        results.append(f"{r.status} ok")
+                except urllib.error.HTTPError as e:
+                    results.append(f"HTTP {e.code}: {e.read().decode('utf-8','ignore')[:160]}")
+                except Exception as e:
+                    results.append(f"err: {e}")
+        return {"ok": True, "data": {
+            "total_tokens": total, "by_user": by_user,
+            "fcm_auth_ok": bool(oauth), "fcm_project": self._fcm_project,
+            "tested_user": uname, "send_results": results}}
+
     def _push_to_user(self, username: str, title: str, body: str, data=None):
         try:
             toks = self._user_push_tokens(username)
@@ -5130,6 +5165,17 @@ class Phase3ServiceHub:
                     if path == "/api/mobile/call/poll":
                         u = str((self._token_payload() or {}).get("sub", "")).strip()
                         self._send_json(200, hub.poll_call(u))
+                        return
+
+                    if path == "/api/mobile/push/diag":
+                        role = str((self._token_payload() or {}).get("role", "user")).strip().lower()
+                        is_admin = role == "admin" or \
+                            self.headers.get("X-API-Key", "") == hub.api_key
+                        if not is_admin:
+                            self._send_json(403, {"ok": False, "error": "admin only"})
+                            return
+                        self._send_json(200, hub.push_diag(
+                            str(payload.get("username", "")).strip()))
                         return
 
                     if path == "/api/mobile/call/config":
