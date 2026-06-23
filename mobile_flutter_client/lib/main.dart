@@ -767,6 +767,14 @@ class _UpdateNotificationService {
         if (payload.isEmpty) {
           return;
         }
+        // Incoming-call notification tapped -> show the accept/decline dialog.
+        if (payload.startsWith('call|')) {
+          final p = payload.split('|');
+          if (p.length >= 4) {
+            PushMessagingService.presentIncomingCall(p[3], p[1], p[2]);
+          }
+          return;
+        }
         await openUpdateUrl(payload);
       },
     );
@@ -858,6 +866,14 @@ class _UpdateNotificationService {
     );
   }
 
+  // Dismiss the persistent incoming-call ring (id 7001) once it's handled.
+  static Future<void> cancelCallRing() async {
+    if (kIsWeb) return;
+    try {
+      await _plugin.cancel(7001);
+    } catch (_) {}
+  }
+
   // Used for incoming direct messages / social notifications (foreground).
   static Future<void> showMessageNotification(
       String title, String body) async {
@@ -889,10 +905,55 @@ class _UpdateNotificationService {
 // Lets background/global code (FCM handlers) show dialogs and navigate.
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
-// Notification-type FCM messages are shown by the OS automatically when the app
-// is in the background/killed, so this top-level handler is intentionally minimal.
+// Incoming calls are sent as data-only messages so this handler always runs
+// (even backgrounded/killed) and renders its own full-screen ringing notification
+// — more reliable than the OS auto-display, which aggressive OEM skins suppress.
 @pragma('vm:entry-point')
-Future<void> _fcmBackgroundHandler(RemoteMessage message) async {}
+Future<void> _fcmBackgroundHandler(RemoteMessage message) async {
+  if ((message.data['type'] ?? '').toString() != 'call') return;
+  final from = (message.data['from'] ?? 'Someone').toString();
+  final mode = (message.data['mode'] ?? 'video').toString();
+  final room = (message.data['room'] ?? '').toString();
+  if (room.isEmpty) return;
+  try {
+    final plugin = FlutterLocalNotificationsPlugin();
+    await plugin.initialize(const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ));
+    final android = plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    await android?.createNotificationChannel(const AndroidNotificationChannel(
+      'face_studio_calls',
+      'Incoming calls',
+      description: 'Rings for incoming voice/video calls',
+      importance: Importance.max,
+      playSound: true,
+    ));
+    final audioOnly = mode == 'audio';
+    await plugin.show(
+      7001,
+      from,
+      'Incoming ${audioOnly ? 'voice' : 'video'} call',
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          'face_studio_calls',
+          'Incoming calls',
+          channelDescription: 'Rings for incoming voice/video calls',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.call,
+          fullScreenIntent: true,
+          playSound: true,
+          enableVibration: true,
+          ongoing: true,
+          ticker: 'Incoming call',
+          visibility: NotificationVisibility.public,
+        ),
+      ),
+      payload: 'call|$room|$mode|$from',
+    );
+  } catch (_) {}
+}
 
 // In-app video / voice calls over a shared Jitsi room.
 class CallService {
@@ -1030,6 +1091,7 @@ class PushMessagingService {
     final room = (m.data['room'] ?? '').toString();
     if (room.isEmpty) return;
     _handledRooms.add(room);
+    unawaited(_UpdateNotificationService.cancelCallRing());
     CallService.join(
         room: room,
         audioOnly: (m.data['mode'] ?? 'video').toString() == 'audio',
@@ -1043,6 +1105,7 @@ class PushMessagingService {
     final ctx = appNavigatorKey.currentContext;
     if (ctx == null) return;
     _handledRooms.add(room);
+    unawaited(_UpdateNotificationService.cancelCallRing());
     final audioOnly = mode == 'audio';
     showDialog<void>(
       context: ctx,
@@ -17578,6 +17641,55 @@ class _GalleryScanStatsPageState extends State<GalleryScanStatsPage> {
   }
 }
 
+// Shared look for the social screens (Friends + Chat).
+const LinearGradient _kFsGradient = LinearGradient(
+  colors: [Color(0xFF4F8BFF), Color(0xFF9B5BFF), Color(0xFFFF5BA8)],
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+);
+const Color _kFsBg = Color(0xFF0C1626);
+const Color _kFsCard = Color(0xFF16243C);
+
+// Instagram-style avatar: a coloured initial inside an optional gradient ring.
+class _GradientAvatar extends StatelessWidget {
+  const _GradientAvatar(this.name, {this.size = 46, this.ring = true});
+  final String name;
+  final double size;
+  final bool ring;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = name.trim();
+    final letter = t.isNotEmpty ? t[0].toUpperCase() : '?';
+    final inner = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        color: Color(0xFF22344F),
+      ),
+      child: Text(letter,
+          style: TextStyle(
+              color: Colors.white,
+              fontSize: size * 0.42,
+              fontWeight: FontWeight.w700)),
+    );
+    if (!ring) return inner;
+    return Container(
+      padding: const EdgeInsets.all(2.5),
+      decoration: const BoxDecoration(
+          shape: BoxShape.circle, gradient: _kFsGradient),
+      child: Container(
+        padding: const EdgeInsets.all(2),
+        decoration: const BoxDecoration(
+            shape: BoxShape.circle, color: _kFsBg),
+        child: inner,
+      ),
+    );
+  }
+}
+
 class FriendsPage extends StatefulWidget {
   const FriendsPage({super.key});
 
@@ -17598,14 +17710,24 @@ class _FriendsPageState extends State<FriendsPage>
   int _followersCount = 0;
   bool _busy = false;
   String _discoverStatus = '';
+  String _me = '';
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 4, vsync: this);
+    _loadMe();
     _loadFollowing();
     _loadFollowers();
     _loadInbox();
+  }
+
+  Future<void> _loadMe() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() => _me = (prefs.getString('fs_username') ?? '').trim());
+    } catch (_) {}
   }
 
   @override
@@ -17742,33 +17864,119 @@ class _FriendsPageState extends State<FriendsPage>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0E1A2E),
+      backgroundColor: _kFsBg,
       appBar: AppBar(
-        title: const Text('Friends'),
-        backgroundColor: const Color(0xFF14233C),
-        bottom: TabBar(
-          controller: _tabs,
-          isScrollable: true,
-          indicatorColor: const Color(0xFF5EC8FF),
-          labelColor: Colors.white,
-          unselectedLabelColor: const Color(0xFF9FB2CF),
-          tabs: [
-            const Tab(text: 'Discover'),
-            Tab(text: 'Following ($_followingCount)'),
-            Tab(text: 'Followers ($_followersCount)'),
-            const Tab(text: 'Messages'),
-          ],
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF13213A), Color(0xFF1A2C49)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: const Text('People',
+            style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(46),
+          child: TabBar(
+            controller: _tabs,
+            isScrollable: true,
+            indicator: BoxDecoration(
+              borderRadius: BorderRadius.circular(30),
+              gradient: _kFsGradient,
+            ),
+            indicatorSize: TabBarIndicatorSize.tab,
+            indicatorPadding:
+                const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
+            dividerColor: Colors.transparent,
+            labelColor: Colors.white,
+            unselectedLabelColor: const Color(0xFF8AA0C2),
+            labelStyle:
+                const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+            tabs: [
+              const Tab(text: 'Discover'),
+              Tab(text: 'Following $_followingCount'),
+              Tab(text: 'Followers $_followersCount'),
+              const Tab(text: 'Chats'),
+            ],
+          ),
         ),
       ),
-      body: TabBarView(
-        controller: _tabs,
+      body: Column(
         children: [
-          _discoverTab(),
-          _peopleTab(_following, 'You are not following anyone yet.'),
-          _peopleTab(_followers, 'No followers yet.'),
-          _messagesTab(),
+          _profileHeader(),
+          Expanded(
+            child: TabBarView(
+              controller: _tabs,
+              children: [
+                _discoverTab(),
+                _peopleTab(_following, 'You are not following anyone yet.',
+                    Icons.person_add_alt_1),
+                _peopleTab(_followers, 'No followers yet.', Icons.group_outlined),
+                _messagesTab(),
+              ],
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Widget _profileHeader() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1B2C49), Color(0xFF15243E)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(color: const Color(0xFF26395A)),
+      ),
+      child: Row(
+        children: [
+          _GradientAvatar(_me.isEmpty ? '?' : _me, size: 56),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_me.isEmpty ? 'You' : _me,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                const Text('Your network',
+                    style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+              ],
+            ),
+          ),
+          _statBlock('$_followingCount', 'Following'),
+          const SizedBox(width: 6),
+          Container(width: 1, height: 32, color: const Color(0xFF2A3D5E)),
+          const SizedBox(width: 6),
+          _statBlock('$_followersCount', 'Followers'),
+        ],
+      ),
+    );
+  }
+
+  Widget _statBlock(String value, String label) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(value,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+        Text(label,
+            style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 11)),
+      ],
     );
   }
 
@@ -17776,50 +17984,48 @@ class _FriendsPageState extends State<FriendsPage>
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(12),
-          child: SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: _busy ? null : _discover,
-              icon: _busy
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.contacts),
-              label: Text(_busy
-                  ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
-                  : 'Find contacts on Face Studio'),
-            ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: _gradientButton(
+            label: _busy
+                ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
+                : 'Find contacts on Face Studio',
+            icon: Icons.contacts_rounded,
+            busy: _busy,
+            onTap: _busy ? null : _discover,
           ),
         ),
         const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 12),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Only a scrambled (hashed) form of your contacts is sent — never '
-              'raw numbers. Tap Follow to follow someone.',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9FB2CF)),
-            ),
+          padding: EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            children: [
+              Icon(Icons.lock_outline, size: 13, color: Color(0xFF7E93B5)),
+              SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  'Only a scrambled (hashed) form of your contacts is sent — '
+                  'never raw numbers.',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF8AA0C2)),
+                ),
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         Expanded(
           child: _suggestions.isEmpty
-              ? const Center(
-                  child: Text('Tap "Find contacts" to discover people you know.',
-                      style: TextStyle(color: Color(0xFF9FB2CF))))
+              ? _emptyState(Icons.travel_explore,
+                  'Discover people you know',
+                  'Tap "Find contacts" to see who from your phone is on Face Studio.')
               : ListView(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
                   children: _suggestions.map(_userTile).toList()),
         ),
       ],
     );
   }
 
-  Widget _peopleTab(List<Map<String, dynamic>> people, String emptyMsg) {
+  Widget _peopleTab(
+      List<Map<String, dynamic>> people, String emptyMsg, IconData icon) {
     return RefreshIndicator(
       onRefresh: () async {
         await _loadFollowing();
@@ -17827,13 +18033,12 @@ class _FriendsPageState extends State<FriendsPage>
       },
       child: people.isEmpty
           ? ListView(children: [
-              const SizedBox(height: 120),
-              Center(
-                  child: Text(emptyMsg,
-                      style: const TextStyle(color: Color(0xFF9FB2CF)))),
+              const SizedBox(height: 60),
+              _emptyState(icon, emptyMsg,
+                  'Pull down to refresh, or find people in Discover.'),
             ])
           : ListView(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
               children: people.map(_userTile).toList()),
     );
   }
@@ -17842,40 +18047,62 @@ class _FriendsPageState extends State<FriendsPage>
     final name = (u['username'] ?? '-').toString();
     final following = u['following'] == true;
     final followsYou = u['follows_you'] == true;
-    return Card(
-      color: const Color(0xFF17253E),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: ListTile(
-        leading: CircleAvatar(
-            backgroundColor: const Color(0xFF2E4D7A),
-            child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
-                style: const TextStyle(color: Colors.white))),
-        title: Text(name, style: const TextStyle(color: Colors.white)),
-        subtitle: followsYou
-            ? const Text('Follows you',
-                style: TextStyle(color: Color(0xFF8AF0C8), fontSize: 12))
-            : null,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              tooltip: 'Message',
-              icon: const Icon(Icons.chat_bubble_outline,
-                  color: Color(0xFF9FC3FF), size: 20),
-              onPressed: () => _openChat(name),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: _kFsCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF22344F)),
+      ),
+      child: Row(
+        children: [
+          _GradientAvatar(name, size: 48, ring: !following),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(followsYou ? 'Follows you' : 'On Face Studio',
+                    style: TextStyle(
+                        color: followsYou
+                            ? const Color(0xFF7EE3B4)
+                            : const Color(0xFF8AA0C2),
+                        fontSize: 12)),
+              ],
             ),
-            SizedBox(
-              height: 32,
-              child: following
-                  ? OutlinedButton(
-                      onPressed: () => _toggleFollow(u),
-                      child: const Text('Following'))
-                  : FilledButton(
-                      onPressed: () => _toggleFollow(u),
-                      child: const Text('Follow')),
-            ),
-          ],
-        ),
+          ),
+          IconButton(
+            tooltip: 'Message',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.chat_bubble_outline_rounded,
+                color: Color(0xFF9FC3FF), size: 21),
+            onPressed: () => _openChat(name),
+          ),
+          const SizedBox(width: 2),
+          following
+              ? OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFB9C9E4),
+                    side: const BorderSide(color: Color(0xFF3A4E6E)),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20)),
+                  ),
+                  onPressed: () => _toggleFollow(u),
+                  child: const Text('Following'))
+              : _gradientButton(
+                  label: 'Follow',
+                  compact: true,
+                  onTap: () => _toggleFollow(u),
+                ),
+        ],
       ),
     );
   }
@@ -17884,46 +18111,170 @@ class _FriendsPageState extends State<FriendsPage>
     return RefreshIndicator(
       onRefresh: _loadInbox,
       child: _inbox.isEmpty
-          ? ListView(children: const [
-              SizedBox(height: 120),
-              Center(
-                  child: Text('No messages yet. Open a chat to say hi.',
-                      style: TextStyle(color: Color(0xFF9FB2CF)))),
+          ? ListView(children: [
+              const SizedBox(height: 60),
+              _emptyState(Icons.forum_outlined, 'No chats yet',
+                  'Follow someone and tap the chat icon to start a conversation.'),
             ])
           : ListView(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 16),
               children: _inbox.map((t) {
                 final name = (t['username'] ?? '-').toString();
                 final last = (t['last'] ?? '').toString();
                 final unread = int.tryParse((t['unread'] ?? 0).toString()) ?? 0;
                 final mine = t['mine'] == true;
-                return Card(
-                  color: const Color(0xFF17253E),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  child: ListTile(
-                    leading: CircleAvatar(
-                        backgroundColor: const Color(0xFF2E4D7A),
-                        child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
-                            style: const TextStyle(color: Colors.white))),
-                    title: Text(name,
-                        style: const TextStyle(color: Colors.white)),
-                    subtitle: Text('${mine ? 'You: ' : ''}$last',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Color(0xFF9FB2CF))),
-                    trailing: unread > 0
-                        ? CircleAvatar(
-                            radius: 11,
-                            backgroundColor: const Color(0xFF5EC8FF),
+                final hasUnread = unread > 0;
+                return InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _openChat(name),
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: hasUnread
+                          ? const Color(0xFF1A2E4E)
+                          : _kFsCard,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: hasUnread
+                              ? const Color(0xFF2E5B8F)
+                              : const Color(0xFF22344F)),
+                    ),
+                    child: Row(
+                      children: [
+                        _GradientAvatar(name, size: 50, ring: hasUnread),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(name,
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 15,
+                                      fontWeight: hasUnread
+                                          ? FontWeight.w700
+                                          : FontWeight.w600)),
+                              const SizedBox(height: 3),
+                              Text('${mine ? 'You: ' : ''}$last',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: hasUnread
+                                          ? const Color(0xFFD6E2F5)
+                                          : const Color(0xFF8AA0C2),
+                                      fontSize: 13)),
+                            ],
+                          ),
+                        ),
+                        if (hasUnread)
+                          Container(
+                            margin: const EdgeInsets.only(left: 8),
+                            padding: const EdgeInsets.all(7),
+                            decoration: const BoxDecoration(
+                                shape: BoxShape.circle, gradient: _kFsGradient),
+                            constraints: const BoxConstraints(minWidth: 24),
                             child: Text('$unread',
+                                textAlign: TextAlign.center,
                                 style: const TextStyle(
-                                    fontSize: 11, color: Colors.black)))
-                        : null,
-                    onTap: () => _openChat(name),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white)),
+                          ),
+                      ],
+                    ),
                   ),
                 );
               }).toList()),
+    );
+  }
+
+  // A filled gradient button (pill). Compact = small inline (Follow); else wide.
+  Widget _gradientButton({
+    required String label,
+    required VoidCallback? onTap,
+    IconData? icon,
+    bool busy = false,
+    bool compact = false,
+  }) {
+    return Opacity(
+      opacity: onTap == null && !busy ? 0.6 : 1,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(26),
+          onTap: onTap,
+          child: Ink(
+            decoration: BoxDecoration(
+              gradient: _kFsGradient,
+              borderRadius: BorderRadius.circular(26),
+            ),
+            child: Container(
+              width: compact ? null : double.infinity,
+              padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 18 : 16, vertical: compact ? 9 : 13),
+              child: Row(
+                mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (busy)
+                    const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                  else if (icon != null)
+                    Icon(icon, color: Colors.white, size: 18),
+                  if (busy || icon != null) const SizedBox(width: 8),
+                  Text(label,
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: compact ? 13 : 14.5)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _emptyState(IconData icon, String title, String subtitle) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFF4F8BFF).withOpacity(0.18),
+                    const Color(0xFFFF5BA8).withOpacity(0.18),
+                  ],
+                ),
+              ),
+              child: Icon(icon, size: 38, color: const Color(0xFFAFC4E6)),
+            ),
+            const SizedBox(height: 16),
+            Text(title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 6),
+            Text(subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 13)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -18031,21 +18382,53 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0E1A2E),
+      backgroundColor: _kFsBg,
       appBar: AppBar(
-        title: Text(widget.peer),
-        backgroundColor: const Color(0xFF14233C),
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        titleSpacing: 0,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF13213A), Color(0xFF1A2C49)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            _GradientAvatar(widget.peer, size: 38),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(widget.peer,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w700)),
+                  const Text('Tap a button to call',
+                      style:
+                          TextStyle(fontSize: 11, color: Color(0xFF8AA0C2))),
+                ],
+              ),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: 'Voice call',
-            icon: const Icon(Icons.call),
+            icon: const Icon(Icons.call_rounded),
             onPressed: () => _startCall(true),
           ),
           IconButton(
             tooltip: 'Video call',
-            icon: const Icon(Icons.videocam),
+            icon: const Icon(Icons.videocam_rounded),
             onPressed: () => _startCall(false),
           ),
+          const SizedBox(width: 4),
         ],
       ),
       body: Column(
@@ -18054,12 +18437,26 @@ class _ChatPageState extends State<ChatPage> {
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _messages.isEmpty
-                    ? const Center(
-                        child: Text('Say hi 👋',
-                            style: TextStyle(color: Color(0xFF9FB2CF))))
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _GradientAvatar(widget.peer, size: 76),
+                            const SizedBox(height: 14),
+                            Text(widget.peer,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w700)),
+                            const SizedBox(height: 4),
+                            const Text('Say hi 👋',
+                                style: TextStyle(color: Color(0xFF8AA0C2))),
+                          ],
+                        ),
+                      )
                     : ListView.builder(
                         controller: _scroll,
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.fromLTRB(12, 14, 12, 6),
                         itemCount: _messages.length,
                         itemBuilder: (_, i) => _bubble(_messages[i]),
                       ),
@@ -18074,30 +18471,46 @@ class _ChatPageState extends State<ChatPage> {
     final mine = m['mine'] == true;
     final body = (m['body'] ?? '').toString();
     final read = m['read'] == true;
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(mine ? 18 : 4),
+      bottomRight: Radius.circular(mine ? 4 : 18),
+    );
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.72),
+        padding: const EdgeInsets.fromLTRB(14, 9, 14, 7),
+        constraints:
+            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.74),
         decoration: BoxDecoration(
-          color: mine ? const Color(0xFF2D6CDF) : const Color(0xFF17253E),
-          borderRadius: BorderRadius.circular(14),
+          gradient: mine
+              ? const LinearGradient(
+                  colors: [Color(0xFF3B7BF6), Color(0xFF8A5CF0)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                )
+              : null,
+          color: mine ? null : const Color(0xFF1C2C49),
+          borderRadius: radius,
+          border: mine
+              ? null
+              : Border.all(color: const Color(0xFF2A3D5E), width: 0.6),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(body, style: const TextStyle(color: Colors.white)),
+            Text(body,
+                style: const TextStyle(color: Colors.white, fontSize: 14.5)),
             if (mine) ...[
               const SizedBox(height: 2),
-              // WhatsApp-style ticks: single grey = sent, double = delivered,
-              // double + blue = seen by the recipient.
+              // WhatsApp-style ticks: single = sent, double + blue = seen.
               Icon(
                 read ? Icons.done_all : Icons.done,
                 size: 14,
-                color: read ? const Color(0xFF8AD3FF) : const Color(0xFFBCD0FF),
+                color: read ? const Color(0xFF8AD3FF) : const Color(0xFFC9D6F0),
               ),
             ],
           ],
@@ -18108,8 +18521,12 @@ class _ChatPageState extends State<ChatPage> {
 
   Widget _composer() {
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+        decoration: const BoxDecoration(
+          color: Color(0xFF0F1B2E),
+          border: Border(top: BorderSide(color: Color(0xFF1E2F4B))),
+        ),
         child: Row(
           children: [
             Expanded(
@@ -18123,28 +18540,34 @@ class _ChatPageState extends State<ChatPage> {
                   hintText: 'Message…',
                   hintStyle: const TextStyle(color: Color(0xFF7E93B5)),
                   filled: true,
-                  fillColor: const Color(0xFF17253E),
+                  fillColor: const Color(0xFF1A2A45),
                   contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
+                      borderRadius: BorderRadius.circular(26),
                       borderSide: BorderSide.none),
                 ),
                 onSubmitted: (_) => _send(),
               ),
             ),
-            const SizedBox(width: 6),
-            CircleAvatar(
-              backgroundColor: const Color(0xFF2D6CDF),
-              child: IconButton(
-                icon: _sending
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.send, color: Colors.white, size: 20),
-                onPressed: _sending ? null : _send,
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: _sending ? null : _send,
+              child: Container(
+                width: 46,
+                height: 46,
+                decoration: const BoxDecoration(
+                    shape: BoxShape.circle, gradient: _kFsGradient),
+                child: Center(
+                  child: _sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.send_rounded,
+                          color: Colors.white, size: 21),
+                ),
               ),
             ),
           ],

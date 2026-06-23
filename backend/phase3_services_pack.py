@@ -4025,7 +4025,8 @@ class Phase3ServiceHub:
         except Exception:
             return None
 
-    def _fcm_send(self, tokens, title: str, body: str, data=None, channel_id=None):
+    def _fcm_send(self, tokens, title: str, body: str, data=None,
+                  channel_id=None, data_only=False):
         if not tokens:
             return
         token = self._fcm_access_token()
@@ -4039,12 +4040,22 @@ class Phase3ServiceHub:
         if channel_id:
             android_notif["channel_id"] = channel_id
         for tok in tokens:
-            msg = {"message": {
-                "token": tok,
-                "notification": {"title": title, "body": body},
-                "data": payload_data,
-                "android": {"priority": "high", "notification": android_notif},
-            }}
+            if data_only:
+                # No notification block -> the app's background handler always
+                # runs and renders its own full-screen ringing UI (more reliable
+                # than letting the OS auto-display, esp. on aggressive OEM skins).
+                msg = {"message": {
+                    "token": tok,
+                    "data": payload_data,
+                    "android": {"priority": "high"},
+                }}
+            else:
+                msg = {"message": {
+                    "token": tok,
+                    "notification": {"title": title, "body": body},
+                    "data": payload_data,
+                    "android": {"priority": "high", "notification": android_notif},
+                }}
             try:
                 req = urllib.request.Request(
                     url, data=json.dumps(msg).encode("utf-8"),
@@ -4128,9 +4139,10 @@ class Phase3ServiceHub:
         # Also push via FCM so it rings when the app is backgrounded/closed.
         threading.Thread(
             target=self._fcm_send,
-            args=(self._user_push_tokens(b), a, f"Incoming {mode} call",
-                  {"type": "call", "room": room, "mode": mode, "from": a},
-                  "face_studio_calls"),
+            kwargs=dict(tokens=self._user_push_tokens(b), title=a,
+                        body=f"Incoming {mode} call",
+                        data={"type": "call", "room": room, "mode": mode, "from": a},
+                        channel_id="face_studio_calls", data_only=True),
             daemon=True,
         ).start()
         return {"ok": True, "data": {"to": b, "room": room, "mode": mode}}
