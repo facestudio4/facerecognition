@@ -27,8 +27,8 @@ def save_frames(video_path: Path, out_dir: Path, times_sec: list[float]) -> None
 
 
 if __name__ == "__main__":
-    root = Path(r"c:\Users\shishir\OneDrive\Documents\Python\facerecognition")
-    src = root / "error photos"
+    root = Path(__file__).resolve().parent.parent
+    src = root / "archive" / "error_photos"
 
     wrong = src / "Android Emulator - Medium_Phone_API_36.1_5554 2026-04-13 00-04-31.mp4"
     correct = src / "Android Emulator - Medium_Phone_API_36.1_5554 2026-04-13 00-05-46.mp4"

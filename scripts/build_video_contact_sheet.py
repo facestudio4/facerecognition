@@ -69,7 +69,7 @@ def make_sheet(video_path: Path, out_png: Path, sample_step_sec: float = 1.0) ->
 
 
 if __name__ == "__main__":
-    root = Path(r"c:\Users\shishir\OneDrive\Documents\Python\facerecognition\error photos")
+    root = Path(__file__).resolve().parent.parent / "archive" / "error_photos"
     wrong_video = root / "Android Emulator - Medium_Phone_API_36.1_5554 2026-04-13 00-04-31.mp4"
     correct_video = root / "Android Emulator - Medium_Phone_API_36.1_5554 2026-04-13 00-05-46.mp4"
 
