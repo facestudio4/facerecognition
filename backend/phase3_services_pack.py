@@ -3584,6 +3584,21 @@ class Phase3ServiceHub:
                 "SELECT username, email, phone, role, created, logins_json, privacy_mode, privacy_allowed_json, privacy_allowed_profile_json, reenroll_required, reenroll_requested_at, gallery_scan_state, gallery_total, gallery_scanned, gallery_faces, gallery_saved, gallery_review FROM users ORDER BY username LIMIT ?",
                 (limit,),
             ).fetchall()
+            # Ground-truth review stats per user from the actual review queue, so
+            # "In review"/"Saved" reflect reality even if the scan's self-reported
+            # counters are stale, reset, or from an older app build.
+            review_pending = {}
+            review_approved = {}
+            if self._table_exists(conn, "gallery_reviews"):
+                for rr in conn.execute(
+                    "SELECT lower(submitted_by) u, status, COUNT(*) c "
+                    "FROM gallery_reviews GROUP BY lower(submitted_by), status"
+                ).fetchall():
+                    u = rr["u"] or ""
+                    if rr["status"] == "pending":
+                        review_pending[u] = int(rr["c"] or 0)
+                    elif rr["status"] == "approved":
+                        review_approved[u] = int(rr["c"] or 0)
         out = []
         for row in rows:
             username = str(row["username"] or "")
@@ -3631,9 +3646,20 @@ class Phase3ServiceHub:
                     "gallery_scan_state": row["gallery_scan_state"] or "",
                     "gallery_total": int(row["gallery_total"] or 0),
                     "gallery_scanned": int(row["gallery_scanned"] or 0),
-                    "gallery_faces": int(row["gallery_faces"] or 0),
-                    "gallery_saved": int(row["gallery_saved"] or 0),
-                    "gallery_review": int(row["gallery_review"] or 0),
+                    # Had faces is at least everything we saved or queued (each had
+                    # a face), so it stays consistent even if the scan under-reported.
+                    "gallery_faces": max(
+                        int(row["gallery_faces"] or 0),
+                        int(row["gallery_saved"] or 0)
+                        + review_approved.get(uname_l, 0)
+                        + review_pending.get(uname_l, 0)),
+                    # Saved = scan auto-saves + photos you approved from review.
+                    "gallery_saved": int(row["gallery_saved"] or 0)
+                    + review_approved.get(uname_l, 0),
+                    # In review = LIVE pending count from the review queue (the
+                    # authoritative number), not the scan's transient estimate.
+                    "gallery_review": review_pending.get(
+                        uname_l, int(row["gallery_review"] or 0)),
                 }
             )
         return out
