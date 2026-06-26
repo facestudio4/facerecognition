@@ -22008,8 +22008,321 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     );
   }
 
+  // Clean, focused Face Generation screen (replaces the cluttered shared module
+  // layout for this module only). Result image is shown front-and-center.
+  Future<void> _applyFilterToPhoto() async {
+    if (_pickedImage == null) {
+      setState(() => _status = 'Pick or take a photo first');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await _generate();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _buildGenerationView() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0C1626),
+      appBar: AppBar(
+        title: const Text('Face Generation'),
+        backgroundColor: const Color(0xFF13213A),
+        actions: [
+          IconButton(
+            tooltip: 'Clear',
+            onPressed: _clearSession,
+            icon: const Icon(Icons.delete_sweep),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
+        children: [
+          _genResultPreview(),
+          const SizedBox(height: 16),
+          _genDescribeCard(),
+          const SizedBox(height: 14),
+          _genStylizeCard(),
+          if (_status.isNotEmpty && _status != 'Ready') ...[
+            const SizedBox(height: 14),
+            Text(_status,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFF9FB2CF), fontSize: 12)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _genResultPreview() {
+    final has = _generatedImage != null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 8),
+          child: Text('Result',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16)),
+        ),
+        AspectRatio(
+          aspectRatio: 1,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              color: const Color(0xFF16243C),
+              border: Border.all(color: const Color(0xFF26395A)),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: _busy
+                ? const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 14),
+                        Text('Generating…',
+                            style: TextStyle(color: Color(0xFF9FB2CF))),
+                      ],
+                    ),
+                  )
+                : has
+                    ? GestureDetector(
+                        onTap: () => _openImageFullscreen(
+                            'Generated image', _generatedImage!,
+                            allowQuickSave: true),
+                        child: Image.file(_generatedImage!,
+                            fit: BoxFit.cover, width: double.infinity),
+                      )
+                    : const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.auto_awesome,
+                                size: 46, color: Color(0xFF49648E)),
+                            SizedBox(height: 12),
+                            Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 30),
+                              child: Text(
+                                'Your generated image will appear here.\n'
+                                'Describe an image below, or stylize a photo.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: Color(0xFF7E93B5)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+          ),
+        ),
+        if (_generatedVariants.length > 1) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 64,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: _generatedVariants.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final f = _generatedVariants[i];
+                final sel = identical(_generatedImage, f);
+                return GestureDetector(
+                  onTap: () => setState(() => _generatedImage = f),
+                  child: Container(
+                    width: 64,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: sel
+                              ? const Color(0xFF5EC8FF)
+                              : const Color(0xFF2A3D5E),
+                          width: sel ? 2 : 1),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Image.file(f, fit: BoxFit.cover),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+        if (_generatedImage != null) ...[
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _saveGeneratedImageToMobile,
+                  icon: const Icon(Icons.download),
+                  label: const Text('Save to gallery'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _openImageFullscreen(
+                      'Generated image', _generatedImage!,
+                      allowQuickSave: true),
+                  icon: const Icon(Icons.fullscreen),
+                  label: const Text('View'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _genCard({required Widget child}) => Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          color: const Color(0xFF16243C),
+          border: Border.all(color: const Color(0xFF26395A)),
+        ),
+        child: child,
+      );
+
+  Widget _genDescribeCard() {
+    return _genCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.auto_awesome, color: Color(0xFFC9A6FF), size: 20),
+              SizedBox(width: 8),
+              Text('Describe an image',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text('Type what you want — get a realistic AI image (no photo needed).',
+              style: TextStyle(color: Color(0xFF9FB2CF), fontSize: 12)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _descriptionController,
+            style: const TextStyle(color: Colors.white),
+            minLines: 2,
+            maxLines: 4,
+            decoration: _inputDecoration(
+                'e.g. a smiling man with a beard in a leather jacket, '
+                'city street at night, cinematic lighting'),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF7A4DE0),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+              onPressed: _busy ? null : _generateFromDescription,
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Generate from description'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _genStylizeCard() {
+    final selected = _styleController.text.trim();
+    return _genCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.photo_filter, color: Color(0xFF7EE3B4), size: 20),
+              SizedBox(width: 8),
+              Text('Stylize a photo',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text('Pick a photo, choose a style, and apply it.',
+              style: TextStyle(color: Color(0xFF9FB2CF), fontSize: 12)),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              if (_pickedImage != null) ...[
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.file(_pickedImage!,
+                      width: 56, height: 56, fit: BoxFit.cover),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickImage,
+                  icon: const Icon(Icons.photo_library),
+                  label: Text(_pickedImage == null ? 'Pick photo' : 'Change'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _captureFromCamera,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Camera'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _desktopFilterStyles.map((style) {
+              final sel = selected == style;
+              return ChoiceChip(
+                label: Text(style),
+                selected: sel,
+                onSelected: (_) =>
+                    setState(() => _styleController.text = style),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+              onPressed: (_busy || _pickedImage == null)
+                  ? null
+                  : _applyFilterToPhoto,
+              icon: const Icon(Icons.brush),
+              label: Text(_pickedImage == null
+                  ? 'Pick a photo to apply a style'
+                  : 'Apply ${selected.isEmpty ? 'style' : selected}'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isGenerationModule) {
+      return _buildGenerationView();
+    }
     final showResultJson = _identifyJson.isNotEmpty &&
         (_activeTool == 'identify' ||
             _activeTool == 'search' ||
