@@ -194,12 +194,15 @@ class Phase3ServiceHub:
             with self._connect() as conn:
                 if not self._table_exists(conn, "users"):
                     return None
-                # gallery_scan_state is low-frequency (''→scanning→done) so it
-                # persists the scan's completion across redeploys without the
-                # high-volume churn of the live scanned-count.
+                # gallery_scan_state is low-frequency (''→scanning→done). The
+                # scan counts (faces/saved/review/scanned) are also included but
+                # BUCKETED below, so progress survives free-tier cold-start
+                # restores without a DB upload on every single scanned image.
                 rows = conn.execute(
                     "SELECT username, role, created, logins_json, reenroll_required, "
-                    "email, phone, gallery_scan_state FROM users ORDER BY username"
+                    "email, phone, gallery_scan_state, gallery_scanned, "
+                    "gallery_faces, gallery_saved, gallery_review FROM users "
+                    "ORDER BY username"
                 ).fetchall()
                 reviews = 0
                 if self._table_exists(conn, "gallery_reviews"):
@@ -219,7 +222,19 @@ class Phase3ServiceHub:
                     ptoks = conn.execute("SELECT COUNT(*) c FROM push_tokens").fetchone()["c"]
             h = hashlib.md5()
             for r in rows:
-                h.update(("|".join(str(x) for x in r)).encode("utf-8", "ignore"))
+                # Durable identity/state fields (verbatim).
+                base = "|".join(str(r[k]) for k in (
+                    "username", "role", "created", "logins_json",
+                    "reenroll_required", "email", "phone", "gallery_scan_state"))
+                # Scan progress, BUCKETED so a backup fires periodically during a
+                # long scan (every ~50 imgs / ~10 faces) instead of every image,
+                # while still keeping the displayed counts durable across restarts.
+                sc = int(r["gallery_scanned"] or 0) // 50
+                fc = int(r["gallery_faces"] or 0) // 10
+                sv = int(r["gallery_saved"] or 0)
+                rv = int(r["gallery_review"] or 0)
+                h.update(
+                    f"{base}|sc{sc}|fc{fc}|sv{sv}|rv{rv}".encode("utf-8", "ignore"))
             h.update(f"#reviews={reviews}".encode("utf-8"))
             h.update(f"#friends={friends}".encode("utf-8"))
             h.update(f"#follows={follows}#msgs={msgs}#ptoks={ptoks}".encode("utf-8"))
@@ -3419,7 +3434,8 @@ class Phase3ServiceHub:
             return ""
 
     def mobile_generate(self, image_b64: str = "", filter_name: str = "",
-                        prompt: str = "", negative_prompt: str = ""):
+                        prompt: str = "", negative_prompt: str = "",
+                        width: int = 768, height: int = 768):
         from frontend import facercognition as legacy
 
         prompt = (prompt or "").strip()
@@ -3448,7 +3464,10 @@ class Phase3ServiceHub:
             full = f"{full}, {self._GEN_REALISM}"
             if hf and hf.available():
                 try:
-                    raw = hf.text_to_image(full, negative_prompt=negative)
+                    w = max(384, min(1024, int(width or 768)))
+                    h = max(384, min(1024, int(height or 768)))
+                    raw = hf.text_to_image(full, negative_prompt=negative,
+                                           width=w, height=h)
                     return self._hf_result(raw, filter_name or "Describe")
                 except Exception as e:
                     self._log_activity("Generate", f"HF txt2img failed: {e}")
@@ -5023,9 +5042,12 @@ class Phase3ServiceHub:
                         filter_name = str(payload.get("filter_name", ""))
                         prompt = str(payload.get("prompt", ""))
                         negative_prompt = str(payload.get("negative_prompt", ""))
+                        gen_w = int(payload.get("width", 768) or 768)
+                        gen_h = int(payload.get("height", 768) or 768)
                         data = hub.mobile_generate(
                             image_b64=image_b64, filter_name=filter_name,
-                            prompt=prompt, negative_prompt=negative_prompt)
+                            prompt=prompt, negative_prompt=negative_prompt,
+                            width=gen_w, height=gen_h)
                         self._send_json(200, {"ok": True, "data": data})
                         return
 

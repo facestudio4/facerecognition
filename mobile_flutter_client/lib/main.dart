@@ -17981,45 +17981,117 @@ class _FriendsPageState extends State<FriendsPage>
   }
 
   Widget _discoverTab() {
-    return Column(
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-          child: _gradientButton(
-            label: _busy
-                ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
-                : 'Find contacts on Face Studio',
-            icon: Icons.contacts_rounded,
-            busy: _busy,
-            onTap: _busy ? null : _discover,
+        // Inviting gradient hero to find friends.
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF3B7BF6), Color(0xFF9B5BFF), Color(0xFFEF4E9B)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
           ),
-        ),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 14),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.lock_outline, size: 13, color: Color(0xFF7E93B5)),
-              SizedBox(width: 5),
-              Expanded(
-                child: Text(
-                  'Only a scrambled (hashed) form of your contacts is sent — '
-                  'never raw numbers.',
-                  style: TextStyle(fontSize: 11, color: Color(0xFF8AA0C2)),
+              Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.group_add,
+                        color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Find your friends',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800)),
+                        SizedBox(height: 2),
+                        Text('See who from your contacts is already here',
+                            style: TextStyle(
+                                color: Color(0xFFEAF1FF), fontSize: 12.5)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF1A2A45),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(24)),
+                  ),
+                  onPressed: _busy ? null : _discover,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Color(0xFF1A2A45)))
+                      : const Icon(Icons.contacts_rounded, size: 18),
+                  label: Text(_busy
+                      ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
+                      : 'Find contacts'),
                 ),
+              ),
+              const SizedBox(height: 8),
+              const Row(
+                children: [
+                  Icon(Icons.lock_outline, size: 12, color: Color(0xFFE0E8FF)),
+                  SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      'Private: only a scrambled form of your contacts is sent.',
+                      style: TextStyle(fontSize: 10.5, color: Color(0xFFE0E8FF)),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
-        const SizedBox(height: 4),
-        Expanded(
-          child: _suggestions.isEmpty
-              ? _emptyState(Icons.travel_explore,
-                  'Discover people you know',
-                  'Tap "Find contacts" to see who from your phone is on Face Studio.')
-              : ListView(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-                  children: _suggestions.map(_userTile).toList()),
-        ),
+        const SizedBox(height: 16),
+        if (_suggestions.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 30),
+            child: _emptyState(Icons.travel_explore, 'Discover people you know',
+                'Tap "Find contacts" to see who from your phone is on Face Studio.'),
+          )
+        else ...[
+          Row(
+            children: [
+              const Text('People you may know',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15)),
+              const Spacer(),
+              Text('${_suggestions.length}',
+                  style: const TextStyle(color: Color(0xFF8AA0C2))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ..._suggestions.map(_userTile),
+        ],
       ],
     );
   }
@@ -20065,6 +20137,28 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   DateTime? _lastRequestAt;
   final List<String> _logs = [];
 
+  // Face Generation experience: aspect ratio + a gallery of this session's
+  // creations + curated prompt ideas to remove the blank-page problem.
+  String _genAspect = 'square'; // square | portrait | landscape
+  final List<File> _creations = [];
+  static const List<String> _promptIdeas = [
+    'A cyberpunk samurai in neon rain, cinematic, ultra detailed',
+    'Astronaut relaxing on a tropical beach at sunset',
+    'Portrait of a queen in golden armor, dramatic studio light',
+    'Cozy wooden cabin in a snowy forest, warm glowing windows',
+    'Futuristic city skyline at dawn, flying cars, ultra detailed',
+    'A cute corgi astronaut floating in space, photorealistic',
+    'Watercolor painting of Venice canals at golden hour',
+    'A dragon perched on a cliff, epic fantasy, volumetric light',
+    'Vintage film portrait of a jazz singer, soft warm tones',
+    'A glowing magical forest with fireflies, dreamy atmosphere',
+  ];
+
+  void _addCreation(File f) {
+    _creations.insert(0, f);
+    if (_creations.length > 24) _creations.removeRange(24, _creations.length);
+  }
+
   bool get _isGenerationModule => widget.moduleTitle == 'Face Generation';
   bool get _isCompareModule => widget.moduleTitle == 'Face Comparison';
   bool get _isProfileModule => widget.moduleTitle == 'My Profile';
@@ -20687,6 +20781,8 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               // Optional: blend the selected art style into the description.
               'filter_name': _styleController.text.trim(),
               'negative_prompt': _negativePromptController.text.trim(),
+              'width': _genAspect == 'landscape' ? 1024 : (_genAspect == 'portrait' ? 768 : 1024),
+              'height': _genAspect == 'portrait' ? 1024 : (_genAspect == 'landscape' ? 768 : 1024),
             }),
           )
           .timeout(const Duration(seconds: 180));
@@ -20715,6 +20811,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         _generatedVariants
           ..clear()
           ..add(outFile);
+        _addCreation(outFile);
         _status = (payload['engine'] == 'huggingface')
             ? 'Realistic image generated from your description'
             : 'Image generated';
@@ -22018,6 +22115,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     setState(() => _busy = true);
     try {
       await _generate();
+      if (_generatedImage != null) setState(() => _addCreation(_generatedImage!));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -22027,8 +22125,19 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     return Scaffold(
       backgroundColor: const Color(0xFF0C1626),
       appBar: AppBar(
-        title: const Text('Face Generation'),
-        backgroundColor: const Color(0xFF13213A),
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF1A1330), Color(0xFF13213A)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: const Text('Studio',
+            style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.3)),
         actions: [
           IconButton(
             tooltip: 'Clear',
@@ -22040,17 +22149,122 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
         children: [
+          _genHeroHeader(),
+          const SizedBox(height: 14),
           _genResultPreview(),
           const SizedBox(height: 16),
           _genDescribeCard(),
           const SizedBox(height: 14),
           _genStylizeCard(),
+          _genCreationsGallery(),
           if (_status.isNotEmpty && _status != 'Ready') ...[
             const SizedBox(height: 14),
             Text(_status,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFF9FB2CF), fontSize: 12)),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _genHeroHeader() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF6D3BEE), Color(0xFF3B7BF6), Color(0xFFEF4E9B)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.18),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(Icons.auto_awesome, color: Colors.white, size: 24),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text('Create anything',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 19,
+                        fontWeight: FontWeight.w800)),
+                SizedBox(height: 2),
+                Text('Turn your words into realistic images',
+                    style: TextStyle(color: Color(0xFFEAE2FF), fontSize: 12.5)),
+              ],
+            ),
+          ),
+          if (_creations.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.18),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text('${_creations.length} made',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _genCreationsGallery() {
+    if (_creations.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text('Your creations',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16)),
+              const Spacer(),
+              Text('${_creations.length}',
+                  style: const TextStyle(color: Color(0xFF7E93B5))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+            ),
+            itemCount: _creations.length,
+            itemBuilder: (_, i) {
+              final f = _creations[i];
+              return GestureDetector(
+                onTap: () => _openImageFullscreen('Creation', f,
+                    allowQuickSave: true),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.file(f, fit: BoxFit.cover),
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -22070,7 +22284,9 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                   fontSize: 16)),
         ),
         AspectRatio(
-          aspectRatio: 1,
+          aspectRatio: _genAspect == 'portrait'
+              ? 0.78
+              : (_genAspect == 'landscape' ? 1.4 : 1),
           child: Container(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(18),
@@ -22194,20 +22410,26 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            children: const [
-              Icon(Icons.auto_awesome, color: Color(0xFFC9A6FF), size: 20),
-              SizedBox(width: 8),
-              Text('Describe an image',
+            children: [
+              const Icon(Icons.auto_awesome, color: Color(0xFFC9A6FF), size: 20),
+              const SizedBox(width: 8),
+              const Text('Describe an image',
                   style: TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w800,
                       fontSize: 15)),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _busy ? null : _surpriseMe,
+                style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFC9A6FF),
+                    padding: const EdgeInsets.symmetric(horizontal: 8)),
+                icon: const Icon(Icons.casino, size: 16),
+                label: const Text('Surprise me'),
+              ),
             ],
           ),
-          const SizedBox(height: 4),
-          const Text('Type what you want — get a realistic AI image (no photo needed).',
-              style: TextStyle(color: Color(0xFF9FB2CF), fontSize: 12)),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           TextField(
             controller: _descriptionController,
             style: const TextStyle(color: Colors.white),
@@ -22217,6 +22439,31 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                 'e.g. a smiling man with a beard in a leather jacket, '
                 'city street at night, cinematic lighting'),
           ),
+          const SizedBox(height: 10),
+          // Curated idea chips — tap to fill the box.
+          SizedBox(
+            height: 32,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: _promptIdeas.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final idea = _promptIdeas[i];
+                final short = idea.split(',').first;
+                return ActionChip(
+                  backgroundColor: const Color(0xFF20324F),
+                  side: const BorderSide(color: Color(0xFF31507C)),
+                  label: Text(short,
+                      style: const TextStyle(
+                          color: Color(0xFFCFE0FA), fontSize: 12)),
+                  onPressed: () =>
+                      setState(() => _descriptionController.text = idea),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 12),
+          _genAspectSelector(),
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
@@ -22227,11 +22474,61 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               ),
               onPressed: _busy ? null : _generateFromDescription,
               icon: const Icon(Icons.auto_awesome),
-              label: const Text('Generate from description'),
+              label: const Text('Generate'),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  void _surpriseMe() {
+    final idea = _promptIdeas[
+        DateTime.now().millisecondsSinceEpoch % _promptIdeas.length];
+    setState(() => _descriptionController.text = idea);
+    _generateFromDescription();
+  }
+
+  Widget _genAspectSelector() {
+    final opts = <List<dynamic>>[
+      ['square', 'Square', Icons.crop_square],
+      ['portrait', 'Portrait', Icons.crop_portrait],
+      ['landscape', 'Landscape', Icons.crop_landscape],
+    ];
+    return Row(
+      children: opts.map((o) {
+        final key = o[0] as String;
+        final sel = _genAspect == key;
+        return Expanded(
+          child: GestureDetector(
+            onTap: () => setState(() => _genAspect = key),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              padding: const EdgeInsets.symmetric(vertical: 9),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(11),
+                color: sel ? const Color(0xFF7A4DE0) : const Color(0xFF1B2B47),
+                border: Border.all(
+                    color: sel
+                        ? const Color(0xFF9B6BFF)
+                        : const Color(0xFF2A3D5E)),
+              ),
+              child: Column(
+                children: [
+                  Icon(o[2] as IconData,
+                      size: 18,
+                      color: sel ? Colors.white : const Color(0xFF9FB2CF)),
+                  const SizedBox(height: 3),
+                  Text(o[1] as String,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: sel ? Colors.white : const Color(0xFF9FB2CF))),
+                ],
+              ),
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 
