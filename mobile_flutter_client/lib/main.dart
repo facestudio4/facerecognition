@@ -20027,6 +20027,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   final _styleController = TextEditingController(text: 'Anime');
   final _identityNameController = TextEditingController();
   final _negativePromptController = TextEditingController();
+  final _descriptionController = TextEditingController();
   final _topKController = TextEditingController(text: '3');
   final _picker = ImagePicker();
 
@@ -20151,6 +20152,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     _styleController.dispose();
     _identityNameController.dispose();
     _negativePromptController.dispose();
+    _descriptionController.dispose();
     _topKController.dispose();
     super.dispose();
   }
@@ -20651,6 +20653,80 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         _status =
             'Generated with refinement ($_refinementPasses passes). Best identity score ${(avgIdentity * 100).toStringAsFixed(1)}%';
       });
+    }
+  }
+
+  // Text-to-image: turn a written description into a realistic image (no photo
+  // needed). Backend routes this to Hugging Face (FLUX/SDXL).
+  Future<void> _generateFromDescription() async {
+    final description = _descriptionController.text.trim();
+    if (description.isEmpty) {
+      setState(() => _status = 'Describe the image you want first');
+      return;
+    }
+    if (!await _ensureToken()) {
+      setState(() => _status = 'Unable to connect. Check backend/API key.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _status = 'Generating from your description…';
+    });
+    _appendLog('Describe -> image: "$description"');
+    try {
+      final baseUrl = _baseUrl.trim().replaceAll(RegExp(r'/$'), '');
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl/api/mobile/generate'),
+            headers: {
+              'Authorization': 'Bearer $_token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'prompt': description,
+              // Optional: blend the selected art style into the description.
+              'filter_name': _styleController.text.trim(),
+              'negative_prompt': _negativePromptController.text.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 180));
+      if (res.statusCode != 200) {
+        String msg = 'Generation failed (${res.statusCode})';
+        try {
+          msg = (jsonDecode(res.body)['error'] ?? msg).toString();
+        } catch (_) {}
+        setState(() => _status = msg);
+        return;
+      }
+      final payload =
+          (jsonDecode(res.body)['data'] as Map<String, dynamic>?) ?? const {};
+      final outB64 = (payload['image_b64'] ?? '').toString();
+      if (outB64.isEmpty) {
+        setState(() => _status = 'Generation failed: empty image');
+        return;
+      }
+      final dir = _pickedImage?.parent.path ?? Directory.systemTemp.path;
+      final outPath =
+          '$dir/described_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final outFile = File(outPath);
+      await outFile.writeAsBytes(base64Decode(outB64), flush: true);
+      setState(() {
+        _generatedImage = outFile;
+        _generatedVariants
+          ..clear()
+          ..add(outFile);
+        _status = (payload['engine'] == 'huggingface')
+            ? 'Realistic image generated from your description'
+            : 'Image generated';
+      });
+      _appendLog('Described image saved: $outPath (engine: ${payload['engine']})');
+    } on TimeoutException {
+      setState(() => _status =
+          'Timed out — the AI model may be warming up. Try again in a moment.');
+    } catch (e) {
+      setState(() => _status = 'Generation error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -21409,7 +21485,77 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
                 fontSize: 16,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
+            // Describe -> realistic AI image (text-to-image). No photo needed.
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF1C2C49), Color(0xFF23163A)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                border: Border.all(color: const Color(0xFF3A2E5E)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.auto_awesome, color: Color(0xFFC9A6FF), size: 18),
+                      SizedBox(width: 6),
+                      Text('Describe an image',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 14)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _descriptionController,
+                    style: const TextStyle(color: Colors.white),
+                    maxLines: 3,
+                    minLines: 2,
+                    decoration: _inputDecoration(
+                        'e.g. a smiling man with a beard in a leather jacket, '
+                        'city street at night, cinematic lighting'),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF7A4DE0),
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                      ),
+                      onPressed:
+                          _busy ? null : () => _generateFromDescription(),
+                      icon: _busy
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.image),
+                      label: Text(_busy
+                          ? 'Generating…'
+                          : 'Generate from description'),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text(
+                      'Realistic AI image from text — no photo needed. First run '
+                      'may take a few seconds while the model warms up.',
+                      style: TextStyle(color: Color(0xFF9C8FC6), fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
             TextField(
               controller: _identityNameController,
               style: const TextStyle(color: Colors.white),

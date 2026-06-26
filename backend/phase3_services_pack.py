@@ -3397,32 +3397,97 @@ class Phase3ServiceHub:
 
         return result
 
-    def mobile_generate(self, image_b64: str, filter_name: str):
+    _GEN_REALISM = ("photorealistic, ultra detailed, sharp focus, natural skin "
+                    "texture, professional photography, 4k")
+    _GEN_NEGATIVE = ("low quality, blurry, deformed, extra fingers, bad anatomy, "
+                     "overexposed, underexposed, watermark, text, logo, cartoon, "
+                     "disfigured")
+
+    def _hf_result(self, raw_bytes, label):
+        """Re-encode HF image bytes to our standard JPEG response shape."""
+        frame = self._decode_image_b64(base64.b64encode(raw_bytes).decode("ascii"))
+        out_b64 = self._encode_image_b64(frame, quality=90)
+        return {"filter_name": label, "image_b64": out_b64,
+                "width": int(frame.shape[1]), "height": int(frame.shape[0]),
+                "engine": "huggingface"}
+
+    def _style_prompt(self, filter_name: str) -> str:
+        try:
+            from backend.services.face_generation import _STYLE_PROMPTS
+            return _STYLE_PROMPTS.get(filter_name, "")
+        except Exception:
+            return ""
+
+    def mobile_generate(self, image_b64: str = "", filter_name: str = "",
+                        prompt: str = "", negative_prompt: str = ""):
         from frontend import facercognition as legacy
 
-        if not filter_name:
-            raise ValueError("filter_name is required")
-        if filter_name not in getattr(legacy, "STYLE_LIST", []):
+        prompt = (prompt or "").strip()
+        filter_name = (filter_name or "").strip()
+        negative = (negative_prompt or "").strip() or self._GEN_NEGATIVE
+
+        # Validate filter name only when one is supplied.
+        if filter_name and filter_name not in getattr(legacy, "STYLE_LIST", []):
             raise ValueError(f"Unsupported filter_name: {filter_name}")
+        if not prompt and not filter_name:
+            raise ValueError("Provide a description (prompt) or a filter_name.")
+        if not prompt and not image_b64:
+            raise ValueError("Provide an image to apply a filter, or a description.")
 
         try:
-            from backend.services.face_generation import generate_face_variant
-
-            advanced = generate_face_variant(image_b64, filter_name)
-            if advanced:
-                return advanced
+            from backend.services import hf_image_gen as hf
         except Exception:
-            pass
+            hf = None
 
-        frame = self._decode_image_b64(image_b64)
-        result = legacy.apply_face_filter(frame, filter_name)
-        out_b64 = self._encode_image_b64(result, quality=84)
-        return {
-            "filter_name": filter_name,
-            "image_b64": out_b64,
-            "width": int(result.shape[1]),
-            "height": int(result.shape[0]),
-        }
+        # --- Description -> realistic image (text-to-image). The headline path. ---
+        if prompt:
+            full = prompt
+            style = self._style_prompt(filter_name)
+            if style:
+                full = f"{prompt}, {style}"
+            full = f"{full}, {self._GEN_REALISM}"
+            if hf and hf.available():
+                try:
+                    raw = hf.text_to_image(full, negative_prompt=negative)
+                    return self._hf_result(raw, filter_name or "Describe")
+                except Exception as e:
+                    self._log_activity("Generate", f"HF txt2img failed: {e}")
+                    if not image_b64:
+                        raise RuntimeError(
+                            "Image generation is temporarily unavailable. Please "
+                            "try again in a moment.")
+            elif not image_b64:
+                raise RuntimeError(
+                    "Description-based generation needs the image service "
+                    "(set HF_API_TOKEN on the server).")
+
+        # --- Filter an existing photo: try realistic img2img, else OpenCV. ---
+        if image_b64 and filter_name:
+            if hf and hf.available():
+                try:
+                    raw_in = base64.b64decode(self._strip_data_uri(image_b64))
+                    style = self._style_prompt(filter_name) or filter_name
+                    instr = f"turn this into {style}"
+                    raw = hf.image_to_image(raw_in, instr, negative_prompt=negative)
+                    return self._hf_result(raw, filter_name)
+                except Exception as e:
+                    self._log_activity("Generate", f"HF img2img fallback: {e}")
+
+            frame = self._decode_image_b64(image_b64)
+            result = legacy.apply_face_filter(frame, filter_name)
+            out_b64 = self._encode_image_b64(result, quality=84)
+            return {"filter_name": filter_name, "image_b64": out_b64,
+                    "width": int(result.shape[1]),
+                    "height": int(result.shape[0]), "engine": "opencv"}
+
+        raise RuntimeError("Nothing to generate.")
+
+    @staticmethod
+    def _strip_data_uri(b64: str) -> str:
+        s = (b64 or "").strip()
+        if s.lower().startswith("data:image") and "," in s:
+            return s.split(",", 1)[1]
+        return s
 
     def export_demo_kit(self):
         out_dir = os.path.join(self.base_dir, "demo_kit")
@@ -4956,7 +5021,11 @@ class Phase3ServiceHub:
                     if path == "/api/mobile/generate":
                         image_b64 = str(payload.get("image_b64", ""))
                         filter_name = str(payload.get("filter_name", ""))
-                        data = hub.mobile_generate(image_b64=image_b64, filter_name=filter_name)
+                        prompt = str(payload.get("prompt", ""))
+                        negative_prompt = str(payload.get("negative_prompt", ""))
+                        data = hub.mobile_generate(
+                            image_b64=image_b64, filter_name=filter_name,
+                            prompt=prompt, negative_prompt=negative_prompt)
                         self._send_json(200, {"ok": True, "data": data})
                         return
 

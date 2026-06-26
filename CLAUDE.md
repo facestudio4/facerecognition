@@ -78,9 +78,13 @@ doubt, err on the side of security over convenience.
 - [ ] Supabase service key & backend secrets rotated if ever exposed.
 
 ## 13. AI / LLM
-- N/A — this app uses local CV models (YuNet + SFace), not an LLM API. There is
-  no prompt-injection surface and no third-party LLM key. If an LLM is ever
-  added: keep its key server-side, set `max_tokens`, sanitize input/output.
+- Recognition uses local CV models (YuNet + SFace) — no LLM, no prompt-injection
+  surface there.
+- Image generation (`/api/mobile/generate` → `backend/services/hf_image_gen.py`)
+  calls the **Hugging Face Inference API** for text→image / img2img. Keep the key
+  server-side only (`HF_API_TOKEN` env, never in the client). The user prompt is
+  capped by `_MAX_BODY_BYTES`; output is an image (no code/HTML execution). If a
+  text LLM is ever added: key server-side, set `max_tokens`, sanitize I/O.
 
 ---
 

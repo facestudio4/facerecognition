@@ -38,16 +38,26 @@ services:
       - key: SUPABASE_BUCKET
         value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+52
+        value: 0.1.0+53
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B52/mobile_0.1.0%2B52.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B53/mobile_0.1.0%2B53.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Face Studio v0.1.0+52 — full-screen ringing for incoming calls + a fresh, modern People/Chat design.
+        value: Face Studio v0.1.0+53 — new "Describe an image" box generates realistic AI images from text, plus realistic photo filters.
       # Firebase Cloud Messaging service-account JSON (whole file as the value),
       # used to send push notifications. Keep secret.
       - key: FACESTUDIO_FCM_SERVICE_ACCOUNT
+        sync: false
+      # Hugging Face Inference API token (FREE) for realistic AI image generation
+      # (description -> image + realistic filters). Without it, filters fall back
+      # to local OpenCV effects. Get one at huggingface.co/settings/tokens.
+      - key: HF_API_TOKEN
+        sync: false
+      # Optional model overrides (defaults: FLUX.1-schnell / instruct-pix2pix).
+      - key: HF_TXT2IMG_MODEL
+        sync: false
+      - key: HF_IMG2IMG_MODEL
         sync: false
       # JaaS (8x8) for sign-in-free video/voice calls. When all three are set,
       # calls use 8x8.vc with a signed JWT; otherwise they fall back to meet.jit.si.
