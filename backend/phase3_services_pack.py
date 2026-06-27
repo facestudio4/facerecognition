@@ -3557,7 +3557,9 @@ class Phase3ServiceHub:
         return None
 
     def _best_reference_face(self, person_dir: str):
-        """Pick the most frontal, well-sized reference face for a cleaner swap."""
+        """Pick the most frontal, well-sized reference face for a cleaner swap.
+        Scans only a few photos (downscaled) to stay within free-tier memory."""
+        from frontend import facercognition as legacy
         try:
             files = [f for f in sorted(os.listdir(person_dir))
                      if os.path.splitext(f)[1].lower() in self._FACE_EXTS]
@@ -3565,11 +3567,15 @@ class Phase3ServiceHub:
             files = []
         best = None
         best_score = -1.0
-        for fname in files[:10]:
+        det = legacy._create_yunet(480, 480)
+        for fname in files[:4]:
             img = cv2.imread(os.path.join(person_dir, fname))
             if img is None:
                 continue
-            d = self._detect_face_lms(img)
+            if max(img.shape[:2]) > 640:
+                sc = 640.0 / max(img.shape[:2])
+                img = cv2.resize(img, (int(img.shape[1] * sc), int(img.shape[0] * sc)))
+            d = self._detect_face_lms(img, det)
             if d is None:
                 continue
             _, lms = d
@@ -3586,11 +3592,15 @@ class Phase3ServiceHub:
                 best_score, best = score, img
         return best if best is not None else self._first_face_image(person_dir)
 
-    def _detect_face_lms(self, bgr):
-        """Return (box[x,y,w,h], 5x2 landmarks) of the largest face, or None."""
+    def _detect_face_lms(self, bgr, det=None):
+        """Return (box[x,y,w,h], 5x2 landmarks) of the largest face, or None.
+        Reuses a detector via setInputSize to keep memory low on the free tier."""
         from frontend import facercognition as legacy
         h, w = bgr.shape[:2]
-        det = legacy._create_yunet(w, h)
+        if det is None:
+            det = legacy._create_yunet(w, h)
+        else:
+            det.setInputSize((w, h))
         _, faces = det.detect(bgr)
         if faces is None or len(faces) == 0:
             return None
@@ -3598,10 +3608,25 @@ class Phase3ServiceHub:
         return f[:4].astype(float), f[4:14].reshape(5, 2).astype("float32")
 
     def face_swap(self, target_bgr, source_bgr):
-        """Rough swap: align the source face onto the target face via YuNet's 5
-        landmarks, then Poisson-blend. Returns swapped image or None."""
-        t = self._detect_face_lms(target_bgr)
-        s = self._detect_face_lms(source_bgr)
+        """Rough swap: align the source face onto the target via YuNet's 5
+        landmarks, colour-match it, and feather-blend. Deliberately avoids
+        cv2.seamlessClone (heavy Poisson solve) to fit the 512MB free tier.
+        Returns swapped image or None."""
+        from frontend import facercognition as legacy
+        # Cap working size so memory/CPU stay modest on the free tier.
+        if max(target_bgr.shape[:2]) > 768:
+            sc = 768.0 / max(target_bgr.shape[:2])
+            target_bgr = cv2.resize(
+                target_bgr, (int(target_bgr.shape[1] * sc),
+                             int(target_bgr.shape[0] * sc)))
+        if max(source_bgr.shape[:2]) > 640:
+            sc = 640.0 / max(source_bgr.shape[:2])
+            source_bgr = cv2.resize(
+                source_bgr, (int(source_bgr.shape[1] * sc),
+                             int(source_bgr.shape[0] * sc)))
+        det = legacy._create_yunet(target_bgr.shape[1], target_bgr.shape[0])
+        t = self._detect_face_lms(target_bgr, det)
+        s = self._detect_face_lms(source_bgr, det)
         if t is None or s is None:
             return None
         tbox, tlms = t
@@ -3621,16 +3646,22 @@ class Phase3ServiceHub:
         ry = max(20, int(eye_d * 1.75))
         mask = np.zeros((hh, ww), np.uint8)
         cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
-        mask = cv2.GaussianBlur(mask, (0, 0), max(3, eye_d * 0.12))
-        cx = min(max(cx, rx + 1), ww - rx - 1)
-        cy = min(max(cy, ry + 1), hh - ry - 1)
-        try:
-            return cv2.seamlessClone(warped, target_bgr, mask, (cx, cy),
-                                     cv2.NORMAL_CLONE)
-        except Exception:
-            m3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR).astype("float32") / 255.0
-            return (warped.astype("float32") * m3
-                    + target_bgr.astype("float32") * (1 - m3)).astype("uint8")
+        mask = cv2.GaussianBlur(mask, (0, 0), max(3.0, eye_d * 0.18))
+        m = (mask.astype("float32") / 255.0)[:, :, None]
+        # Colour-match the warped face to the target skin within the mask.
+        sel = mask > 40
+        if sel.sum() > 50:
+            for c in range(3):
+                tch = target_bgr[:, :, c][sel].astype("float32")
+                wch = warped[:, :, c][sel].astype("float32")
+                ts, tm = tch.std() + 1e-3, tch.mean()
+                ws, wm = wch.std() + 1e-3, wch.mean()
+                warped[:, :, c] = np.clip(
+                    (warped[:, :, c].astype("float32") - wm) * (ts / ws) + tm,
+                    0, 255).astype("uint8")
+        out = (warped.astype("float32") * m
+               + target_bgr.astype("float32") * (1 - m)).astype("uint8")
+        return out
 
     def generate_face_swap(self, image_b64: str, prompt: str):
         """Given a generated scene + the prompt, if the prompt names a known
@@ -3652,6 +3683,10 @@ class Phase3ServiceHub:
         except Exception as e:
             self._log_activity("FaceSwap", f"failed: {e}")
             out = None
+        finally:
+            import gc
+            source = None
+            gc.collect()
         if out is None:
             return {"ok": True, "data": {"swapped": False, "person": matched or person,
                                          "reason": "no_face_in_scene"}}
