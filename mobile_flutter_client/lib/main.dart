@@ -18119,15 +18119,18 @@ class _FriendsPageState extends State<FriendsPage>
     final name = (u['username'] ?? '-').toString();
     final following = u['following'] == true;
     final followsYou = u['follows_you'] == true;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: _kFsCard,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF22344F)),
-      ),
-      child: Row(
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => _showProfileSheet(u),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: _kFsCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFF22344F)),
+        ),
+        child: Row(
         children: [
           _GradientAvatar(name, size: 48, ring: !following),
           const SizedBox(width: 12),
@@ -18174,7 +18177,166 @@ class _FriendsPageState extends State<FriendsPage>
                   compact: true,
                   onTap: () => _toggleFollow(u),
                 ),
-        ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Tap a person -> a quick profile sheet to Follow / Message / Call them.
+  void _startCallTo(String username, bool audioOnly) {
+    Navigator.of(context).maybePop();
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      final me = (prefs.getString('fs_username') ?? '').trim();
+      final room = CallService.newRoom(me.isEmpty ? 'me' : me, username);
+      final mode = audioOnly ? 'audio' : 'video';
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Calling $username…')));
+      }
+      try {
+        await buildBackendApi().callInvite(username, room, mode);
+      } catch (_) {}
+      await CallService.join(
+          room: room, audioOnly: audioOnly, displayName: me);
+    }();
+  }
+
+  void _showProfileSheet(Map<String, dynamic> u) {
+    final name = (u['username'] ?? '-').toString();
+    final followsYou = u['follows_you'] == true;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final following = u['following'] == true;
+          return Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF13213A),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 18),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFF2E4060),
+                      borderRadius: BorderRadius.circular(2)),
+                ),
+                _GradientAvatar(name, size: 92),
+                const SizedBox(height: 14),
+                Text(name,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800)),
+                const SizedBox(height: 4),
+                Text(followsYou ? 'Follows you' : 'On Face Studio',
+                    style: TextStyle(
+                        color: followsYou
+                            ? const Color(0xFF7EE3B4)
+                            : const Color(0xFF8AA0C2),
+                        fontSize: 13)),
+                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    Expanded(
+                      child: following
+                          ? OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFFB9C9E4),
+                                side: const BorderSide(color: Color(0xFF3A4E6E)),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 13),
+                              ),
+                              onPressed: () async {
+                                await _toggleFollow(u);
+                                setSheet(() {});
+                              },
+                              icon: const Icon(Icons.check, size: 18),
+                              label: const Text('Following'))
+                          : FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF4F8BFF),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 13),
+                              ),
+                              onPressed: () async {
+                                await _toggleFollow(u);
+                                setSheet(() {});
+                              },
+                              icon: const Icon(Icons.person_add_alt_1, size: 18),
+                              label: const Text('Follow')),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF22344F),
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                        ),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _openChat(name);
+                        },
+                        icon: const Icon(Icons.chat_bubble_rounded, size: 18),
+                        label: const Text('Message'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _sheetCallButton(
+                          Icons.call_rounded, 'Voice call',
+                          () => _startCallTo(name, true)),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _sheetCallButton(
+                          Icons.videocam_rounded, 'Video call',
+                          () => _startCallTo(name, false)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _sheetCallButton(IconData icon, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          gradient: const LinearGradient(
+            colors: [Color(0xFF2BB673), Color(0xFF1E8E5A)],
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Text(label,
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.w700)),
+          ],
+        ),
       ),
     );
   }
@@ -20758,68 +20920,71 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       setState(() => _status = 'Describe the image you want first');
       return;
     }
-    if (!await _ensureToken()) {
-      setState(() => _status = 'Unable to connect. Check backend/API key.');
-      return;
-    }
     setState(() {
       _busy = true;
       _status = 'Generating from your description…';
     });
     _appendLog('Describe -> image: "$description"');
     try {
-      final baseUrl = _baseUrl.trim().replaceAll(RegExp(r'/$'), '');
-      final res = await http
-          .post(
-            Uri.parse('$baseUrl/api/mobile/generate'),
-            headers: {
-              'Authorization': 'Bearer $_token',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'prompt': description,
-              // Optional: blend the selected art style into the description.
-              'filter_name': _styleController.text.trim(),
-              'negative_prompt': _negativePromptController.text.trim(),
-              'width': _genAspect == 'landscape' ? 1024 : (_genAspect == 'portrait' ? 768 : 1024),
-              'height': _genAspect == 'portrait' ? 1024 : (_genAspect == 'landscape' ? 768 : 1024),
-            }),
-          )
-          .timeout(const Duration(seconds: 180));
-      if (res.statusCode != 200) {
-        String msg = 'Generation failed (${res.statusCode})';
+      // Generate directly from the phone (keyless pollinations.ai). Doing this
+      // client-side uses the user's own IP, so it isn't throttled like the
+      // shared backend server IP — reliable + zero setup.
+      final style = _styleController.text.trim();
+      final full = [
+        description,
+        if (style.isNotEmpty) style,
+        'photorealistic, ultra detailed, sharp focus, 4k',
+      ].join(', ');
+      final w = _genAspect == 'portrait' ? 768 : 1024;
+      final h = _genAspect == 'portrait'
+          ? 1024
+          : (_genAspect == 'landscape' ? 768 : 1024);
+      final enc = Uri.encodeComponent(full);
+
+      List<int>? bytes;
+      for (var attempt = 0; attempt < 4 && bytes == null; attempt++) {
+        final seed =
+            DateTime.now().millisecondsSinceEpoch % 1000000 + attempt;
+        final url = 'https://image.pollinations.ai/prompt/$enc'
+            '?width=$w&height=$h&model=flux&seed=$seed'
+            '&nologo=true&private=true&referrer=facestudio.app';
         try {
-          msg = (jsonDecode(res.body)['error'] ?? msg).toString();
-        } catch (_) {}
-        setState(() => _status = msg);
+          final res = await http
+              .get(Uri.parse(url))
+              .timeout(const Duration(seconds: 90));
+          if (res.statusCode == 200 && res.bodyBytes.length > 1024) {
+            bytes = res.bodyBytes;
+          } else {
+            await Future<void>.delayed(Duration(seconds: 3 * (attempt + 1)));
+          }
+        } catch (_) {
+          await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
+        }
+        if (bytes == null && attempt < 3 && mounted) {
+          setState(() => _status = 'Still working… (warming up)');
+        }
+      }
+
+      if (bytes == null) {
+        setState(() => _status =
+            'The generator is busy — please tap Generate again in a few seconds.');
         return;
       }
-      final payload =
-          (jsonDecode(res.body)['data'] as Map<String, dynamic>?) ?? const {};
-      final outB64 = (payload['image_b64'] ?? '').toString();
-      if (outB64.isEmpty) {
-        setState(() => _status = 'Generation failed: empty image');
-        return;
-      }
+
       final dir = _pickedImage?.parent.path ?? Directory.systemTemp.path;
       final outPath =
           '$dir/described_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final outFile = File(outPath);
-      await outFile.writeAsBytes(base64Decode(outB64), flush: true);
+      await outFile.writeAsBytes(bytes, flush: true);
       setState(() {
         _generatedImage = outFile;
         _generatedVariants
           ..clear()
           ..add(outFile);
         _addCreation(outFile);
-        _status = (payload['engine'] == 'huggingface')
-            ? 'Realistic image generated from your description'
-            : 'Image generated';
+        _status = 'Realistic image generated from your description';
       });
-      _appendLog('Described image saved: $outPath (engine: ${payload['engine']})');
-    } on TimeoutException {
-      setState(() => _status =
-          'Timed out — the AI model may be warming up. Try again in a moment.');
+      _appendLog('Described image saved: $outPath');
     } catch (e) {
       setState(() => _status = 'Generation error: $e');
     } finally {

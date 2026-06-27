@@ -38,13 +38,13 @@ services:
       - key: SUPABASE_BUCKET
         value: facestudio-data
       - key: FACE_STUDIO_MOBILE_LATEST_VERSION
-        value: 0.1.0+55
+        value: 0.1.0+56
       - key: FACE_STUDIO_MOBILE_MIN_VERSION
         value: 0.1.0+33
       - key: FACE_STUDIO_MOBILE_APK_URL
-        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B55/mobile_0.1.0%2B55.apk
+        value: https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B56/mobile_0.1.0%2B56.apk
       - key: FACE_STUDIO_MOBILE_UPDATE_NOTES
-        value: Face Studio v0.1.0+55 — a richer Create studio (prompt ideas, aspect ratios, your creations) and a more inviting People tab.
+        value: Face Studio v0.1.0+56 — image generation now works instantly (no setup), and you can call friends right from their profile.
       # Firebase Cloud Messaging service-account JSON (whole file as the value),
       # used to send push notifications. Keep secret.
       - key: FACESTUDIO_FCM_SERVICE_ACCOUNT
