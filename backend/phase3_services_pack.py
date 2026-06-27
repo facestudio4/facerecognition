@@ -3465,25 +3465,30 @@ class Phase3ServiceHub:
             w = max(384, min(1024, int(width or 768)))
             h = max(384, min(1024, int(height or 768)))
             raw = None
+            errs = []
+            if hf is None:
+                errs.append("import hf_image_gen failed")
             # 1) Hugging Face (best quality) when a token is configured.
             if hf and hf.available():
                 try:
                     raw = hf.text_to_image(full, negative_prompt=negative,
                                            width=w, height=h)
                 except Exception as e:
-                    self._log_activity("Generate", f"HF txt2img failed: {e}")
+                    errs.append(f"hf:{type(e).__name__}:{e}")
             # 2) Keyless free fallback so it works with zero setup.
             if raw is None and hf and hf.pollinations_available():
                 try:
                     raw = hf.pollinations_text_to_image(full, width=w, height=h)
                 except Exception as e:
-                    self._log_activity("Generate", f"pollinations failed: {e}")
+                    errs.append(f"poll:{type(e).__name__}:{e}")
             if raw is not None:
-                return self._hf_result(raw, filter_name or "Describe")
+                try:
+                    return self._hf_result(raw, filter_name or "Describe")
+                except Exception as e:
+                    errs.append(f"decode:{type(e).__name__}:{e}")
             if not image_b64:
-                raise RuntimeError(
-                    "Couldn't reach the image generator just now — please try "
-                    "again in a few seconds.")
+                self._log_activity("Generate", "txt2img failed: " + " | ".join(errs))
+                raise ValueError("Image generator unavailable. " + " | ".join(errs)[:400])
 
         # --- Filter an existing photo: try realistic img2img, else OpenCV. ---
         if image_b64 and filter_name:
