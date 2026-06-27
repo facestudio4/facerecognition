@@ -3642,26 +3642,63 @@ class Phase3ServiceHub:
         eye_d = float(np.linalg.norm(tlms[0] - tlms[1])) or float(max(tbox[2], 24))
         cx = int(round(float(tlms[:, 0].mean())))
         cy = int(round(float(tlms[:, 1].mean())))
-        rx = max(16, int(eye_d * 1.35))
-        ry = max(20, int(eye_d * 1.75))
+        # Fuller face mask (forehead->chin, cheek->cheek) for a complete swap.
+        rx = max(18, int(eye_d * 1.5))
+        ry = max(24, int(eye_d * 1.95))
         mask = np.zeros((hh, ww), np.uint8)
         cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
-        mask = cv2.GaussianBlur(mask, (0, 0), max(3.0, eye_d * 0.18))
-        m = (mask.astype("float32") / 255.0)[:, :, None]
-        # Colour-match the warped face to the target skin within the mask.
-        sel = mask > 40
-        if sel.sum() > 50:
+        # Match the real face's lighting + skin tone to the scene (Reinhard
+        # transfer in LAB) so it blends in instead of looking like a pale patch.
+        sel = mask > 0
+        if int(sel.sum()) > 50:
+            w_lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype("float32")
+            t_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB).astype("float32")
             for c in range(3):
-                tch = target_bgr[:, :, c][sel].astype("float32")
-                wch = warped[:, :, c][sel].astype("float32")
-                ts, tm = tch.std() + 1e-3, tch.mean()
-                ws, wm = wch.std() + 1e-3, wch.mean()
-                warped[:, :, c] = np.clip(
-                    (warped[:, :, c].astype("float32") - wm) * (ts / ws) + tm,
-                    0, 255).astype("uint8")
-        out = (warped.astype("float32") * m
-               + target_bgr.astype("float32") * (1 - m)).astype("uint8")
-        return out
+                wch = w_lab[:, :, c][sel]
+                tch = t_lab[:, :, c][sel]
+                wm, ws = float(wch.mean()), float(wch.std()) + 1e-3
+                tm, ts = float(tch.mean()), float(tch.std()) + 1e-3
+                w_lab[:, :, c] = (w_lab[:, :, c] - wm) * (ts / ws) + tm
+            warped = cv2.cvtColor(np.clip(w_lab, 0, 255).astype("uint8"),
+                                  cv2.COLOR_LAB2BGR)
+        # Poisson seamless blend on a TIGHT ROI only — natural lighting/edges
+        # like seamlessClone, but small enough to not OOM the 512MB tier.
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return None
+        pad = int(eye_d * 1.6) + 6  # generous margin so the mask never touches
+        x0 = max(0, int(xs.min()) - pad)        # the ROI border (seamlessClone
+        y0 = max(0, int(ys.min()) - pad)        # asserts otherwise)
+        x1 = min(ww - 1, int(xs.max()) + pad)
+        y1 = min(hh - 1, int(ys.max()) + pad)
+        sub_t = target_bgr[y0:y1 + 1, x0:x1 + 1].copy()
+        sub_w = warped[y0:y1 + 1, x0:x1 + 1].copy()
+        sub_m = mask[y0:y1 + 1, x0:x1 + 1].copy()
+        # Force a clean zero border in the sub-mask (robustness for seamlessClone).
+        sub_m[:3, :] = 0
+        sub_m[-3:, :] = 0
+        sub_m[:, :3] = 0
+        sub_m[:, -3:] = 0
+        mys, mxs = np.where(sub_m > 0)
+        if len(mxs) == 0:
+            return None
+        # seamlessClone places the source's mask-bbox centred at `center`, so it
+        # MUST be the bbox centre (not the centroid) or it overruns the ROI.
+        center = ((int(mxs.min()) + int(mxs.max())) // 2,
+                  (int(mys.min()) + int(mys.max())) // 2)
+        try:
+            blended = cv2.seamlessClone(sub_w, sub_t, sub_m, center,
+                                        cv2.NORMAL_CLONE)
+            out = target_bgr.copy()
+            out[y0:y1 + 1, x0:x1 + 1] = blended
+            return out
+        except Exception:
+            # Feathered alpha blend (still colour-matched -> looks decent).
+            soft = cv2.GaussianBlur(mask, (0, 0),
+                                    max(3.0, eye_d * 0.22)).astype("float32")
+            m = (soft / 255.0)[:, :, None]
+            return (warped.astype("float32") * m
+                    + target_bgr.astype("float32") * (1 - m)).astype("uint8")
 
     def generate_face_swap(self, image_b64: str, prompt: str):
         """Given a generated scene + the prompt, if the prompt names a known
