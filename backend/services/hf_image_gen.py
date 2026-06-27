@@ -112,14 +112,18 @@ def pollinations_text_to_image(prompt: str, width: int = 1024,
     realistic generation works with zero server setup. Retries on 429/5xx since
     the keyless endpoint rate-limits shared server IPs."""
     model = model or os.getenv("POLLINATIONS_MODEL", "flux")
+    referrer = os.getenv("POLLINATIONS_REFERRER", "facestudio.app")
+    token = os.getenv("POLLINATIONS_TOKEN", "").strip()
     enc = urllib.parse.quote(prompt[:1500], safe="")
     headers = {"User-Agent": "FaceStudio/1.0", "Accept": "image/*"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     last = None
     for attempt in range(retries):
         seed = (int(time.time()) + attempt * 7) % 1000000
         url = (f"https://image.pollinations.ai/prompt/{enc}"
                f"?width={int(width)}&height={int(height)}&model={model}"
-               f"&seed={seed}&nologo=true&private=true")
+               f"&seed={seed}&nologo=true&private=true&referrer={referrer}")
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -130,12 +134,13 @@ def pollinations_text_to_image(prompt: str, width: int = 1024,
         except urllib.error.HTTPError as e:
             last = e
             if e.code in (429, 500, 502, 503, 504):
-                time.sleep(min(14.0, 3.0 + attempt * 3.0))  # backoff
+                # Keyless endpoint rate-limits shared IPs; ride out the window.
+                time.sleep(min(20.0, 5.0 + attempt * 3.0))
                 continue
             raise
         except Exception as e:  # network/timeout
             last = e
-            time.sleep(3.0)
+            time.sleep(4.0)
     raise last or RuntimeError("pollinations failed")
 
 
