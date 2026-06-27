@@ -3462,23 +3462,28 @@ class Phase3ServiceHub:
             if style:
                 full = f"{prompt}, {style}"
             full = f"{full}, {self._GEN_REALISM}"
+            w = max(384, min(1024, int(width or 768)))
+            h = max(384, min(1024, int(height or 768)))
+            raw = None
+            # 1) Hugging Face (best quality) when a token is configured.
             if hf and hf.available():
                 try:
-                    w = max(384, min(1024, int(width or 768)))
-                    h = max(384, min(1024, int(height or 768)))
                     raw = hf.text_to_image(full, negative_prompt=negative,
                                            width=w, height=h)
-                    return self._hf_result(raw, filter_name or "Describe")
                 except Exception as e:
                     self._log_activity("Generate", f"HF txt2img failed: {e}")
-                    if not image_b64:
-                        raise RuntimeError(
-                            "Image generation is temporarily unavailable. Please "
-                            "try again in a moment.")
-            elif not image_b64:
+            # 2) Keyless free fallback so it works with zero setup.
+            if raw is None and hf and hf.pollinations_available():
+                try:
+                    raw = hf.pollinations_text_to_image(full, width=w, height=h)
+                except Exception as e:
+                    self._log_activity("Generate", f"pollinations failed: {e}")
+            if raw is not None:
+                return self._hf_result(raw, filter_name or "Describe")
+            if not image_b64:
                 raise RuntimeError(
-                    "Description-based generation needs the image service "
-                    "(set HF_API_TOKEN on the server).")
+                    "Couldn't reach the image generator just now — please try "
+                    "again in a few seconds.")
 
         # --- Filter an existing photo: try realistic img2img, else OpenCV. ---
         if image_b64 and filter_name:

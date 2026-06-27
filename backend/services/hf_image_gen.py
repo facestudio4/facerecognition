@@ -16,6 +16,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 _HF_BASE = "https://api-inference.huggingface.co/models/"
@@ -97,6 +98,30 @@ def text_to_image(prompt: str, negative_prompt: str = "",
         params["negative_prompt"] = negative_prompt
     payload = json.dumps({"inputs": prompt, "parameters": params}).encode("utf-8")
     return _request_image(model, payload)
+
+
+def pollinations_available() -> bool:
+    # Keyless public endpoint — always usable unless explicitly disabled.
+    return os.getenv("POLLINATIONS_DISABLED", "").strip() not in ("1", "true", "True")
+
+
+def pollinations_text_to_image(prompt: str, width: int = 1024,
+                               height: int = 1024, model: str = "") -> bytes:
+    """FREE, no-API-key text->image (pollinations.ai). Used as the default so
+    realistic generation works with zero server setup."""
+    model = model or os.getenv("POLLINATIONS_MODEL", "flux")
+    enc = urllib.parse.quote(prompt[:1500], safe="")
+    seed = int(time.time()) % 1000000
+    url = (f"https://image.pollinations.ai/prompt/{enc}"
+           f"?width={int(width)}&height={int(height)}&model={model}"
+           f"&seed={seed}&nologo=true&private=true")
+    req = urllib.request.Request(url, headers={"User-Agent": "FaceStudio/1.0",
+                                               "Accept": "image/*"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = resp.read()
+    if not data or len(data) < 1024:
+        raise RuntimeError("pollinations returned no image")
+    return data
 
 
 def image_to_image(image_bytes: bytes, prompt: str,
