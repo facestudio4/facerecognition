@@ -20926,6 +20926,28 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     });
     _appendLog('Describe -> image: "$description"');
     try {
+      final baseUrl = _baseUrl.trim().replaceAll(RegExp(r'/$'), '');
+      // If the prompt names a known person in your face database, we'll later
+      // swap their REAL face into the generated scene. Ask the backend first so
+      // we can hint the model to make the person face the camera (cleaner swap).
+      String knownPerson = '';
+      try {
+        if (await _ensureToken()) {
+          final pc = await http
+              .post(Uri.parse('$baseUrl/api/mobile/generate/person-check'),
+                  headers: {
+                    'Authorization': 'Bearer $_token',
+                    'Content-Type': 'application/json',
+                  },
+                  body: jsonEncode({'prompt': description}))
+              .timeout(const Duration(seconds: 20));
+          if (pc.statusCode == 200) {
+            final d = (jsonDecode(pc.body)['data'] as Map?) ?? const {};
+            if (d['found'] == true) knownPerson = (d['person'] ?? '').toString();
+          }
+        }
+      } catch (_) {}
+
       // Generate directly from the phone (keyless pollinations.ai). Doing this
       // client-side uses the user's own IP, so it isn't throttled like the
       // shared backend server IP — reliable + zero setup.
@@ -20933,6 +20955,8 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       final full = [
         description,
         if (style.isNotEmpty) style,
+        if (knownPerson.isNotEmpty)
+          'a person facing the camera, clear front-facing face, portrait',
         'photorealistic, ultra detailed, sharp focus, 4k',
       ].join(', ');
       final w = _genAspect == 'portrait' ? 768 : 1024;
@@ -20971,20 +20995,54 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         return;
       }
 
+      // Put the named person's REAL face into the generated scene (backend swap).
+      String swappedInto = '';
+      if (knownPerson.isNotEmpty) {
+        if (mounted) {
+          setState(() => _status = "Adding $knownPerson's face…");
+        }
+        try {
+          if (await _ensureToken()) {
+            final sw = await http
+                .post(Uri.parse('$baseUrl/api/mobile/generate/face-swap'),
+                    headers: {
+                      'Authorization': 'Bearer $_token',
+                      'Content-Type': 'application/json',
+                    },
+                    body: jsonEncode({
+                      'image_b64': base64Encode(bytes!),
+                      'prompt': description,
+                    }))
+                .timeout(const Duration(seconds: 60));
+            if (sw.statusCode == 200) {
+              final d = (jsonDecode(sw.body)['data'] as Map?) ?? const {};
+              final out = (d['image_b64'] ?? '').toString();
+              if (d['swapped'] == true && out.isNotEmpty) {
+                bytes = base64Decode(out);
+                swappedInto = (d['person'] ?? knownPerson).toString();
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
       final dir = _pickedImage?.parent.path ?? Directory.systemTemp.path;
       final outPath =
           '$dir/described_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final outFile = File(outPath);
-      await outFile.writeAsBytes(bytes, flush: true);
+      await outFile.writeAsBytes(bytes!, flush: true);
       setState(() {
         _generatedImage = outFile;
         _generatedVariants
           ..clear()
           ..add(outFile);
         _addCreation(outFile);
-        _status = 'Realistic image generated from your description';
+        _status = swappedInto.isNotEmpty
+            ? "Generated with $swappedInto's face"
+            : 'Realistic image generated from your description';
       });
-      _appendLog('Described image saved: $outPath');
+      _appendLog('Described image saved: $outPath'
+          '${swappedInto.isNotEmpty ? ' (face: $swappedInto)' : ''}');
     } catch (e) {
       setState(() => _status = 'Generation error: $e');
     } finally {
