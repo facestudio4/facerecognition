@@ -3520,6 +3520,144 @@ class Phase3ServiceHub:
             return s.split(",", 1)[1]
         return s
 
+    # ---- Put a real person's face into a generated scene (free face-swap) ----
+    _GEN_STOPWORDS = {
+        "playing", "with", "dog", "cat", "the", "and", "of", "make", "picture",
+        "image", "photo", "generate", "create", "in", "on", "at", "is", "to",
+        "for", "me", "my", "him", "her", "them", "person", "people", "man",
+        "woman", "boy", "girl", "scene", "background", "wearing", "holding"}
+
+    def _detect_person_in_prompt(self, prompt: str) -> str:
+        """If the prompt names a known person (face folder), return that name."""
+        import re
+        text = " " + (prompt or "").lower() + " "
+        names = sorted((str(n).strip() for n in self._known_people_names()),
+                       key=len, reverse=True)
+        for nm in names:
+            if not nm:
+                continue
+            if re.search(r"\b" + re.escape(nm.lower()) + r"\b", text):
+                return nm
+        for nm in names:
+            for word in nm.lower().split():
+                if len(word) >= 3 and word not in self._GEN_STOPWORDS:
+                    if re.search(r"\b" + re.escape(word) + r"\b", text):
+                        return nm
+        return ""
+
+    def _first_face_image(self, person_dir: str):
+        try:
+            for fname in sorted(os.listdir(person_dir)):
+                if os.path.splitext(fname)[1].lower() in self._FACE_EXTS:
+                    img = cv2.imread(os.path.join(person_dir, fname))
+                    if img is not None:
+                        return img
+        except Exception:
+            pass
+        return None
+
+    def _best_reference_face(self, person_dir: str):
+        """Pick the most frontal, well-sized reference face for a cleaner swap."""
+        try:
+            files = [f for f in sorted(os.listdir(person_dir))
+                     if os.path.splitext(f)[1].lower() in self._FACE_EXTS]
+        except Exception:
+            files = []
+        best = None
+        best_score = -1.0
+        for fname in files[:10]:
+            img = cv2.imread(os.path.join(person_dir, fname))
+            if img is None:
+                continue
+            d = self._detect_face_lms(img)
+            if d is None:
+                continue
+            _, lms = d
+            r_eye, l_eye, nose = lms[0], lms[1], lms[2]
+            eye_d = float(np.linalg.norm(r_eye - l_eye))
+            if eye_d < 12:
+                continue
+            level = 1.0 - min(1.0, abs(r_eye[1] - l_eye[1]) / eye_d)
+            mid_x = (r_eye[0] + l_eye[0]) / 2.0
+            centered = 1.0 - min(1.0, abs(nose[0] - mid_x) / (eye_d / 2.0 + 1e-3))
+            size = min(1.0, eye_d / 55.0)
+            score = level * 0.4 + centered * 0.4 + size * 0.2
+            if score > best_score:
+                best_score, best = score, img
+        return best if best is not None else self._first_face_image(person_dir)
+
+    def _detect_face_lms(self, bgr):
+        """Return (box[x,y,w,h], 5x2 landmarks) of the largest face, or None."""
+        from frontend import facercognition as legacy
+        h, w = bgr.shape[:2]
+        det = legacy._create_yunet(w, h)
+        _, faces = det.detect(bgr)
+        if faces is None or len(faces) == 0:
+            return None
+        f = max(faces, key=lambda r: float(r[2]) * float(r[3]))
+        return f[:4].astype(float), f[4:14].reshape(5, 2).astype("float32")
+
+    def face_swap(self, target_bgr, source_bgr):
+        """Rough swap: align the source face onto the target face via YuNet's 5
+        landmarks, then Poisson-blend. Returns swapped image or None."""
+        t = self._detect_face_lms(target_bgr)
+        s = self._detect_face_lms(source_bgr)
+        if t is None or s is None:
+            return None
+        tbox, tlms = t
+        _, slms = s
+        M, _ = cv2.estimateAffinePartial2D(slms, tlms, method=cv2.LMEDS)
+        if M is None:
+            return None
+        hh, ww = target_bgr.shape[:2]
+        warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_REFLECT)
+        # Tie the blend region to the real face scale (eye distance) so we don't
+        # pull in the reference photo's hair/background -> tighter, cleaner swap.
+        eye_d = float(np.linalg.norm(tlms[0] - tlms[1])) or float(max(tbox[2], 24))
+        cx = int(round(float(tlms[:, 0].mean())))
+        cy = int(round(float(tlms[:, 1].mean())))
+        rx = max(16, int(eye_d * 1.35))
+        ry = max(20, int(eye_d * 1.75))
+        mask = np.zeros((hh, ww), np.uint8)
+        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
+        mask = cv2.GaussianBlur(mask, (0, 0), max(3, eye_d * 0.12))
+        cx = min(max(cx, rx + 1), ww - rx - 1)
+        cy = min(max(cy, ry + 1), hh - ry - 1)
+        try:
+            return cv2.seamlessClone(warped, target_bgr, mask, (cx, cy),
+                                     cv2.NORMAL_CLONE)
+        except Exception:
+            m3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR).astype("float32") / 255.0
+            return (warped.astype("float32") * m3
+                    + target_bgr.astype("float32") * (1 - m3)).astype("uint8")
+
+    def generate_face_swap(self, image_b64: str, prompt: str):
+        """Given a generated scene + the prompt, if the prompt names a known
+        person, swap their real face into the scene."""
+        person = self._detect_person_in_prompt(prompt)
+        if not person:
+            return {"ok": True, "data": {"swapped": False, "reason": "no_known_person"}}
+        matched, pdir = self._person_dir(person)
+        if not pdir:
+            return {"ok": True, "data": {"swapped": False, "person": person,
+                                         "reason": "no_folder"}}
+        source = self._best_reference_face(pdir)
+        if source is None:
+            return {"ok": True, "data": {"swapped": False, "person": matched or person,
+                                         "reason": "no_photo"}}
+        try:
+            target = self._decode_image_b64(image_b64)
+            out = self.face_swap(target, source)
+        except Exception as e:
+            self._log_activity("FaceSwap", f"failed: {e}")
+            out = None
+        if out is None:
+            return {"ok": True, "data": {"swapped": False, "person": matched or person,
+                                         "reason": "no_face_in_scene"}}
+        return {"ok": True, "data": {"swapped": True, "person": matched or person,
+                                     "image_b64": self._encode_image_b64(out, 90)}}
+
     def export_demo_kit(self):
         out_dir = os.path.join(self.base_dir, "demo_kit")
         os.makedirs(out_dir, exist_ok=True)
@@ -5087,6 +5225,19 @@ class Phase3ServiceHub:
                             prompt=prompt, negative_prompt=negative_prompt,
                             width=gen_w, height=gen_h)
                         self._send_json(200, {"ok": True, "data": data})
+                        return
+
+                    if path == "/api/mobile/generate/face-swap":
+                        self._send_json(200, hub.generate_face_swap(
+                            image_b64=str(payload.get("image_b64", "")),
+                            prompt=str(payload.get("prompt", ""))))
+                        return
+
+                    if path == "/api/mobile/generate/person-check":
+                        person = hub._detect_person_in_prompt(
+                            str(payload.get("prompt", "")))
+                        self._send_json(200, {"ok": True, "data": {
+                            "found": bool(person), "person": person}})
                         return
 
                     if path == "/api/mobile/compare":
