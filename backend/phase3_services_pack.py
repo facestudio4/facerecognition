@@ -3488,7 +3488,9 @@ class Phase3ServiceHub:
                     errs.append(f"decode:{type(e).__name__}:{e}")
             if not image_b64:
                 self._log_activity("Generate", "txt2img failed: " + " | ".join(errs))
-                raise ValueError("Image generator unavailable. " + " | ".join(errs)[:400])
+                raise ValueError(
+                    "The image generator is busy right now — please tap Generate "
+                    "again in a few seconds.")
 
         # --- Filter an existing photo: try realistic img2img, else OpenCV. ---
         if image_b64 and filter_name:

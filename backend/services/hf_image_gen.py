@@ -106,22 +106,37 @@ def pollinations_available() -> bool:
 
 
 def pollinations_text_to_image(prompt: str, width: int = 1024,
-                               height: int = 1024, model: str = "") -> bytes:
+                               height: int = 1024, model: str = "",
+                               retries: int = 5) -> bytes:
     """FREE, no-API-key text->image (pollinations.ai). Used as the default so
-    realistic generation works with zero server setup."""
+    realistic generation works with zero server setup. Retries on 429/5xx since
+    the keyless endpoint rate-limits shared server IPs."""
     model = model or os.getenv("POLLINATIONS_MODEL", "flux")
     enc = urllib.parse.quote(prompt[:1500], safe="")
-    seed = int(time.time()) % 1000000
-    url = (f"https://image.pollinations.ai/prompt/{enc}"
-           f"?width={int(width)}&height={int(height)}&model={model}"
-           f"&seed={seed}&nologo=true&private=true")
-    req = urllib.request.Request(url, headers={"User-Agent": "FaceStudio/1.0",
-                                               "Accept": "image/*"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = resp.read()
-    if not data or len(data) < 1024:
-        raise RuntimeError("pollinations returned no image")
-    return data
+    headers = {"User-Agent": "FaceStudio/1.0", "Accept": "image/*"}
+    last = None
+    for attempt in range(retries):
+        seed = (int(time.time()) + attempt * 7) % 1000000
+        url = (f"https://image.pollinations.ai/prompt/{enc}"
+               f"?width={int(width)}&height={int(height)}&model={model}"
+               f"&seed={seed}&nologo=true&private=true")
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = resp.read()
+            if data and len(data) >= 1024:
+                return data
+            last = RuntimeError("empty image")
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (429, 500, 502, 503, 504):
+                time.sleep(min(14.0, 3.0 + attempt * 3.0))  # backoff
+                continue
+            raise
+        except Exception as e:  # network/timeout
+            last = e
+            time.sleep(3.0)
+    raise last or RuntimeError("pollinations failed")
 
 
 def image_to_image(image_bytes: bytes, prompt: str,
