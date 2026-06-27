@@ -20303,6 +20303,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   // creations + curated prompt ideas to remove the blank-page problem.
   String _genAspect = 'square'; // square | portrait | landscape
   final List<File> _creations = [];
+  Directory? _creationsDir;
   static const List<String> _promptIdeas = [
     'A cyberpunk samurai in neon rain, cinematic, ultra detailed',
     'Astronaut relaxing on a tropical beach at sunset',
@@ -20316,9 +20317,108 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     'A glowing magical forest with fireflies, dreamy atmosphere',
   ];
 
-  void _addCreation(File f) {
+  // ---- Permanent storage for generated images (survives app restarts) ----
+  Future<Directory> _ensureCreationsDir() async {
+    if (_creationsDir != null) return _creationsDir!;
+    final base = await getApplicationDocumentsDirectory();
+    final d = Directory('${base.path}/face_studio_creations');
+    if (!await d.exists()) await d.create(recursive: true);
+    _creationsDir = d;
+    return d;
+  }
+
+  Future<void> _loadCreations() async {
+    try {
+      await _ensureCreationsDir();
+      final prefs = await SharedPreferences.getInstance();
+      final paths = prefs.getStringList('fs_creations') ?? const [];
+      final existing = <File>[];
+      for (final p in paths) {
+        final f = File(p);
+        if (await f.exists()) existing.add(f);
+      }
+      if (!mounted) return;
+      setState(() {
+        _creations
+          ..clear()
+          ..addAll(existing);
+        // Show the most recent creation in the result preview on reopen.
+        if (_generatedImage == null && existing.isNotEmpty) {
+          _generatedImage = existing.first;
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _persistCreationPaths() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+          'fs_creations', _creations.map((e) => e.path).toList());
+    } catch (_) {}
+  }
+
+  Future<void> _registerCreation(File f) async {
     _creations.insert(0, f);
-    if (_creations.length > 24) _creations.removeRange(24, _creations.length);
+    if (_creations.length > 60) {
+      for (final old in _creations.sublist(60)) {
+        try {
+          if (await old.exists()) await old.delete();
+        } catch (_) {}
+      }
+      _creations.removeRange(60, _creations.length);
+    }
+    await _persistCreationPaths();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _confirmDeleteCreation(File f) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: const Color(0xFF16243C),
+        title: const Text('Delete this creation?',
+            style: TextStyle(color: Colors.white)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(d).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.of(d).pop(true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    _creations.removeWhere((e) => e.path == f.path);
+    if (_generatedImage?.path == f.path) {
+      _generatedImage = _creations.isNotEmpty ? _creations.first : null;
+    }
+    await _persistCreationPaths();
+    if (mounted) setState(() {});
+  }
+
+  // Write bytes into the permanent store and return the saved file.
+  Future<File> _persistCreationBytes(List<int> bytes) async {
+    final dir = await _ensureCreationsDir();
+    final f =
+        File('${dir.path}/c_${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await f.writeAsBytes(bytes, flush: true);
+    await _registerCreation(f);
+    return f;
+  }
+
+  // Copy an existing file (e.g. a filter result) into the permanent store.
+  Future<File> _persistCreationFile(File src) async {
+    final dir = await _ensureCreationsDir();
+    final f =
+        File('${dir.path}/c_${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await src.copy(f.path);
+    await _registerCreation(f);
+    return f;
   }
 
   bool get _isGenerationModule => widget.moduleTitle == 'Face Generation';
@@ -20393,6 +20493,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     super.initState();
     _activeTool = widget.defaultTool;
     _baseUrlController.text = _baseUrl;
+    if (_isGenerationModule) _loadCreations();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _bootstrapAccess();
       if (widget.openCameraOnStart) {
@@ -21030,22 +21131,18 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         } catch (_) {}
       }
 
-      final dir = _pickedImage?.parent.path ?? Directory.systemTemp.path;
-      final outPath =
-          '$dir/described_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final outFile = File(outPath);
-      await outFile.writeAsBytes(bytes!, flush: true);
+      // Save permanently (survives app restarts) and show it.
+      final outFile = await _persistCreationBytes(bytes!);
       setState(() {
         _generatedImage = outFile;
         _generatedVariants
           ..clear()
           ..add(outFile);
-        _addCreation(outFile);
         _status = swappedInto.isNotEmpty
             ? "Generated with $swappedInto's face"
             : 'Realistic image generated from your description';
       });
-      _appendLog('Described image saved: $outPath'
+      _appendLog('Described image saved: ${outFile.path}'
           '${swappedInto.isNotEmpty ? ' (face: $swappedInto)' : ''}');
     } catch (e) {
       setState(() => _status = 'Generation error: $e');
@@ -22342,7 +22439,10 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     setState(() => _busy = true);
     try {
       await _generate();
-      if (_generatedImage != null) setState(() => _addCreation(_generatedImage!));
+      if (_generatedImage != null) {
+        final saved = await _persistCreationFile(_generatedImage!);
+        if (mounted) setState(() => _generatedImage = saved);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -22485,6 +22585,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               return GestureDetector(
                 onTap: () => _openImageFullscreen('Creation', f,
                     allowQuickSave: true),
+                onLongPress: () => _confirmDeleteCreation(f),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: Image.file(f, fit: BoxFit.cover),
