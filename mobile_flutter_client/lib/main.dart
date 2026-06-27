@@ -20951,13 +20951,17 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       // Generate directly from the phone (keyless pollinations.ai). Doing this
       // client-side uses the user's own IP, so it isn't throttled like the
       // shared backend server IP — reliable + zero setup.
-      final style = _styleController.text.trim();
+      // NOTE: the description box is always photorealistic — we do NOT mix in the
+      // "Stylize a photo" filter style here (that made scenes look like anime and
+      // ruined the face-swap).
       final full = [
         description,
-        if (style.isNotEmpty) style,
         if (knownPerson.isNotEmpty)
-          'a person facing the camera, clear front-facing face, portrait',
-        'photorealistic, ultra detailed, sharp focus, 4k',
+          'one person looking directly straight at the camera, front view, '
+              'both eyes visible, symmetric frontal face, face clearly visible '
+              'and well lit, upper body, no sunglasses, no hat',
+        'realistic photo, photorealistic, natural lighting, dslr, ultra '
+            'detailed, sharp focus, 4k',
       ].join(', ');
       final w = _genAspect == 'portrait' ? 768 : 1024;
       final h = _genAspect == 'portrait'
