@@ -75,6 +75,29 @@ def _people():
             and e.lower() not in {"known_faces", "archive", "__pycache__"}]
 
 
+_GEN_STOPWORDS = {
+    "playing", "with", "dog", "cat", "the", "and", "of", "make", "picture",
+    "image", "photo", "generate", "create", "in", "on", "at", "is", "to", "for",
+    "me", "my", "him", "her", "them", "person", "people", "man", "woman", "boy",
+    "girl", "scene", "background", "wearing", "holding", "a", "an"}
+
+
+def _detect_person_in_prompt(prompt):
+    """Find a known person (face folder) named anywhere in the prompt."""
+    import re
+    text = " " + (prompt or "").lower() + " "
+    names = sorted(_people(), key=len, reverse=True)
+    for nm in names:
+        if nm and re.search(r"\b" + re.escape(nm.lower()) + r"\b", text):
+            return nm
+    for nm in names:
+        for w in nm.lower().split():
+            if len(w) >= 3 and w not in _GEN_STOPWORDS and \
+                    re.search(r"\b" + re.escape(w) + r"\b", text):
+                return nm
+    return ""
+
+
 def _find_person_dir(person):
     safe = person.strip().lower()
     if not safe or not os.path.isdir(FACES_ROOT):
@@ -126,15 +149,20 @@ def _reference(person_dir):
     return best
 
 
-def generate(prompt, person, negative=""):
+def generate(prompt, person="", negative=""):
     import re
     _load()
+    # If no person was passed, detect one named in the prompt itself.
+    if not person:
+        person = _detect_person_in_prompt(prompt)
+    if not person:
+        return None, "no_person", ""      # app falls back to cloud for generics
     pdir = _find_person_dir(person)
     if not pdir:
-        return None, f"person '{person}' not found in face database"
+        return None, "not_found", ""
     ref = _reference(pdir)
     if ref is None:
-        return None, "no usable face found in the reference photos"
+        return None, "no_face", ""
     emb, crop, gender = ref
     # The identity comes from the face embedding, so use a GENERIC subject noun
     # in the text (a model doesn't know the person's name, and naming-as-subject
@@ -157,7 +185,7 @@ def generate(prompt, person, negative=""):
     images[0].save(buf, format="JPEG", quality=92)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return base64.b64encode(buf.getvalue()).decode("ascii"), "ok"
+    return base64.b64encode(buf.getvalue()).decode("ascii"), "ok", person
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -182,13 +210,13 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(n) or b"{}")
             if self.path.startswith("/generate"):
-                img_b64, msg = generate(
+                img_b64, msg, person = generate(
                     str(body.get("prompt", "")).strip(),
                     str(body.get("person", "")).strip(),
                     str(body.get("negative_prompt", "")).strip())
                 if img_b64:
                     self._send(200, {"ok": True, "image_b64": img_b64,
-                                     "person": body.get("person")})
+                                     "person": person})
                 else:
                     self._send(200, {"ok": False, "error": msg})
             else:

@@ -21076,9 +21076,45 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     _appendLog('Describe -> image: "$description"');
     try {
       final baseUrl = _baseUrl.trim().replaceAll(RegExp(r'/$'), '');
-      // If the prompt names a known person in your face database, we'll later
-      // swap their REAL face into the generated scene. Ask the backend first so
-      // we can hint the model to make the person face the camera (cleaner swap).
+
+      // 1) BEST: your own PC server (if set + reachable). It detects the named
+      //    person locally and generates their REAL face (InstantID/FaceID,
+      //    logical + properly blended). Returns ok:false when no known person is
+      //    named, so we fall through to the free cloud generator for generics.
+      if (_localAiUrl.isNotEmpty) {
+        if (mounted) setState(() => _status = 'Generating on your PC…');
+        try {
+          final res = await http
+              .post(Uri.parse('$_localAiUrl/generate'),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode({'prompt': description}))
+              .timeout(const Duration(seconds: 200));
+          if (res.statusCode == 200) {
+            final d = (jsonDecode(res.body) as Map?) ?? const {};
+            final out = (d['image_b64'] ?? '').toString();
+            if (d['ok'] == true && out.isNotEmpty) {
+              final saved = await _persistCreationBytes(base64Decode(out));
+              final who = (d['person'] ?? '').toString();
+              setState(() {
+                _generatedImage = saved;
+                _generatedVariants
+                  ..clear()
+                  ..add(saved);
+                _status = who.isNotEmpty
+                    ? "Generated $who on your PC"
+                    : 'Generated on your PC';
+              });
+              _appendLog('Personal AI image saved ($who)');
+              return;
+            }
+          }
+        } catch (_) {
+          // PC off / unreachable -> fall back to the free cloud generator.
+        }
+      }
+
+      // 2) Cloud fallback: detect a named person (for the cloud face-swap), then
+      //    generate with the keyless cloud generator.
       String knownPerson = '';
       try {
         if (await _ensureToken()) {
@@ -21096,42 +21132,6 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
           }
         }
       } catch (_) {}
-
-      // BEST PATH: if a known person is named AND your PC's AI server is set +
-      // running, generate there (InstantID/FaceID -> the person's REAL face,
-      // logical scene, properly blended). Falls through to the free cloud
-      // generator if the PC is off/unreachable.
-      if (knownPerson.isNotEmpty && _localAiUrl.isNotEmpty) {
-        if (mounted) {
-          setState(() => _status = 'Generating $knownPerson on your PC…');
-        }
-        try {
-          final res = await http
-              .post(Uri.parse('$_localAiUrl/generate'),
-                  headers: {'Content-Type': 'application/json'},
-                  body: jsonEncode(
-                      {'prompt': description, 'person': knownPerson}))
-              .timeout(const Duration(seconds: 150));
-          if (res.statusCode == 200) {
-            final d = (jsonDecode(res.body) as Map?) ?? const {};
-            final out = (d['image_b64'] ?? '').toString();
-            if (d['ok'] == true && out.isNotEmpty) {
-              final saved = await _persistCreationBytes(base64Decode(out));
-              setState(() {
-                _generatedImage = saved;
-                _generatedVariants
-                  ..clear()
-                  ..add(saved);
-                _status = "Generated $knownPerson on your PC";
-              });
-              _appendLog('Personal AI server image saved');
-              return;
-            }
-          }
-        } catch (_) {
-          // PC off / unreachable -> fall back to the free cloud generator.
-        }
-      }
 
       // Generate directly from the phone (keyless pollinations.ai). Doing this
       // client-side uses the user's own IP, so it isn't throttled like the
@@ -22889,46 +22889,84 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               label: const Text('Generate'),
             ),
           ),
-          const SizedBox(height: 12),
-          // Optional: route a NAMED person to your own PC (real likeness).
-          Row(
-            children: [
-              Icon(Icons.computer,
-                  size: 15,
-                  color: _localAiUrl.isEmpty
-                      ? const Color(0xFF7E93B5)
-                      : const Color(0xFF7EE3B4)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  _localAiUrl.isEmpty
-                      ? "Personal AI (your PC) — off"
-                      : "Personal AI (your PC) — on",
-                  style: TextStyle(
-                      fontSize: 11.5,
-                      color: _localAiUrl.isEmpty
-                          ? const Color(0xFF7E93B5)
-                          : const Color(0xFF7EE3B4)),
-                ),
-              ),
-            ],
-          ),
           const SizedBox(height: 6),
-          TextField(
-            controller: _localAiController,
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-            keyboardType: TextInputType.url,
-            decoration: _inputDecoration(
-                'Your PC server e.g. http://192.168.1.5:7860 (optional)'),
-            onChanged: _saveLocalAi,
-          ),
-          const Padding(
-            padding: EdgeInsets.only(top: 4),
-            child: Text(
-              'When set + your PC server is running, naming a person in your '
-              'database makes their REAL face (InstantID on your GPU).',
-              style: TextStyle(fontSize: 10.5, color: Color(0xFF8AA0C2)),
+          // Clean, unobtrusive entry to configure the optional PC server.
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _showLocalAiDialog,
+              style: TextButton.styleFrom(
+                foregroundColor: _localAiUrl.isEmpty
+                    ? const Color(0xFF8AA0C2)
+                    : const Color(0xFF7EE3B4),
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 30),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              icon: Icon(
+                  _localAiUrl.isEmpty
+                      ? Icons.computer_outlined
+                      : Icons.check_circle,
+                  size: 15),
+              label: Text(
+                  _localAiUrl.isEmpty
+                      ? 'Use my PC for real faces'
+                      : 'Personal AI: on',
+                  style: const TextStyle(fontSize: 12)),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showLocalAiDialog() async {
+    _localAiController.text = _localAiUrl;
+    await showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: const Color(0xFF16243C),
+        title: const Text('Personal AI (your PC)',
+            style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Start "Face Studio AI" on your PC, then enter its address below '
+              '(your phone must be on the same Wi-Fi). When on, naming a person '
+              'from your database generates their REAL face on your GPU.',
+              style: TextStyle(color: Color(0xFF9FB2CF), fontSize: 12.5),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _localAiController,
+              style: const TextStyle(color: Colors.white),
+              keyboardType: TextInputType.url,
+              autofocus: true,
+              decoration: _inputDecoration('e.g. http://192.168.1.5:7860'),
+            ),
+          ],
+        ),
+        actions: [
+          if (_localAiUrl.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                _saveLocalAi('');
+                Navigator.of(d).pop();
+              },
+              child: const Text('Turn off',
+                  style: TextStyle(color: Color(0xFFFF9E83))),
+            ),
+          TextButton(
+              onPressed: () => Navigator.of(d).pop(),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              _saveLocalAi(_localAiController.text);
+              Navigator.of(d).pop();
+            },
+            child: const Text('Save'),
           ),
         ],
       ),
