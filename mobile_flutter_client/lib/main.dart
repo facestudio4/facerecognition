@@ -20304,6 +20304,9 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
   String _genAspect = 'square'; // square | portrait | landscape
   final List<File> _creations = [];
   Directory? _creationsDir;
+  // Optional: your own PC running the InstantID/FaceID server (real likeness).
+  final _localAiController = TextEditingController();
+  String _localAiUrl = '';
   static const List<String> _promptIdeas = [
     'A cyberpunk samurai in neon rain, cinematic, ultra detailed',
     'Astronaut relaxing on a tropical beach at sunset',
@@ -20325,6 +20328,27 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     if (!await d.exists()) await d.create(recursive: true);
     _creationsDir = d;
     return d;
+  }
+
+  Future<void> _loadLocalAi() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      final u = prefs.getString('fs_local_ai_url') ?? '';
+      setState(() {
+        _localAiUrl = u;
+        _localAiController.text = u;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveLocalAi(String url) async {
+    final clean = url.trim().replaceAll(RegExp(r'/+$'), '');
+    setState(() => _localAiUrl = clean);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('fs_local_ai_url', clean);
+    } catch (_) {}
   }
 
   Future<void> _loadCreations() async {
@@ -20493,7 +20517,10 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     super.initState();
     _activeTool = widget.defaultTool;
     _baseUrlController.text = _baseUrl;
-    if (_isGenerationModule) _loadCreations();
+    if (_isGenerationModule) {
+      _loadCreations();
+      _loadLocalAi();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _bootstrapAccess();
       if (widget.openCameraOnStart) {
@@ -20510,6 +20537,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     _identityNameController.dispose();
     _negativePromptController.dispose();
     _descriptionController.dispose();
+    _localAiController.dispose();
     _topKController.dispose();
     super.dispose();
   }
@@ -21048,6 +21076,42 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
           }
         }
       } catch (_) {}
+
+      // BEST PATH: if a known person is named AND your PC's AI server is set +
+      // running, generate there (InstantID/FaceID -> the person's REAL face,
+      // logical scene, properly blended). Falls through to the free cloud
+      // generator if the PC is off/unreachable.
+      if (knownPerson.isNotEmpty && _localAiUrl.isNotEmpty) {
+        if (mounted) {
+          setState(() => _status = 'Generating $knownPerson on your PC…');
+        }
+        try {
+          final res = await http
+              .post(Uri.parse('$_localAiUrl/generate'),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode(
+                      {'prompt': description, 'person': knownPerson}))
+              .timeout(const Duration(seconds: 150));
+          if (res.statusCode == 200) {
+            final d = (jsonDecode(res.body) as Map?) ?? const {};
+            final out = (d['image_b64'] ?? '').toString();
+            if (d['ok'] == true && out.isNotEmpty) {
+              final saved = await _persistCreationBytes(base64Decode(out));
+              setState(() {
+                _generatedImage = saved;
+                _generatedVariants
+                  ..clear()
+                  ..add(saved);
+                _status = "Generated $knownPerson on your PC";
+              });
+              _appendLog('Personal AI server image saved');
+              return;
+            }
+          }
+        } catch (_) {
+          // PC off / unreachable -> fall back to the free cloud generator.
+        }
+      }
 
       // Generate directly from the phone (keyless pollinations.ai). Doing this
       // client-side uses the user's own IP, so it isn't throttled like the
@@ -22803,6 +22867,47 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               onPressed: _busy ? null : _generateFromDescription,
               icon: const Icon(Icons.auto_awesome),
               label: const Text('Generate'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Optional: route a NAMED person to your own PC (real likeness).
+          Row(
+            children: [
+              Icon(Icons.computer,
+                  size: 15,
+                  color: _localAiUrl.isEmpty
+                      ? const Color(0xFF7E93B5)
+                      : const Color(0xFF7EE3B4)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _localAiUrl.isEmpty
+                      ? "Personal AI (your PC) — off"
+                      : "Personal AI (your PC) — on",
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      color: _localAiUrl.isEmpty
+                          ? const Color(0xFF7E93B5)
+                          : const Color(0xFF7EE3B4)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            controller: _localAiController,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            keyboardType: TextInputType.url,
+            decoration: _inputDecoration(
+                'Your PC server e.g. http://192.168.1.5:7860 (optional)'),
+            onChanged: _saveLocalAi,
+          ),
+          const Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Text(
+              'When set + your PC server is running, naming a person in your '
+              'database makes their REAL face (InstantID on your GPU).',
+              style: TextStyle(fontSize: 10.5, color: Color(0xFF8AA0C2)),
             ),
           ),
         ],
