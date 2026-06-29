@@ -20353,24 +20353,32 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
 
   Future<void> _loadCreations() async {
     try {
-      await _ensureCreationsDir();
-      final prefs = await SharedPreferences.getInstance();
-      final paths = prefs.getStringList('fs_creations') ?? const [];
-      final existing = <File>[];
-      for (final p in paths) {
-        final f = File(p);
-        if (await f.exists()) existing.add(f);
-      }
+      final dir = await _ensureCreationsDir();
+      // Source of truth = the actual files in the permanent folder, so creations
+      // survive even if the SharedPreferences index was never written.
+      final files = <File>[];
+      try {
+        for (final e in dir.listSync()) {
+          final lp = e.path.toLowerCase();
+          if (e is File &&
+              (lp.endsWith('.jpg') || lp.endsWith('.jpeg') ||
+                  lp.endsWith('.png'))) {
+            files.add(e);
+          }
+        }
+      } catch (_) {}
+      // Filenames are c_<millis>.jpg, so reverse-sort = newest first.
+      files.sort((a, b) => b.path.compareTo(a.path));
       if (!mounted) return;
       setState(() {
         _creations
           ..clear()
-          ..addAll(existing);
-        // Show the most recent creation in the result preview on reopen.
-        if (_generatedImage == null && existing.isNotEmpty) {
-          _generatedImage = existing.first;
+          ..addAll(files.take(60));
+        if (_generatedImage == null && _creations.isNotEmpty) {
+          _generatedImage = _creations.first;
         }
       });
+      await _persistCreationPaths();
     } catch (_) {}
   }
 
@@ -20393,7 +20401,19 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       _creations.removeRange(60, _creations.length);
     }
     await _persistCreationPaths();
+    unawaited(_autoSaveToGallery(f)); // also drop it in the phone gallery
     if (mounted) setState(() {});
+  }
+
+  // Best-effort copy into the phone's gallery so creations are visible in Photos.
+  Future<void> _autoSaveToGallery(File f) async {
+    try {
+      if (kIsWeb || !Platform.isAndroid) return;
+      final pics = Directory('/storage/emulated/0/Pictures/FaceStudio');
+      if (!await pics.exists()) await pics.create(recursive: true);
+      final dest = File('${pics.path}/${f.uri.pathSegments.last}');
+      if (!await dest.exists()) await f.copy(dest.path);
+    } catch (_) {}
   }
 
   Future<void> _confirmDeleteCreation(File f) async {
