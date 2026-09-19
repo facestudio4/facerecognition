@@ -28,11 +28,11 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/app_icon.jpeg
-    - assets/face_reference.png
-    - assets/face_reference.jpeg
+    - ../assets/app_icon.jpeg
+    - ../assets/face_reference.png
+    - ../assets/face_reference.jpeg
 
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: "assets/app_icon.jpeg"
+  image_path: "../assets/app_icon.jpeg"

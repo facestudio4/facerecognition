@@ -11,6 +11,9 @@ secrets/
 *.key
 *.pk
 *.pub
+*.jks
+*.keystore
+*.pfx
 service-account*.json
 *firebase-adminsdk*.json
 Key *.pk
@@ -26,8 +29,32 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .venv/
+.venv*/
 venv/
 env/
+
+# ---- Local AI weights & Runtime Cache ----
+face_studio_ai/
+
+# ---- Database Backups & Verification Logs ----
+database/email_logs/
+database/*.bak
+*.db.bak
+*_backup*.db
+*.bak
+
+# ---- Scratch & Debug Scripts ----
+scripts/direct_send_debug.py
+scripts/insert_test_recognition.py
+scripts/local_begin_signup.py
+scripts/local_begin_signup_to_email.py
+scripts/resend_signup_same_recipient.py
+scripts/send_test_html_email.py
+scripts/signup_test_request.py
+scripts/test_api_endpoints.py
+scripts/test_code_extraction.py
+scripts/test_email_logger.py
+scripts/*debug*.py
 
 # ---- Flutter / Dart (mobile client) ----
 mobile_flutter_client/build/
@@ -42,6 +69,8 @@ mobile_flutter_client/**/build/
 
 # ---- Logs / temp ----
 *.log
+logs/
+scratch/
 *.tmp
 *.dl.tmp
 
@@ -49,6 +78,7 @@ mobile_flutter_client/**/build/
 .DS_Store
 Thumbs.db
 .idea/
+.claude/
 
 # NOTE: database/facestudio.db, database/face_encodings.pkl and database/faces/**
 # are committed ON PURPOSE as the Render free-tier seed. They still contain

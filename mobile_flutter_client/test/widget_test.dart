@@ -6,14 +6,21 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:face_studio_mobile_client/main.dart';
 
 void main() {
-  testWidgets('Face Studio home renders', (WidgetTester tester) async {
-    await tester.pumpWidget(const FaceStudioMobileClientApp());
+  TestWidgetsFlutterBinding.ensureInitialized();
 
-    expect(find.text('Face Studio'), findsWidgets);
-    expect(find.text('Choose a mode to get started'), findsOneWidget);
+  testWidgets('Face Studio home renders', (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(const FaceStudioMobileClientApp());
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.text('Face Studio Login'), findsOneWidget);
+    expect(find.text('Welcome to Face Studio'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 1));
   });
 }
