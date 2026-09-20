@@ -866,11 +866,27 @@ class Phase3ServiceHub:
         self._mobile_known_loaded_at = time.time()
 
     def _connect(self):
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+        except Exception:
+            pass
         conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            try:
+                conn.execute("PRAGMA journal_mode=DELETE")
+            except Exception:
+                pass
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
         return conn
 
     def _ensure_schema(self):
