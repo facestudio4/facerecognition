@@ -123,7 +123,7 @@ def post_json(url: str, api_key: str | None, token: str | None, payload: dict, r
 
 def main():
     parser = argparse.ArgumentParser(description="Sync local known face images to cloud backend")
-    parser.add_argument("--base-url", required=True, help="Example: https://facerecognition-4.onrender.com")
+    parser.add_argument("--base-url", required=True, help="Example: https://facerecognition-jcu9.onrender.com")
     parser.add_argument("--api-key", default="", help="X-API-Key from backend")
     parser.add_argument("--token", default="", help="Bearer token from /api/auth/login")
     parser.add_argument("--source-dir", default="database/faces", help="Local source folder")

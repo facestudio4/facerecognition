@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:io';
@@ -3791,10 +3791,11 @@ class BackendApi {
       active,
       const String.fromEnvironment(
         'FACE_STUDIO_BASE_URL',
-        defaultValue: 'https://facerecognition-4.onrender.com',
+        defaultValue: 'https://facerecognition-jcu9.onrender.com',
       ).trim().replaceAll(RegExp(r'/$'), ''),
-      'https://facerecognition-4.onrender.com',
+      'https://facerecognition-jcu9.onrender.com',
       'https://face-studio-api.onrender.com',
+      'https://facerecognition-4.onrender.com',
       'http://10.0.2.2:8787',
       'http://10.0.3.2:8787',
       'http://127.0.0.1:8787',
@@ -4725,7 +4726,7 @@ class BackendApi {
   Future<Map<String, dynamic>> getMobileAppUpdateInfo() async {
     final configuredBase = const String.fromEnvironment(
       'FACE_STUDIO_BASE_URL',
-      defaultValue: 'https://facerecognition-4.onrender.com',
+      defaultValue: 'https://facerecognition-jcu9.onrender.com',
     ).trim().replaceAll(RegExp(r'/$'), '');
     final currentBase = _base;
     bool isLocalBase(String base) {
@@ -4774,7 +4775,7 @@ class BackendApi {
 BackendApi _createBackendApi() {
   const baseUrl = String.fromEnvironment(
     'FACE_STUDIO_BASE_URL',
-    defaultValue: 'https://facerecognition-4.onrender.com',
+    defaultValue: 'https://facerecognition-jcu9.onrender.com',
   );
   const apiKey =
       String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
@@ -20585,7 +20586,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
     await prefs.remove(_kBaseUrlOverridePrefKey);
     const fallback = String.fromEnvironment(
       'FACE_STUDIO_BASE_URL',
-      defaultValue: 'https://facerecognition-4.onrender.com',
+      defaultValue: 'https://facerecognition-jcu9.onrender.com',
     );
     buildBackendApi().setBaseUrl(fallback);
     _baseUrlController.text = buildBackendApi().baseUrl;

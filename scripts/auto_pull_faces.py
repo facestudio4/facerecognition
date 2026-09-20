@@ -31,7 +31,7 @@ DEST_DIR = os.path.join(PROJECT_ROOT, "database", "faces")
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "pull_faces.log")
 BASE_URL = os.environ.get(
-    "FACE_STUDIO_BASE_URL", "https://facerecognition-4.onrender.com"
+    "FACE_STUDIO_BASE_URL", "https://facerecognition-jcu9.onrender.com"
 ).strip()
 MAX_LOG_LINES = 500
 

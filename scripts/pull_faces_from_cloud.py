@@ -135,7 +135,7 @@ def write_entries(entries: list, dest_dir: str, clear_existing: bool):
 
 def main():
     parser = argparse.ArgumentParser(description="Pull face images from cloud backend to local database")
-    parser.add_argument("--base-url", required=True, help="Example: https://facerecognition-4.onrender.com")
+    parser.add_argument("--base-url", required=True, help="Example: https://facerecognition-jcu9.onrender.com")
     parser.add_argument("--api-key", default="", help="X-API-Key from backend")
     parser.add_argument("--token", default="", help="Bearer token from /api/auth/login")
     parser.add_argument("--dest-dir", default="database/faces", help="Local destination folder")
