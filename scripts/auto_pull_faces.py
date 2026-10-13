@@ -40,6 +40,10 @@ def _log(message: str) -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"{stamp}  {message}"
     try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    try:
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
