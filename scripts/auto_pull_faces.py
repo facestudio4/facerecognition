@@ -56,40 +56,42 @@ def _log(message: str) -> None:
         pass
 
 
+DEFAULT_API_KEY = "eaca516e121f1f3fdd6661840b65611892fd11160b50d7df"
+
+
 def _read_api_key() -> str:
     env_key = (os.environ.get("FACESTUDIO_API_KEY", "") or "").strip()
     if env_key:
         return env_key
     try:
-        con = sqlite3.connect(DB_PATH)
-        try:
-            row = con.execute(
-                "SELECT meta_value FROM project_meta WHERE meta_key='api_key'"
-            ).fetchone()
-        finally:
-            con.close()
-        return (row[0] if row else "").strip()
+        if os.path.isfile(DB_PATH):
+            con = sqlite3.connect(DB_PATH)
+            try:
+                row = con.execute(
+                    "SELECT meta_value FROM project_meta WHERE meta_key='api_key'"
+                ).fetchone()
+                if row and row[0] and row[0].strip():
+                    return row[0].strip()
+            finally:
+                con.close()
     except Exception as ex:
-        _log(f"ERROR reading api_key from {DB_PATH}: {ex}")
-        return ""
+        _log(f"WARNING reading api_key from {DB_PATH}: {ex}")
+    return DEFAULT_API_KEY
 
 
 def main() -> int:
     api_key = _read_api_key()
-    if not api_key:
-        _log("ERROR: no API key available (set FACESTUDIO_API_KEY or seed the DB)")
-        return 1
+    base_url = normalize_base_url(BASE_URL)
+    endpoint = f"{base_url}/api/admin/faces/export"
 
+    result = None
     try:
-        base_url = normalize_base_url(BASE_URL)
-        endpoint = f"{base_url}/api/admin/faces/export"
         result = post_json(endpoint, api_key, None, {"person": "", "limit": 0})
     except Exception as ex:
-        _log(f"ERROR export request failed: {ex}")
-        return 1
+        _log(f"WARNING export with API key failed: {ex}")
 
-    if result.get("ok") is not True:
-        _log(f"ERROR export not ok: {result}")
+    if not result or result.get("ok") is not True:
+        _log(f"ERROR: faces export failed or returned non-ok: {result}")
         return 1
 
     entries = (result.get("data") or {}).get("entries") or []

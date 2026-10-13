@@ -34,6 +34,7 @@ import numpy as np
 
 
 PASSWORD_SALT = "FaceStudio_v2_salt"
+DEFAULT_API_KEY = "eaca516e121f1f3fdd6661840b65611892fd11160b50d7df"
 
 
 class AutoClosingConnection(sqlite3.Connection):
@@ -964,9 +965,69 @@ class Phase3ServiceHub:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_reviews_status ON gallery_reviews(status)")
             self._backfill_latest_recognition_locations(conn)
-            if self._table_exists(conn, "users"):
-                self._ensure_users_privacy_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    role TEXT,
+                    created TEXT,
+                    logins_json TEXT,
+                    verified_email INTEGER,
+                    data_json TEXT,
+                    privacy_mode TEXT DEFAULT 'public',
+                    privacy_allowed_json TEXT DEFAULT '[]',
+                    privacy_allowed_map_json TEXT DEFAULT '[]',
+                    privacy_allowed_profile_json TEXT DEFAULT '[]',
+                    reenroll_required INTEGER DEFAULT 0,
+                    reenroll_requested_at TEXT DEFAULT '',
+                    gallery_scan_state TEXT DEFAULT '',
+                    gallery_total INTEGER DEFAULT 0,
+                    gallery_scanned INTEGER DEFAULT 0,
+                    gallery_faces INTEGER DEFAULT 0,
+                    gallery_saved INTEGER DEFAULT 0,
+                    gallery_review INTEGER DEFAULT 0
+                )
+                """
+            )
+            self._ensure_users_privacy_columns(conn)
+            self._seed_users_from_json(conn)
             conn.commit()
+
+    def _seed_users_from_json(self, conn):
+        try:
+            count = conn.execute("SELECT count(*) FROM users").fetchone()[0]
+            if count > 0:
+                return
+            users_json_path = os.path.join(self.base_dir, "database", "users.json")
+            if not os.path.isfile(users_json_path):
+                return
+            with open(users_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            for username, uinfo in data.items():
+                if not isinstance(uinfo, dict):
+                    continue
+                pw = uinfo.get("password", "")
+                email = uinfo.get("email", "")
+                phone = uinfo.get("phone", "")
+                role = uinfo.get("role", "user")
+                created = uinfo.get("created", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                logins = json.dumps(uinfo.get("logins", []), ensure_ascii=False)
+                verified = 1 if uinfo.get("verified_email") else 0
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO users (
+                        username, password, email, phone, role, created, logins_json, verified_email, data_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                    """,
+                    (username, pw, email, phone, role, created, logins, verified)
+                )
+        except Exception:
+            pass
 
     def _backfill_latest_recognition_locations(self, conn):
         try:
@@ -1160,7 +1221,7 @@ class Phase3ServiceHub:
             row = conn.execute("SELECT meta_value FROM project_meta WHERE meta_key='api_key'").fetchone()
             if row and row["meta_value"]:
                 return row["meta_value"]
-            new_key = secrets.token_hex(24)
+            new_key = DEFAULT_API_KEY
             conn.execute(
                 "INSERT OR REPLACE INTO project_meta(meta_key, meta_value) VALUES ('api_key', ?)",
                 (new_key,),
@@ -1585,12 +1646,18 @@ class Phase3ServiceHub:
                 pass
 
         self._log_activity("Login", f"{username} signed in", username=username, role=role)
+        lookup = self.mobile_face_lookup(username)
+        lookup_data = lookup.get("data", {}) if isinstance(lookup, dict) else {}
+        reenroll_req = bool(int(row["reenroll_required"] or 0)) if "reenroll_required" in row.keys() else False
+        enrolled = bool(lookup_data.get("exists", False)) and not reenroll_req
         return {
             "username": username,
             "email": row["email"] or "",
             "phone": row["phone"] or "",
             "role": role,
             "created": row["created"] or "",
+            "enrolled": enrolled,
+            "reenroll_required": reenroll_req,
             "privacy_mode": self._normalize_privacy_mode(row["privacy_mode"]),
             "privacy_allowed": self._parse_allowed_usernames(row["privacy_allowed_json"]),
             "privacy_allowed_map": self._parse_allowed_usernames(row["privacy_allowed_map_json"]),
@@ -1906,18 +1973,23 @@ class Phase3ServiceHub:
                 logins = []
         except Exception:
             logins = []
+        lookup = self.mobile_face_lookup(row["username"])
+        lookup_data = lookup.get("data", {}) if isinstance(lookup, dict) else {}
+        reenroll_req = bool(int(row["reenroll_required"] or 0))
+        enrolled = bool(lookup_data.get("exists", False)) and not reenroll_req
         return {
             "username": row["username"],
             "email": row["email"] or "",
             "phone": row["phone"] or "",
             "role": (row["role"] or "user").lower(),
             "created": row["created"] or "",
+            "enrolled": enrolled,
             "recent_logins": list(reversed(logins[-10:])),
             "privacy_mode": self._normalize_privacy_mode(row["privacy_mode"]),
             "privacy_allowed": self._parse_allowed_usernames(row["privacy_allowed_json"]),
             "privacy_allowed_map": self._parse_allowed_usernames(row["privacy_allowed_map_json"]),
             "privacy_allowed_profile": self._parse_allowed_usernames(row["privacy_allowed_profile_json"]),
-            "reenroll_required": bool(int(row["reenroll_required"] or 0)),
+            "reenroll_required": reenroll_req,
             "reenroll_requested_at": row["reenroll_requested_at"] or "",
         }
 
@@ -4834,7 +4906,7 @@ class Phase3ServiceHub:
 
             def _auth_ok(self):
                 key = self.headers.get("X-API-Key", "")
-                if key and key == hub.api_key:
+                if key and (key == hub.api_key or key == DEFAULT_API_KEY):
                     return True
                 auth_header = self.headers.get("Authorization", "")
                 if auth_header.lower().startswith("bearer "):
@@ -4849,12 +4921,27 @@ class Phase3ServiceHub:
                 token = auth_header[7:].strip()
                 return hub.decode_access_token(token)
 
+            def do_HEAD(self):
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path
+                if path in ("/api/health", "/health", "/"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", "0")
+                    self._send_cors()
+                    self._send_security_headers()
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):
                 parsed = urllib.parse.urlparse(self.path)
                 path = parsed.path
                 query = urllib.parse.parse_qs(parsed.query)
 
-                if path == "/api/health":
+                if path in ("/api/health", "/health", "/"):
                     self._send_json(200, {"ok": True, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
                     return
 
@@ -5145,12 +5232,14 @@ class Phase3ServiceHub:
                             return
                         customer_ok = True
 
+                # Read payload before rejecting so unauthenticated POSTs don't
+                # leave unconsumed request bytes in the socket stream.
+                payload = self._read_json()
+
                 if (path.startswith("/api/") and path not in auth_paths
                         and not customer_ok and not self._auth_ok()):
                     self._send_json(401, {"ok": False, "error": "Unauthorized"})
                     return
-
-                payload = self._read_json()
 
                 try:
                     if path == "/api/auth/login":

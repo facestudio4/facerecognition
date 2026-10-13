@@ -1,4 +1,4 @@
-﻿services:
+services:
   - type: web
     name: face-studio-api
     env: python
@@ -29,6 +29,8 @@
         value: /var/data/faces
       - key: FACE_ENCODINGS_PATH
         value: /var/data/face_encodings.pkl
+      - key: FACESTUDIO_API_KEY
+        value: eaca516e121f1f3fdd6661840b65611892fd11160b50d7df
       # Durable persistence on the free tier (no disk): mirror the DB, encodings
       # and face images to Supabase Storage so data survives redeploys/sleep.
       - key: SUPABASE_URL

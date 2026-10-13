@@ -10,10 +10,11 @@ import 'preprocessing.dart';
 class ModelProvider {
   ModelProvider({
     FaceDB? faceDb,
+    String? baseDirectoryPath,
     this.detectorAssetPath = FaceModelAssets.detector,
     this.embedderAssetPath = FaceModelAssets.embedder,
     Preprocessing? preprocessing,
-  })  : _faceDb = faceDb ?? FaceDB(),
+  })  : _faceDb = faceDb ?? FaceDB(baseDirectoryPath: baseDirectoryPath),
         _preprocessing = preprocessing ?? Preprocessing();
 
   final String detectorAssetPath;

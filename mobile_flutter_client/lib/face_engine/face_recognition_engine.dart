@@ -7,6 +7,7 @@ import 'dart:isolate';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'camera_frame_adapter.dart';
 import 'isolate_worker.dart';
@@ -81,8 +82,17 @@ class FaceRecognitionEngine {
     // Wait until worker supplies its SendPort
     await completer.future;
 
+    String? basePath;
+    try {
+      basePath = (await getApplicationDocumentsDirectory()).path;
+    } catch (_) {}
+
     // Now tell worker to initialize models
-    _workerSendPort!.send({'type': 'init', 'useGpu': useGpu});
+    _workerSendPort!.send({
+      'type': 'init',
+      'useGpu': useGpu,
+      'baseDirectoryPath': basePath,
+    });
 
     _initialized = true;
   }

@@ -94,33 +94,64 @@ Future<List<Directory>> _faceSamplesDirsForName(String name) async {
   final normalized = _sanitizeFileName(name);
   final uniqueDirs = <String, Directory>{};
 
+  Future<void> addMatchingDirs(Directory baseDir) async {
+    try {
+      final facesRoot = Directory('${baseDir.path}${Platform.pathSeparator}faces');
+      if (await facesRoot.exists()) {
+        final list = await facesRoot.list().toList();
+        for (final entry in list) {
+          if (entry is Directory) {
+            final folderName = entry.path.split(Platform.pathSeparator).last;
+            if (folderName.toLowerCase() == normalized.toLowerCase() ||
+                folderName.toLowerCase() == name.trim().toLowerCase()) {
+              uniqueDirs[entry.path] = entry;
+            }
+          }
+        }
+      }
+      final direct = Directory('${facesRoot.path}${Platform.pathSeparator}$normalized');
+      uniqueDirs[direct.path] = direct;
+    } catch (_) {}
+  }
+
   try {
     final base = await getApplicationDocumentsDirectory();
-    uniqueDirs[
-            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
-        Directory(
-            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+    await addMatchingDirs(base);
   } catch (_) {}
   try {
     final base = await getApplicationSupportDirectory();
-    uniqueDirs[
-            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
-        Directory(
-            '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+    await addMatchingDirs(base);
   } catch (_) {}
   if (Platform.isAndroid) {
     try {
       final base = await getExternalStorageDirectory();
       if (base != null) {
-        uniqueDirs[
-                '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized'] =
-            Directory(
-                '${base.path}${Platform.pathSeparator}faces${Platform.pathSeparator}$normalized');
+        await addMatchingDirs(base);
       }
     } catch (_) {}
   }
 
   return uniqueDirs.values.toList(growable: false);
+}
+
+Future<bool> _hasLocalFaceSamples(String name) async {
+  try {
+    final dirs = await _faceSamplesDirsForName(name);
+    for (final dir in dirs) {
+      if (await dir.exists()) {
+        final list = await dir.list().toList();
+        for (final entity in list) {
+          if (entity is File) {
+            final p = entity.path.toLowerCase();
+            if (p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png')) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  return false;
 }
 
 Future<void> _saveFaceSampleBytes({
@@ -5307,28 +5338,58 @@ class _AuthGateState extends State<AuthGate>
     if (clean.isEmpty) {
       return;
     }
-    final navigator = Navigator.of(context);
-    final route = _buildAdaptivePageRoute<bool>(
-      context: context,
-      builder: (_) => FirstTimeEnrollmentPage(username: clean),
-    );
     final prefs = await SharedPreferences.getInstance();
     final key = 'fs_enroll_done_${clean.toLowerCase()}';
     try {
       final api = buildBackendApi();
       final profile = await api.getCurrentUser();
-      final reenrollRequired = profile['data']?['reenroll_required'] == true;
+      final profileData = (profile['data'] as Map<String, dynamic>?) ?? {};
+      final reenrollRequired = profileData['reenroll_required'] == true;
       if (reenrollRequired) {
         await prefs.remove(key);
         unawaited(api.acknowledgeReenrollReset());
+      } else {
+        // If server profile confirms enrollment, mark local prefs and skip!
+        if (profileData['enrolled'] == true) {
+          await prefs.setBool(key, true);
+          return;
+        }
+        // If local prefs was already marked, skip!
+        if (prefs.getBool(key) == true) {
+          return;
+        }
+        // If local device already has face samples for this user, skip!
+        if (await _hasLocalFaceSamples(clean)) {
+          await prefs.setBool(key, true);
+          return;
+        }
+        // Query server face lookup directly for this user name
+        final lookup = await api.lookupFacePerson(person: clean);
+        if (lookup['ok'] == true && lookup['data']?['exists'] == true) {
+          await prefs.setBool(key, true);
+          return;
+        }
       }
-    } catch (_) {}
-    if (prefs.getBool(key) == true) {
+    } catch (_) {
+      // If offline/error, trust local prefs or face samples if previously enrolled
+      if (prefs.getBool(key) == true || await _hasLocalFaceSamples(clean)) {
+        await prefs.setBool(key, true);
+        return;
+      }
+    }
+    if (prefs.getBool(key) == true || await _hasLocalFaceSamples(clean)) {
+      await prefs.setBool(key, true);
       return;
     }
+    if (!mounted) return;
+    final navigator = Navigator.of(context);
+    final route = _buildAdaptivePageRoute<bool>(
+      context: context,
+      builder: (_) => FirstTimeEnrollmentPage(username: clean),
+    );
     _firstEnrollInProgress = true;
     final done = await navigator.push<bool>(route);
-    if (done == true) {
+    if (done == true || done == false) {
       await prefs.setBool(key, true);
     }
     _firstEnrollInProgress = false;
@@ -5342,6 +5403,9 @@ class _AuthGateState extends State<AuthGate>
     await prefs.setString('fs_token', api.token);
     await prefs.setString('fs_username', username);
     await prefs.setString('fs_role', role);
+    if (user['enrolled'] == true) {
+      await prefs.setBool('fs_enroll_done_${username.toLowerCase()}', true);
+    }
     if (!mounted) return;
     setState(() {
       _username = username;
@@ -12191,11 +12255,20 @@ class _FirstTimeEnrollmentPageState extends State<FirstTimeEnrollmentPage> {
 
     // ignore: deprecated_member_use
     return WillPopScope(
-      onWillPop: () async => false,
+      onWillPop: () async => true,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Face Setup'),
-          automaticallyImplyLeading: false,
+          automaticallyImplyLeading: true,
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text(
+                'Skip',
+                style: TextStyle(color: Colors.white70, fontSize: 15),
+              ),
+            ),
+          ],
         ),
         body: Column(
           children: [
@@ -13018,12 +13091,53 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
     super.dispose();
   }
 
+  Future<void> _ensureSavedFacesLoadedIntoEngine() async {
+    try {
+      final base = await getApplicationDocumentsDirectory();
+      final facesRoot = Directory('${base.path}${Platform.pathSeparator}faces');
+      if (!await facesRoot.exists()) return;
+      final entities = await facesRoot.list().toList();
+      for (final entity in entities) {
+        if (entity is Directory) {
+          final personName = entity.path.split(Platform.pathSeparator).last;
+          if (personName.isEmpty) continue;
+          final files = (await entity.list().toList())
+              .whereType<File>()
+              .where((f) {
+                final p = f.path.toLowerCase();
+                return p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png');
+              })
+              .toList();
+          // Sort newest first, take up to 3 samples
+          files.sort((a, b) => b.path.compareTo(a.path));
+          for (final f in files.take(3)) {
+            try {
+              final bytes = await f.readAsBytes();
+              final decoded = await _decodeImageToRgbBytes(bytes);
+              if (decoded != null) {
+                await _faceEngine.enroll(
+                  personName,
+                  TransferableTypedData.fromList(<Uint8List>[decoded.rgbBytes]),
+                  <String, dynamic>{
+                    'width': decoded.width,
+                    'height': decoded.height,
+                  },
+                );
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> _startLocalRecognition(CameraController controller) async {
     if (_localRecognitionActive) {
       return;
     }
 
     await _faceEngine.initialize(useGpu: false);
+    unawaited(_ensureSavedFacesLoadedIntoEngine());
     await _localRecognitionSubscription?.cancel();
     _localRecognitionSubscription =
         _faceEngine.recognitionStream.listen((result) {
@@ -13289,50 +13403,54 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       }
     }
 
+    // Always enqueue to persistent offline queue so upload is guaranteed!
+    try {
+      final frameBytes = base64Decode(imageB64);
+      await _EnrollmentUploadQueue.enqueueFrames(
+        personName: cleanName,
+        frames: [frameBytes],
+      );
+      unawaited(_EnrollmentUploadQueue.processQueue());
+    } catch (_) {}
+
     final api = buildBackendApi();
     final backendUrl = api.baseUrl;
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Saving to backend: $backendUrl'),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    }
-
     final remoteFilename =
         'unknown_face_${DateTime.now().millisecondsSinceEpoch}.jpg';
-    final res = await api.enrollFace(
-      person: cleanName,
-      imageB64: imageB64,
-      filename: remoteFilename,
-    );
-    if (res['ok'] != true) {
-      if (mounted) {
+    try {
+      final res = await api.enrollFace(
+        person: cleanName,
+        imageB64: imageB64,
+        filename: remoteFilename,
+      );
+      if (res['ok'] == true && mounted) {
         setState(() {
-          _status =
-              'Backend save failed: ${(res['error'] ?? 'backend rejected').toString()}';
+          _status = 'Saved & synced $cleanName';
+          _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Backend save failed on: $backendUrl'),
+            content: Text('Saved & synced $cleanName to cloud'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved $cleanName locally (queued for cloud sync)'),
             duration: const Duration(seconds: 2),
           ),
         );
       }
-      return;
-    }
-    if (mounted) {
-      setState(() {
-        _status = 'Saved unknown as $cleanName';
-        _lastSavedInfo = 'Saved: $cleanName at $_currentLocationLabel';
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Saved to backend: $backendUrl'),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved $cleanName locally (queued for cloud sync)'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
     }
   }
 
@@ -13366,6 +13484,40 @@ class _LiveRecognitionPageState extends State<LiveRecognitionPage> {
       if (name.isEmpty) {
         return null; // skipped
       }
+
+      // Check LOCAL face samples on device first (instant, works offline/airplane mode)
+      try {
+        final localDirs = await _faceSamplesDirsForName(name);
+        Uint8List? localPreviewBytes;
+        for (final dir in localDirs) {
+          if (await dir.exists()) {
+            final files = (await dir.list().toList())
+                .whereType<File>()
+                .where((f) {
+                  final p = f.path.toLowerCase();
+                  return p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png');
+                })
+                .toList();
+            if (files.isNotEmpty) {
+              files.sort((a, b) => b.path.compareTo(a.path));
+              localPreviewBytes = await files.first.readAsBytes();
+              break;
+            }
+          }
+        }
+        if (localPreviewBytes != null) {
+          final previewB64 = base64Encode(localPreviewBytes);
+          final confirm =
+              await _confirmExistingPersonLive(name, previewB64);
+          if (confirm == true) {
+            return name; // reuse the existing folder
+          }
+          askFullName = true;
+          continue;
+        }
+      } catch (_) {}
+
+      // Check remote backend server
       final api = buildBackendApi();
       try {
         final res = await api.lookupFacePerson(person: name);

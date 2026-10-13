@@ -27,7 +27,8 @@ void isolateEntry(SendPort mainSendPort) {
         switch (type) {
           case 'init':
             final useGpu = message['useGpu'] as bool? ?? true;
-            _models = ModelProvider();
+            final basePath = message['baseDirectoryPath'] as String?;
+            _models = ModelProvider(baseDirectoryPath: basePath);
             await _models.loadModels(useGpu: useGpu);
             _mainSendPort.send({'type': 'log', 'msg': 'models_loaded'});
             break;
