@@ -62,13 +62,9 @@ scripts/signup_test_request.py
 scripts/test_api_endpoints.py
 scripts/test_code_extraction.py
 scripts/test_email_logger.py
-<<<<<<< HEAD
-scripts/*debug*.py
-=======
 scripts/view_users.py
 scripts/*debug*.py
 scripts/view_*.py
->>>>>>> e9924eb (Fix face enrollment loop, persistent unknown faces recognition, and laptop database auto-pull)
 
 # ---- Flutter / Dart (mobile client) ----
 mobile_flutter_client/build/
@@ -85,6 +81,7 @@ mobile_flutter_client/**/build/
 *.log
 logs/
 scratch/
+Errors/
 *.tmp
 *.dl.tmp
 
@@ -93,10 +90,7 @@ scratch/
 Thumbs.db
 .idea/
 .claude/
-<<<<<<< HEAD
 
 # NOTE: database/facestudio.db, database/face_encodings.pkl and database/faces/**
 # are committed ON PURPOSE as the Render free-tier seed. They still contain
 # secrets/biometric data — see CLAUDE.md "Known accepted risks" before changing.
-=======
->>>>>>> e9924eb (Fix face enrollment loop, persistent unknown faces recognition, and laptop database auto-pull)
