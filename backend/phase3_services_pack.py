@@ -2333,15 +2333,15 @@ class Phase3ServiceHub:
         }
 
     def get_mobile_app_update_info(self):
-        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+18").strip()
-        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+18").strip()
+        latest_version = os.getenv("FACE_STUDIO_MOBILE_LATEST_VERSION", "0.1.0+63").strip()
+        minimum_version = os.getenv("FACE_STUDIO_MOBILE_MIN_VERSION", "0.1.0+33").strip()
         apk_url = os.getenv(
             "FACE_STUDIO_MOBILE_APK_URL",
-            "https://github.com/facestudio4/facerecognition/releases/latest",
+            "https://github.com/facestudio4/facerecognition/releases/download/v0.1.0%2B63/mobile_0.1.0%2B63.apk",
         ).strip()
         notes = os.getenv(
             "FACE_STUDIO_MOBILE_UPDATE_NOTES",
-            "A new version is available with performance and stability improvements.",
+            "Face Studio v0.1.0+63 — Friends Zone with AI Duo Studio, 50/50 Face Morph, Vibe Matcher, Streaks, clean watermark-free generation, and cloud face persistence.",
         ).strip()
         force_update = os.getenv("FACE_STUDIO_MOBILE_FORCE_UPDATE", "false").strip().lower() in (
             "1",
