@@ -3501,11 +3501,31 @@ class Phase3ServiceHub:
                     "texture, professional photography, 4k")
     _GEN_NEGATIVE = ("low quality, blurry, deformed, extra fingers, bad anatomy, "
                      "overexposed, underexposed, watermark, text, logo, cartoon, "
-                     "disfigured")
+                     "disfigured, pollinations watermark, signature, username")
+
+    @staticmethod
+    def clean_pollinations_watermark(img):
+        """Seamlessly detects and inpaints the pollinations.ai watermark in the bottom-right corner."""
+        if img is None:
+            return img
+        h, w = img.shape[:2]
+        y1, y2, x1, x2 = max(0, h - 65), h, max(0, w - 200), w
+        corner = img[y1:y2, x1:x2]
+        white = (corner[:, :, 0] > 190) & (corner[:, :, 1] > 190) & (corner[:, :, 2] > 190)
+        black = (corner[:, :, 0] < 60) & (corner[:, :, 1] < 60) & (corner[:, :, 2] < 60)
+        text_mask = (white | black).astype(np.uint8) * 255
+        if white.sum() > 40:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            dilated = cv2.dilate(text_mask, k, iterations=1)
+            full_mask = np.zeros((h, w), dtype=np.uint8)
+            full_mask[y1:y2, x1:x2] = dilated
+            return cv2.inpaint(img, full_mask, 2, cv2.INPAINT_TELEA)
+        return img
 
     def _hf_result(self, raw_bytes, label):
-        """Re-encode HF image bytes to our standard JPEG response shape."""
+        """Re-encode HF image bytes to our standard JPEG response shape, cleaning any watermark."""
         frame = self._decode_image_b64(base64.b64encode(raw_bytes).decode("ascii"))
+        frame = self.clean_pollinations_watermark(frame)
         out_b64 = self._encode_image_b64(frame, quality=90)
         return {"filter_name": label, "image_b64": out_b64,
                 "width": int(frame.shape[1]), "height": int(frame.shape[0]),
@@ -3542,10 +3562,14 @@ class Phase3ServiceHub:
 
         # --- Description -> realistic image (text-to-image). The headline path. ---
         if prompt:
+            person = self._detect_person_in_prompt(prompt)
+            hint = self._person_visual_hint(person) if person else ""
             full = prompt
+            if hint:
+                full = f"{prompt}, depicting {hint}"
             style = self._style_prompt(filter_name)
             if style:
-                full = f"{prompt}, {style}"
+                full = f"{full}, {style}"
             full = f"{full}, {self._GEN_REALISM}"
             w = max(384, min(1024, int(width or 768)))
             h = max(384, min(1024, int(height or 768)))
@@ -3568,7 +3592,17 @@ class Phase3ServiceHub:
                     errs.append(f"poll:{type(e).__name__}:{e}")
             if raw is not None:
                 try:
-                    return self._hf_result(raw, filter_name or "Describe")
+                    res = self._hf_result(raw, filter_name or "Describe")
+                    if person:
+                        try:
+                            swapped = self.generate_face_swap(res["image_b64"], prompt)
+                            if (swapped.get("data") or {}).get("swapped"):
+                                res["image_b64"] = swapped["data"]["image_b64"]
+                                res["swapped"] = True
+                                res["person"] = swapped["data"].get("person", person)
+                        except Exception:
+                            pass
+                    return res
                 except Exception as e:
                     errs.append(f"decode:{type(e).__name__}:{e}")
             if not image_b64:
@@ -3612,6 +3646,41 @@ class Phase3ServiceHub:
         "for", "me", "my", "him", "her", "them", "person", "people", "man",
         "woman", "boy", "girl", "scene", "background", "wearing", "holding"}
 
+    _PERSON_VISUAL_HINTS = {
+        "denab": "a handsome young Indian man with short dark hair, stylish modern glasses, neat light beard",
+        "shishir": "a smart young Indian student with short neat dark hair, black glasses, clean shaven, friendly smile",
+        "prayosha": "a cute young Indian child with big bright expressive eyes, cheerful smile",
+        "dhanishtha": "a graceful young Indian woman with beautiful dark hair, gentle expression",
+        "pratham": "a young Indian man with short dark hair, glasses, friendly look",
+        "soham": "a young Indian man with short dark hair, athletic build",
+        "tatva": "a young Indian youth with short dark hair, energetic expression",
+        "vraj": "a young Indian young man with short dark hair, neat style",
+        "vraj_m": "a young Indian man with short dark hair, stylish glasses",
+        "reyansh": "a cheerful young Indian boy with short dark hair, bright happy smile",
+        "moksh": "a playful young Indian boy with short dark hair, smiling face",
+        "daiwik": "a bright young Indian boy with short dark hair, happy expression",
+        "ria": "a charming young Indian woman with beautiful dark hair, warm smile",
+        "rounak": "a young Indian man with short dark hair, confident expression",
+        "samith": "a young Indian man with short dark hair, pleasant smile",
+        "heet": "a young Indian man with short dark hair, friendly look",
+        "kavya": "a graceful young Indian woman with long dark hair, radiant smile",
+        "teerthraj": "a young Indian man with short dark hair, clean look",
+        "niral": "a young Indian person with neat dark hair, pleasant look",
+        "yash": "a young Indian man with short dark hair, energetic look",
+    }
+
+    def _person_visual_hint(self, person: str) -> str:
+        """Returns visual appearance descriptor for the person to guide AI generation."""
+        if not person:
+            return ""
+        p_lower = person.lower().strip()
+        if p_lower in self._PERSON_VISUAL_HINTS:
+            return self._PERSON_VISUAL_HINTS[p_lower]
+        for k, v in self._PERSON_VISUAL_HINTS.items():
+            if k in p_lower or p_lower in k:
+                return v
+        return "a handsome young person with natural features, well lit"
+
     def _detect_person_in_prompt(self, prompt: str) -> str:
         """If the prompt names a known person (face folder), return that name."""
         import re
@@ -3642,46 +3711,57 @@ class Phase3ServiceHub:
         return None
 
     def _best_reference_face(self, person_dir: str):
-        """Pick the most frontal, sharp, overlay-free reference face for a cleaner swap.
-        Filters out screenshots with red camera bounding boxes or synthetic UI."""
+        """Pick the most frontal, sharp, high-resolution, overlay-free reference face.
+        Scans up to 35 photos in the person's directory, scoring frontality,
+        face size, sharpness, and clean balanced lighting."""
         from frontend import facercognition as legacy
         try:
             files = [f for f in sorted(os.listdir(person_dir))
                      if os.path.splitext(f)[1].lower() in self._FACE_EXTS]
         except Exception:
             files = []
+        if not files:
+            return None
         best = None
-        best_score = -1.0
-        det = legacy._create_yunet(480, 480)
-        for fname in files[:10]:
-            img = cv2.imread(os.path.join(person_dir, fname))
+        best_score = -999.0
+        det = legacy._create_yunet(640, 640)
+        for fname in files[:35]:
+            p = os.path.join(person_dir, fname)
+            img = cv2.imread(p)
             if img is None:
                 continue
-            if max(img.shape[:2]) > 640:
-                sc = 640.0 / max(img.shape[:2])
+            if max(img.shape[:2]) > 800:
+                sc = 800.0 / max(img.shape[:2])
                 img = cv2.resize(img, (int(img.shape[1] * sc), int(img.shape[0] * sc)))
             d = self._detect_face_lms(img, det)
             if d is None:
                 continue
-            _, lms = d
+            box, lms = d
             r_eye, l_eye, nose = lms[0], lms[1], lms[2]
             eye_d = float(np.linalg.norm(r_eye - l_eye))
-            if eye_d < 12:
+            if eye_d < 16:
                 continue
+            # Frontality: horizontal eyes and centered nose
             level = 1.0 - min(1.0, abs(r_eye[1] - l_eye[1]) / eye_d)
             mid_x = (r_eye[0] + l_eye[0]) / 2.0
             centered = 1.0 - min(1.0, abs(nose[0] - mid_x) / (eye_d / 2.0 + 1e-3))
-            size = min(1.0, eye_d / 55.0)
+            # Resolution / size
+            res_score = min(1.0, eye_d / 65.0)
+
+            # Brightness & contrast quality (penalize pitch-black night photos or blown-out white)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            mean_b = float(gray.mean())
+            brightness_score = 1.0 - min(1.0, abs(mean_b - 125.0) / 90.0)
 
             # Sharpness metric
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             sharpness = min(1.0, cv2.Laplacian(gray, cv2.CV_64F).var() / 250.0)
 
             # Penalize synthetic UI overlays (e.g. camera red boxes / tags)
             red_mask = (img[:, :, 2] > 180) & (img[:, :, 0] < 70) & (img[:, :, 1] < 100)
-            overlay_penalty = 0.5 if red_mask.sum() > 300 else 0.0
+            overlay_penalty = 0.7 if red_mask.sum() > 200 else 0.0
 
-            score = (level * 0.35 + centered * 0.35 + size * 0.15 + sharpness * 0.15) - overlay_penalty
+            score = (level * 0.25 + centered * 0.25 + res_score * 0.20 +
+                     brightness_score * 0.15 + sharpness * 0.15) - overlay_penalty
             if score > best_score:
                 best_score, best = score, img
         return best if best is not None else self._first_face_image(person_dir)
@@ -3704,8 +3784,12 @@ class Phase3ServiceHub:
     def face_swap(self, target_bgr, source_bgr):
         """Align the source face onto the target via YuNet landmarks,
         apply anatomical inner-face masking to strictly prevent room/background bleed,
-        harmonize lighting/skin tone in LAB space, and blend seamlessly."""
+        harmonize lighting and skin tone via LAB illumination transfer,
+        and blend seamlessly with artifact validation."""
         from frontend import facercognition as legacy
+        # 1. Clean watermark from target scene
+        target_bgr = self.clean_pollinations_watermark(target_bgr)
+
         # Cap working size so memory/CPU stay modest on the free tier.
         if max(target_bgr.shape[:2]) > 768:
             sc = 768.0 / max(target_bgr.shape[:2])
@@ -3721,14 +3805,14 @@ class Phase3ServiceHub:
         t = self._detect_face_lms(target_bgr, det)
         s = self._detect_face_lms(source_bgr, det)
         if t is None or s is None:
-            return None
+            return target_bgr
         tbox, tlms = t
         sbox, slms = s
         M, _ = cv2.estimateAffinePartial2D(slms, tlms, method=cv2.LMEDS)
         if M is None:
-            return None
+            return target_bgr
         hh, ww = target_bgr.shape[:2]
-        warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_LINEAR,
+        warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_CUBIC,
                                 borderMode=cv2.BORDER_REFLECT)
 
         # Source face geometry & mask: prevents ANY room background / wall tiles
@@ -3755,8 +3839,8 @@ class Phase3ServiceHub:
         eye_c = (tlms[0] + tlms[1]) / 2.0
         mouth_c = (tlms[3] + tlms[4]) / 2.0
         face_c = eye_c * 0.45 + mouth_c * 0.55
-        rx = max(14, int(eye_d * 0.82))
-        ry = max(18, int(eye_d * 1.16))
+        rx = max(14, int(eye_d * 0.80))
+        ry = max(18, int(eye_d * 1.15))
         tgt_mask = np.zeros((hh, ww), np.uint8)
         cv2.ellipse(tgt_mask, (int(round(face_c[0])), int(round(face_c[1]))),
                     (rx, ry), angle, 0, 360, 255, -1)
@@ -3771,75 +3855,113 @@ class Phase3ServiceHub:
             sel = combined_mask > 0
             eroded_mask = combined_mask
 
-        # Match lighting and skin tone (Reinhard transfer in LAB space) on the true face region only.
+        # Multi-band illumination and color harmonization in LAB space:
         if int(sel.sum()) > 40:
             w_lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype("float32")
             t_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB).astype("float32")
-            for c in range(3):
+
+            # Match skin color channels (A and B)
+            for c in [1, 2]:
                 wch = w_lab[:, :, c][sel]
                 tch = t_lab[:, :, c][sel]
                 wm, ws = float(wch.mean()), float(wch.std()) + 1e-3
                 tm, ts = float(tch.mean()), float(tch.std()) + 1e-3
-                scaled = (w_lab[:, :, c] - wm) * (ts / ws) + tm
-                if c == 0:
-                    # In luminance, preserve 20% of target ambient lighting/shadows for natural integration
-                    w_lab[:, :, 0] = np.clip(0.80 * scaled + 0.20 * t_lab[:, :, 0], 0, 255)
-                else:
-                    w_lab[:, :, c] = np.clip(scaled, 0, 255)
+                w_lab[:, :, c] = np.clip((w_lab[:, :, c] - wm) * (ts / ws) + tm, 0, 255)
+
+            # High-frequency illumination transfer for L (luminance):
+            # Target provides the ambient scene lighting and shadows; source provides identity features.
+            sigma = max(3.0, eye_d * 0.22)
+            t_low = cv2.GaussianBlur(t_lab[:, :, 0], (0, 0), sigma)
+            w_low = cv2.GaussianBlur(w_lab[:, :, 0], (0, 0), sigma)
+            w_high = w_lab[:, :, 0] - w_low
+
+            w_lab[:, :, 0] = np.clip(t_low + 0.85 * w_high, 0, 255)
             warped = cv2.cvtColor(w_lab.astype("uint8"), cv2.COLOR_LAB2BGR)
 
-        # Soft feathering for seamless blending
-        feather_sigma = max(3.0, eye_d * 0.14)
-        soft_mask = cv2.GaussianBlur(eroded_mask, (0, 0), feather_sigma).astype("float32") / 255.0
+        # Soft feathering mask
+        feather_sigma = max(3.0, eye_d * 0.12)
+        feathered_mask = cv2.GaussianBlur(eroded_mask, (0, 0), feather_sigma).astype("float32") / 255.0
+        fm = feathered_mask[:, :, None]
 
-        # Poisson seamless clone on ROI
+        # Calculate high-quality alpha blend
+        alpha_blended = (warped.astype("float32") * fm + target_bgr.astype("float32") * (1.0 - fm)).astype("uint8")
+
+        # Check Poisson seamlessClone candidate on ROI
         ys, xs = np.where(eroded_mask > 0)
-        if len(xs) == 0:
-            return None
-        pad = int(eye_d * 1.5) + 8
-        x0 = max(0, int(xs.min()) - pad)
-        y0 = max(0, int(ys.min()) - pad)
-        x1 = min(ww - 1, int(xs.max()) + pad)
-        y1 = min(hh - 1, int(ys.max()) + pad)
-        sub_t = target_bgr[y0:y1 + 1, x0:x1 + 1].copy()
-        sub_w = warped[y0:y1 + 1, x0:x1 + 1].copy()
-        sub_m = eroded_mask[y0:y1 + 1, x0:x1 + 1].copy()
-        sub_m[:4, :] = 0
-        sub_m[-4:, :] = 0
-        sub_m[:, :4] = 0
-        sub_m[:, -4:] = 0
-        mys, mxs = np.where(sub_m > 0)
-        if len(mxs) > 0:
-            center = ((int(mxs.min()) + int(mxs.max())) // 2,
-                      (int(mys.min()) + int(mys.max())) // 2)
-            try:
-                blended = cv2.seamlessClone(sub_w, sub_t, sub_m, center, cv2.NORMAL_CLONE)
-                out = target_bgr.copy()
-                out[y0:y1 + 1, x0:x1 + 1] = blended
-                return out
-            except Exception:
-                pass
+        if len(xs) > 0:
+            pad = int(eye_d * 1.5) + 8
+            x0 = max(0, int(xs.min()) - pad)
+            y0 = max(0, int(ys.min()) - pad)
+            x1 = min(ww - 1, int(xs.max()) + pad)
+            y1 = min(hh - 1, int(ys.max()) + pad)
+            sub_t = target_bgr[y0:y1 + 1, x0:x1 + 1].copy()
+            sub_w = warped[y0:y1 + 1, x0:x1 + 1].copy()
+            sub_m = eroded_mask[y0:y1 + 1, x0:x1 + 1].copy()
+            sub_m[:4, :] = 0
+            sub_m[-4:, :] = 0
+            sub_m[:, :4] = 0
+            sub_m[:, -4:] = 0
+            mys, mxs = np.where(sub_m > 0)
+            if len(mxs) > 0:
+                center = ((int(mxs.min()) + int(mxs.max())) // 2,
+                          (int(mys.min()) + int(mys.max())) // 2)
+                try:
+                    clone_candidate = cv2.seamlessClone(sub_w, sub_t, sub_m, center, cv2.NORMAL_CLONE)
+                    # Discoloration check: compare mean luminance inside face
+                    clone_face = clone_candidate[sub_m > 200]
+                    target_face = sub_t[sub_m > 200]
+                    if len(clone_face) > 20:
+                        l_diff = abs(float(clone_face.mean()) - float(target_face.mean()))
+                        # If clone produces excessive discoloration (e.g. gray/black mud), reject it
+                        if l_diff < 18.0:
+                            out = target_bgr.copy()
+                            out[y0:y1 + 1, x0:x1 + 1] = clone_candidate
+                            return out
+                except Exception:
+                    pass
 
-        # Feathered alpha fallback
-        m = soft_mask[:, :, None]
-        return (warped.astype("float32") * m + target_bgr.astype("float32") * (1.0 - m)).astype("uint8")
+        # Return the artifact-free feathered illumination blend
+        return alpha_blended
 
     def generate_face_swap(self, image_b64: str, prompt: str):
-        """Given a generated scene + the prompt, if the prompt names a known
-        person, swap their real face into the scene."""
-        person = self._detect_person_in_prompt(prompt)
-        if not person:
-            return {"ok": True, "data": {"swapped": False, "reason": "no_known_person"}}
-        matched, pdir = self._person_dir(person)
-        if not pdir:
-            return {"ok": True, "data": {"swapped": False, "person": person,
-                                         "reason": "no_folder"}}
-        source = self._best_reference_face(pdir)
-        if source is None:
-            return {"ok": True, "data": {"swapped": False, "person": matched or person,
-                                         "reason": "no_photo"}}
+        """Given a generated scene + the prompt, clean any watermarks and,
+        if the prompt names a known person, swap their real face into the scene."""
         try:
             target = self._decode_image_b64(image_b64)
+            # Always clean the pollinations.ai watermark
+            target = self.clean_pollinations_watermark(target)
+        except Exception as e:
+            self._log_activity("FaceSwap", f"decode failed: {e}")
+            return {"ok": False, "error": "Invalid image"}
+
+        person = self._detect_person_in_prompt(prompt)
+        if not person:
+            # Watermark is removed, return polished image
+            return {"ok": True, "data": {
+                "swapped": False,
+                "reason": "no_known_person",
+                "image_b64": self._encode_image_b64(target, 90)
+            }}
+
+        matched, pdir = self._person_dir(person)
+        if not pdir:
+            return {"ok": True, "data": {
+                "swapped": False,
+                "person": person,
+                "reason": "no_folder",
+                "image_b64": self._encode_image_b64(target, 90)
+            }}
+
+        source = self._best_reference_face(pdir)
+        if source is None:
+            return {"ok": True, "data": {
+                "swapped": False,
+                "person": matched or person,
+                "reason": "no_photo",
+                "image_b64": self._encode_image_b64(target, 90)
+            }}
+
+        try:
             out = self.face_swap(target, source)
         except Exception as e:
             self._log_activity("FaceSwap", f"failed: {e}")
@@ -3848,11 +3970,20 @@ class Phase3ServiceHub:
             import gc
             source = None
             gc.collect()
+
         if out is None:
-            return {"ok": True, "data": {"swapped": False, "person": matched or person,
-                                         "reason": "no_face_in_scene"}}
-        return {"ok": True, "data": {"swapped": True, "person": matched or person,
-                                     "image_b64": self._encode_image_b64(out, 90)}}
+            return {"ok": True, "data": {
+                "swapped": False,
+                "person": matched or person,
+                "reason": "no_face_in_scene",
+                "image_b64": self._encode_image_b64(target, 90)
+            }}
+
+        return {"ok": True, "data": {
+            "swapped": True,
+            "person": matched or person,
+            "image_b64": self._encode_image_b64(out, 90)
+        }}
 
     def export_demo_kit(self):
         out_dir = os.path.join(self.base_dir, "demo_kit")
@@ -5447,10 +5578,11 @@ class Phase3ServiceHub:
                         return
 
                     if path == "/api/mobile/generate/person-check":
-                        person = hub._detect_person_in_prompt(
-                            str(payload.get("prompt", "")))
+                        p_in = str(payload.get("prompt", ""))
+                        person = hub._detect_person_in_prompt(p_in)
+                        hint = hub._person_visual_hint(person) if person else ""
                         self._send_json(200, {"ok": True, "data": {
-                            "found": bool(person), "person": person}})
+                            "found": bool(person), "person": person, "visual_hint": hint}})
                         return
 
                     if path == "/api/mobile/compare":

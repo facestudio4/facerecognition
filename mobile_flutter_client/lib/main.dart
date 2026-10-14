@@ -21312,6 +21312,7 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       // 2) Cloud fallback: detect a named person (for the cloud face-swap), then
       //    generate with the keyless cloud generator.
       String knownPerson = '';
+      String visualHint = '';
       try {
         if (await _ensureToken()) {
           final pc = await http
@@ -21324,7 +21325,10 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
               .timeout(const Duration(seconds: 20));
           if (pc.statusCode == 200) {
             final d = (jsonDecode(pc.body)['data'] as Map?) ?? const {};
-            if (d['found'] == true) knownPerson = (d['person'] ?? '').toString();
+            if (d['found'] == true) {
+              knownPerson = (d['person'] ?? '').toString();
+              visualHint = (d['visual_hint'] ?? '').toString();
+            }
           }
         }
       } catch (_) {}
@@ -21337,10 +21341,13 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
       // ruined the face-swap).
       final full = [
         description,
+        if (visualHint.isNotEmpty) 'featuring $visualHint',
         if (knownPerson.isNotEmpty)
           'one person looking directly straight at the camera, front view, '
               'both eyes visible, symmetric frontal face, face clearly visible '
-              'and well lit, upper body, no sunglasses, no hat',
+              'and well lit, upper body, no sunglasses, no hat'
+        else
+          'high detail subject, realistic composition',
         'realistic photo, photorealistic, natural lighting, dslr, ultra '
             'detailed, sharp focus, 4k',
       ].join(', ');
@@ -21380,36 +21387,38 @@ class _ApiToolsPageState extends State<ApiToolsPage> {
         return;
       }
 
-      // Put the named person's REAL face into the generated scene (backend swap).
+      // Put the named person's REAL face into the generated scene and remove watermarks (backend polish).
       String swappedInto = '';
-      if (knownPerson.isNotEmpty) {
-        if (mounted) {
-          setState(() => _status = "Adding $knownPerson's face…");
-        }
-        try {
-          if (await _ensureToken()) {
-            final sw = await http
-                .post(Uri.parse('$baseUrl/api/mobile/generate/face-swap'),
-                    headers: {
-                      'Authorization': 'Bearer $_token',
-                      'Content-Type': 'application/json',
-                    },
-                    body: jsonEncode({
-                      'image_b64': base64Encode(bytes!),
-                      'prompt': description,
-                    }))
-                .timeout(const Duration(seconds: 60));
-            if (sw.statusCode == 200) {
-              final d = (jsonDecode(sw.body)['data'] as Map?) ?? const {};
-              final out = (d['image_b64'] ?? '').toString();
-              if (d['swapped'] == true && out.isNotEmpty) {
-                bytes = base64Decode(out);
+      if (mounted) {
+        setState(() => _status = knownPerson.isNotEmpty
+            ? "Adding $knownPerson's face…"
+            : 'Polishing image…');
+      }
+      try {
+        if (await _ensureToken()) {
+          final sw = await http
+              .post(Uri.parse('$baseUrl/api/mobile/generate/face-swap'),
+                  headers: {
+                    'Authorization': 'Bearer $_token',
+                    'Content-Type': 'application/json',
+                  },
+                  body: jsonEncode({
+                    'image_b64': base64Encode(bytes!),
+                    'prompt': description,
+                  }))
+              .timeout(const Duration(seconds: 60));
+          if (sw.statusCode == 200) {
+            final d = (jsonDecode(sw.body)['data'] as Map?) ?? const {};
+            final out = (d['image_b64'] ?? '').toString();
+            if (out.isNotEmpty) {
+              bytes = base64Decode(out);
+              if (d['swapped'] == true) {
                 swappedInto = (d['person'] ?? knownPerson).toString();
               }
             }
           }
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
 
       // Save permanently (survives app restarts) and show it.
       final outFile = await _persistCreationBytes(bytes!);

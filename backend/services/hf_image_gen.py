@@ -129,6 +129,26 @@ def pollinations_text_to_image(prompt: str, width: int = 1024,
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = resp.read()
             if data and len(data) >= 1024:
+                try:
+                    import cv2, numpy as np
+                    nparr = np.frombuffer(data, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        y1, y2, x1, x2 = max(0, h - 65), h, max(0, w - 200), w
+                        corner = img[y1:y2, x1:x2]
+                        white = (corner[:, :, 0] > 190) & (corner[:, :, 1] > 190) & (corner[:, :, 2] > 190)
+                        black = (corner[:, :, 0] < 60) & (corner[:, :, 1] < 60) & (corner[:, :, 2] < 60)
+                        if white.sum() > 40:
+                            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                            dilated = cv2.dilate((white | black).astype(np.uint8) * 255, k, iterations=1)
+                            full_mask = np.zeros((h, w), dtype=np.uint8)
+                            full_mask[y1:y2, x1:x2] = dilated
+                            cleaned = cv2.inpaint(img, full_mask, 2, cv2.INPAINT_TELEA)
+                            _, buf = cv2.imencode(".jpg", cleaned, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                            data = buf.tobytes()
+                except Exception:
+                    pass
                 return data
             last = RuntimeError("empty image")
         except urllib.error.HTTPError as e:
