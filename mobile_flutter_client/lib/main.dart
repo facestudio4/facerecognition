@@ -4260,6 +4260,76 @@ class BackendApi {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> friendsZoneOverview() async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http.post(
+      Uri.parse('$_base/api/mobile/friends/zone-overview'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({}),
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> vibeMatch(String friend) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http.post(
+      Uri.parse('$_base/api/mobile/friends/vibe-match'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'friend': friend}),
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> duoGenerate(String friend, String scenario) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http.post(
+      Uri.parse('$_base/api/mobile/friends/duo-generate'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'friend': friend, 'scenario': scenario}),
+    ).timeout(const Duration(seconds: 90));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> faceMorph(String friend) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http.post(
+      Uri.parse('$_base/api/mobile/friends/face-morph'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'friend': friend}),
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> quickAddEnrolled(String enrolledName) async {
+    final ok = await ensureToken();
+    if (!ok) return {'ok': false, 'error': 'Token unavailable'};
+    final res = await http.post(
+      Uri.parse('$_base/api/mobile/friends/quick-add-enrolled'),
+      headers: {
+        'Authorization': 'Bearer $_token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'enrolled_name': enrolledName}),
+    ).timeout(_kNetworkTimeout);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // --- Social: follow graph + direct messages ---
   Future<Map<String, dynamic>> _socialPost(
       String path, Map<String, dynamic> body) async {
@@ -12708,10 +12778,10 @@ class _MobileHomePageState extends State<MobileHomePage> {
           page: ApiKeysPage(),
         ),
         const _MenuItem(
-          title: 'Friends',
-          subtitle: 'Find contacts who are on Face Studio',
-          colorValue: 0xFF577590,
-          icon: Icons.group_outlined,
+          title: 'Friends Zone ✨',
+          subtitle: 'AI Duo Studio, Vibe Matcher, Streaks & Lounge',
+          colorValue: 0xFFFF5E7E,
+          icon: Icons.auto_awesome,
           page: FriendsPage(),
         ),
       ];
@@ -12725,10 +12795,10 @@ class _MobileHomePageState extends State<MobileHomePage> {
           page: ProfilePage(),
         ),
         const _MenuItem(
-          title: 'Friends',
-          subtitle: 'Find contacts who are on Face Studio',
-          colorValue: 0xFF577590,
-          icon: Icons.group_outlined,
+          title: 'Friends Zone ✨',
+          subtitle: 'AI Duo Studio, Vibe Matcher, Streaks & Lounge',
+          colorValue: 0xFFFF5E7E,
+          icon: Icons.auto_awesome,
           page: FriendsPage(),
         ),
         const _MenuItem(
@@ -17895,27 +17965,47 @@ class FriendsPage extends StatefulWidget {
 
 class _FriendsPageState extends State<FriendsPage>
     with SingleTickerProviderStateMixin {
-  // Must match the backend's _CONTACT_PEPPER and normalization exactly.
   static const String _pepper = 'facestudio_contacts_v1';
   late TabController _tabs;
+
+  Map<String, dynamic> _overview = const {};
+  List<Map<String, dynamic>> _friends = const [];
+  List<Map<String, dynamic>> _enrolledSuggestions = const [];
+  List<Map<String, dynamic>> _duoPresets = const [];
   List<Map<String, dynamic>> _suggestions = const [];
   List<Map<String, dynamic>> _following = const [];
   List<Map<String, dynamic>> _followers = const [];
   List<Map<String, dynamic>> _inbox = const [];
+
   int _followingCount = 0;
   int _followersCount = 0;
+  int _totalStreaks = 0;
+  bool _loading = true;
   bool _busy = false;
   String _discoverStatus = '';
   String _me = '';
+
+  // Duo studio state
+  String _activeScenario = 'cyberpunk';
+  String? _selectedFriend;
+  String? _duoResultB64;
+  bool _duoGenerating = false;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 4, vsync: this);
-    _loadMe();
-    _loadFollowing();
-    _loadFollowers();
-    _loadInbox();
+    _loadAll();
+  }
+
+  Future<void> _loadAll() async {
+    await _loadMe();
+    await Future.wait([
+      _loadOverview(),
+      _loadFollowing(),
+      _loadFollowers(),
+      _loadInbox(),
+    ]);
   }
 
   Future<void> _loadMe() async {
@@ -17946,6 +18036,26 @@ class _FriendsPageState extends State<FriendsPage>
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
 
+  Future<void> _loadOverview() async {
+    setState(() => _loading = true);
+    try {
+      final r = await buildBackendApi().friendsZoneOverview();
+      if (!mounted) return;
+      final d = (r['data'] as Map?) ?? const {};
+      setState(() {
+        _overview = Map<String, dynamic>.from(d);
+        _friends = _rows(r, 'friends');
+        _enrolledSuggestions = _rows(r, 'enrolled_suggestions');
+        _duoPresets = _rows(r, 'duo_presets');
+        _totalStreaks = int.tryParse((d['total_streaks'] ?? 0).toString()) ?? 0;
+        if (_friends.isNotEmpty && _selectedFriend == null) {
+          _selectedFriend = _friends.first['username']?.toString();
+        }
+      });
+    } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
   Future<void> _loadFollowing() async {
     try {
       final r = await buildBackendApi().listFollowing();
@@ -17973,6 +18083,30 @@ class _FriendsPageState extends State<FriendsPage>
       if (!mounted) return;
       setState(() => _inbox = _rows(r, 'threads'));
     } catch (_) {}
+  }
+
+  Future<void> _quickConnect(String enrolledName) async {
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Connecting with $enrolledName…')));
+      final r = await buildBackendApi().quickAddEnrolled(enrolledName);
+      if (!mounted) return;
+      if (r['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('✨ $enrolledName added to your Friends Zone! Streak started! 🔥'),
+          backgroundColor: const Color(0xFF2E8B57),
+        ));
+        await _loadOverview();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(r['error']?.toString() ?? 'Failed to connect')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
   }
 
   Future<void> _discover() async {
@@ -18017,7 +18151,7 @@ class _FriendsPageState extends State<FriendsPage>
       setState(() => _suggestions = sg);
       if (sg.isEmpty && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('None of your contacts are on Face Studio yet.')));
+            content: Text('None of your phone contacts are on Face Studio yet.')));
       }
     } catch (e) {
       if (mounted) {
@@ -18037,7 +18171,7 @@ class _FriendsPageState extends State<FriendsPage>
   Future<void> _toggleFollow(Map<String, dynamic> u) async {
     final name = (u['username'] ?? '').toString();
     final wasFollowing = u['following'] == true;
-    setState(() => u['following'] = !wasFollowing); // optimistic
+    setState(() => u['following'] = !wasFollowing);
     try {
       if (wasFollowing) {
         await buildBackendApi().unfollowUser(name);
@@ -18057,329 +18191,6 @@ class _FriendsPageState extends State<FriendsPage>
         .then((_) => _loadInbox());
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _kFsBg,
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Colors.transparent,
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF13213A), Color(0xFF1A2C49)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
-        title: const Text('People',
-            style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(46),
-          child: TabBar(
-            controller: _tabs,
-            isScrollable: true,
-            indicator: BoxDecoration(
-              borderRadius: BorderRadius.circular(30),
-              gradient: _kFsGradient,
-            ),
-            indicatorSize: TabBarIndicatorSize.tab,
-            indicatorPadding:
-                const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
-            dividerColor: Colors.transparent,
-            labelColor: Colors.white,
-            unselectedLabelColor: const Color(0xFF8AA0C2),
-            labelStyle:
-                const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
-            tabs: [
-              const Tab(text: 'Discover'),
-              Tab(text: 'Following $_followingCount'),
-              Tab(text: 'Followers $_followersCount'),
-              const Tab(text: 'Chats'),
-            ],
-          ),
-        ),
-      ),
-      body: Column(
-        children: [
-          _profileHeader(),
-          Expanded(
-            child: TabBarView(
-              controller: _tabs,
-              children: [
-                _discoverTab(),
-                _peopleTab(_following, 'You are not following anyone yet.',
-                    Icons.person_add_alt_1),
-                _peopleTab(_followers, 'No followers yet.', Icons.group_outlined),
-                _messagesTab(),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _profileHeader() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: const LinearGradient(
-          colors: [Color(0xFF1B2C49), Color(0xFF15243E)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(color: const Color(0xFF26395A)),
-      ),
-      child: Row(
-        children: [
-          _GradientAvatar(_me.isEmpty ? '?' : _me, size: 56),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_me.isEmpty ? 'You' : _me,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700)),
-                const SizedBox(height: 2),
-                const Text('Your network',
-                    style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
-              ],
-            ),
-          ),
-          _statBlock('$_followingCount', 'Following'),
-          const SizedBox(width: 6),
-          Container(width: 1, height: 32, color: const Color(0xFF2A3D5E)),
-          const SizedBox(width: 6),
-          _statBlock('$_followersCount', 'Followers'),
-        ],
-      ),
-    );
-  }
-
-  Widget _statBlock(String value, String label) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(value,
-            style: const TextStyle(
-                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
-        Text(label,
-            style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 11)),
-      ],
-    );
-  }
-
-  Widget _discoverTab() {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
-      children: [
-        // Inviting gradient hero to find friends.
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            gradient: const LinearGradient(
-              colors: [Color(0xFF3B7BF6), Color(0xFF9B5BFF), Color(0xFFEF4E9B)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.18),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.group_add,
-                        color: Colors.white, size: 22),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Find your friends',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 17,
-                                fontWeight: FontWeight.w800)),
-                        SizedBox(height: 2),
-                        Text('See who from your contacts is already here',
-                            style: TextStyle(
-                                color: Color(0xFFEAF1FF), fontSize: 12.5)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF1A2A45),
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(24)),
-                  ),
-                  onPressed: _busy ? null : _discover,
-                  icon: _busy
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Color(0xFF1A2A45)))
-                      : const Icon(Icons.contacts_rounded, size: 18),
-                  label: Text(_busy
-                      ? (_discoverStatus.isEmpty ? 'Working…' : _discoverStatus)
-                      : 'Find contacts'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Row(
-                children: [
-                  Icon(Icons.lock_outline, size: 12, color: Color(0xFFE0E8FF)),
-                  SizedBox(width: 5),
-                  Expanded(
-                    child: Text(
-                      'Private: only a scrambled form of your contacts is sent.',
-                      style: TextStyle(fontSize: 10.5, color: Color(0xFFE0E8FF)),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        if (_suggestions.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 30),
-            child: _emptyState(Icons.travel_explore, 'Discover people you know',
-                'Tap "Find contacts" to see who from your phone is on Face Studio.'),
-          )
-        else ...[
-          Row(
-            children: [
-              const Text('People you may know',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15)),
-              const Spacer(),
-              Text('${_suggestions.length}',
-                  style: const TextStyle(color: Color(0xFF8AA0C2))),
-            ],
-          ),
-          const SizedBox(height: 10),
-          ..._suggestions.map(_userTile),
-        ],
-      ],
-    );
-  }
-
-  Widget _peopleTab(
-      List<Map<String, dynamic>> people, String emptyMsg, IconData icon) {
-    return RefreshIndicator(
-      onRefresh: () async {
-        await _loadFollowing();
-        await _loadFollowers();
-      },
-      child: people.isEmpty
-          ? ListView(children: [
-              const SizedBox(height: 60),
-              _emptyState(icon, emptyMsg,
-                  'Pull down to refresh, or find people in Discover.'),
-            ])
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-              children: people.map(_userTile).toList()),
-    );
-  }
-
-  Widget _userTile(Map<String, dynamic> u) {
-    final name = (u['username'] ?? '-').toString();
-    final following = u['following'] == true;
-    final followsYou = u['follows_you'] == true;
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: () => _showProfileSheet(u),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: _kFsCard,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFF22344F)),
-        ),
-        child: Row(
-        children: [
-          _GradientAvatar(name, size: 48, ring: !following),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(name,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600)),
-                const SizedBox(height: 2),
-                Text(followsYou ? 'Follows you' : 'On Face Studio',
-                    style: TextStyle(
-                        color: followsYou
-                            ? const Color(0xFF7EE3B4)
-                            : const Color(0xFF8AA0C2),
-                        fontSize: 12)),
-              ],
-            ),
-          ),
-          IconButton(
-            tooltip: 'Message',
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.chat_bubble_outline_rounded,
-                color: Color(0xFF9FC3FF), size: 21),
-            onPressed: () => _openChat(name),
-          ),
-          const SizedBox(width: 2),
-          following
-              ? OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFB9C9E4),
-                    side: const BorderSide(color: Color(0xFF3A4E6E)),
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20)),
-                  ),
-                  onPressed: () => _toggleFollow(u),
-                  child: const Text('Following'))
-              : _gradientButton(
-                  label: 'Follow',
-                  compact: true,
-                  onTap: () => _toggleFollow(u),
-                ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // Tap a person -> a quick profile sheet to Follow / Message / Call them.
   void _startCallTo(String username, bool audioOnly) {
     Navigator.of(context).maybePop();
     () async {
@@ -18399,108 +18210,153 @@ class _FriendsPageState extends State<FriendsPage>
     }();
   }
 
-  void _showProfileSheet(Map<String, dynamic> u) {
-    final name = (u['username'] ?? '-').toString();
-    final followsYou = u['follows_you'] == true;
-    showModalBottomSheet<void>(
+  // --------------------------------------------------------------------------
+  // Friends Zone Modals: Vibe Matcher, Duo Studio, Face Morph
+  // --------------------------------------------------------------------------
+
+  Future<void> _openVibeMatch(String friend) async {
+    showDialog<void>(
       context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          final following = u['following'] == true;
-          return Container(
-            decoration: const BoxDecoration(
-              color: Color(0xFF13213A),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      barrierDismissible: true,
+      builder: (ctx) => FutureBuilder<Map<String, dynamic>>(
+        future: buildBackendApi().vibeMatch(friend),
+        builder: (ctx, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const AlertDialog(
+              backgroundColor: Color(0xFF13213A),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(height: 16),
+                  CircularProgressIndicator(color: Color(0xFFFF5E7E)),
+                  SizedBox(height: 20),
+                  Text('Analyzing Facial Resonance…',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  SizedBox(height: 8),
+                  Text('Calculating embedding harmonics',
+                      style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+                  SizedBox(height: 16),
+                ],
+              ),
+            );
+          }
+          final data = (snapshot.data?['data'] as Map?) ?? const {};
+          final score = int.tryParse((data['similarity_score'] ?? 72).toString()) ?? 72;
+          final badge = (data['vibe_badge'] ?? 'Dynamic Duo ⚡').toString();
+          final title = (data['vibe_title'] ?? 'Complementary Resonance').toString();
+          final desc = (data['vibe_desc'] ?? 'Great energy together!').toString();
+          final streak = int.tryParse((data['streak'] ?? 1).toString()) ?? 1;
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF13213A),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+              side: const BorderSide(color: Color(0xFFFF5E7E), width: 1.5),
             ),
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-            child: Column(
+            contentPadding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+            content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 18),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                   decoration: BoxDecoration(
-                      color: const Color(0xFF2E4060),
-                      borderRadius: BorderRadius.circular(2)),
+                    color: const Color(0xFFFF5E7E).withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(badge,
+                      style: const TextStyle(
+                          color: Color(0xFFFF7E9E),
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14)),
                 ),
-                _GradientAvatar(name, size: 92),
-                const SizedBox(height: 14),
-                Text(name,
+                const SizedBox(height: 18),
+                Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    SizedBox(
+                      width: 120,
+                      height: 120,
+                      child: CircularProgressIndicator(
+                        value: score / 100.0,
+                        strokeWidth: 9,
+                        backgroundColor: const Color(0xFF22344F),
+                        valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFFF5E7E)),
+                      ),
+                    ),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('$score%',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 32,
+                                fontWeight: FontWeight.w900)),
+                        const Text('VIBE MATCH',
+                            style: TextStyle(
+                                color: Color(0xFF8AA0C2),
+                                fontSize: 9.5,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700)),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text(title,
                     style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800)),
-                const SizedBox(height: 4),
-                Text(followsYou ? 'Follows you' : 'On Face Studio',
-                    style: TextStyle(
-                        color: followsYou
-                            ? const Color(0xFF7EE3B4)
-                            : const Color(0xFF8AA0C2),
-                        fontSize: 13)),
-                const SizedBox(height: 22),
+                        color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                Text(desc,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Color(0xFFB0C4DE), fontSize: 13, height: 1.35)),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1B2C49),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFF26395A)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.local_fire_department_rounded,
+                          color: Color(0xFFFF7043), size: 18),
+                      const SizedBox(width: 6),
+                      Text('Friendship Streak: $streak Days!',
+                          style: const TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12.5)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 18),
                 Row(
                   children: [
                     Expanded(
-                      child: following
-                          ? OutlinedButton.icon(
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFFB9C9E4),
-                                side: const BorderSide(color: Color(0xFF3A4E6E)),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 13),
-                              ),
-                              onPressed: () async {
-                                await _toggleFollow(u);
-                                setSheet(() {});
-                              },
-                              icon: const Icon(Icons.check, size: 18),
-                              label: const Text('Following'))
-                          : FilledButton.icon(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: const Color(0xFF4F8BFF),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 13),
-                              ),
-                              onPressed: () async {
-                                await _toggleFollow(u);
-                                setSheet(() {});
-                              },
-                              icon: const Icon(Icons.person_add_alt_1, size: 18),
-                              label: const Text('Follow')),
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Color(0xFF3A4E6E)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        ),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('Close'),
+                      ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: FilledButton.icon(
                         style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFF22344F),
-                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          backgroundColor: const Color(0xFFFF5E7E),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                         ),
                         onPressed: () {
                           Navigator.of(ctx).pop();
-                          _openChat(name);
+                          _openDuoStudio(friend);
                         },
-                        icon: const Icon(Icons.chat_bubble_rounded, size: 18),
-                        label: const Text('Message'),
+                        icon: const Icon(Icons.theater_comedy_rounded, size: 16),
+                        label: const Text('Duo AI'),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _sheetCallButton(
-                          Icons.call_rounded, 'Voice call',
-                          () => _startCallTo(name, true)),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _sheetCallButton(
-                          Icons.videocam_rounded, 'Video call',
-                          () => _startCallTo(name, false)),
                     ),
                   ],
                 ),
@@ -18512,30 +18368,898 @@ class _FriendsPageState extends State<FriendsPage>
     );
   }
 
-  Widget _sheetCallButton(IconData icon, String label, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 13),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          gradient: const LinearGradient(
-            colors: [Color(0xFF2BB673), Color(0xFF1E8E5A)],
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 18),
-            const SizedBox(width: 8),
-            Text(label,
-                style: const TextStyle(
-                    color: Colors.white, fontWeight: FontWeight.w700)),
-          ],
-        ),
+  Future<void> _openFaceMorph(String friend) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => FutureBuilder<Map<String, dynamic>>(
+        future: buildBackendApi().faceMorph(friend),
+        builder: (ctx, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const AlertDialog(
+              backgroundColor: Color(0xFF13213A),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(height: 16),
+                  CircularProgressIndicator(color: Color(0xFF9B5BFF)),
+                  SizedBox(height: 20),
+                  Text('Fusing Facial Geometry 50/50…',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  SizedBox(height: 8),
+                  Text('Landmark cross-dissolve & color harmony',
+                      style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+                  SizedBox(height: 16),
+                ],
+              ),
+            );
+          }
+          final res = snapshot.data ?? const {};
+          if (res['ok'] != true) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF13213A),
+              title: const Text('Face Morph', style: TextStyle(color: Colors.white)),
+              content: Text(res['error']?.toString() ?? 'Failed to morph faces.',
+                  style: const TextStyle(color: Color(0xFF8AA0C2))),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text('OK', style: TextStyle(color: Colors.white)))
+              ],
+            );
+          }
+
+          final imgB64 = (res['data'] as Map?)?['image_b64']?.toString() ?? '';
+          final bytes = imgB64.isNotEmpty ? base64Decode(imgB64) : null;
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF13213A),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+              side: const BorderSide(color: Color(0xFF9B5BFF), width: 1.5),
+            ),
+            contentPadding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.lens_blur_rounded, color: Color(0xFFB57AFF), size: 20),
+                    const SizedBox(width: 8),
+                    Text('Face Fusion: $_me & $friend',
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                const Text('What if you two were siblings?',
+                    style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+                const SizedBox(height: 16),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: bytes != null
+                      ? Image.memory(bytes, width: 220, height: 220, fit: BoxFit.cover)
+                      : Container(
+                          width: 220,
+                          height: 220,
+                          color: const Color(0xFF22344F),
+                          child: const Icon(Icons.person, color: Colors.white, size: 60)),
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF9B5BFF),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Morph portrait saved! ✨')));
+                    },
+                    icon: const Icon(Icons.check, size: 18),
+                    label: const Text('Awesome!'),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
+
+  void _openDuoStudio([String? preselectedFriend]) {
+    if (preselectedFriend != null) {
+      setState(() => _selectedFriend = preselectedFriend);
+    }
+    _tabs.animateTo(1);
+  }
+
+  Future<void> _generateDuoAvatar() async {
+    final friend = _selectedFriend;
+    if (friend == null || friend.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Please select a friend first.')));
+      return;
+    }
+    setState(() => _duoGenerating = true);
+    try {
+      final r = await buildBackendApi().duoGenerate(friend, _activeScenario);
+      if (!mounted) return;
+      if (r['ok'] == true) {
+        final b64 = (r['data'] as Map?)?['image_b64']?.toString();
+        setState(() => _duoResultB64 = b64);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('✨ Duo avatar generated with $friend! Streak updated! 🔥'),
+          backgroundColor: const Color(0xFF2E8B57),
+        ));
+        _loadOverview();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(r['error']?.toString() ?? 'Generation failed')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _duoGenerating = false);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Main UI Scaffold
+  // --------------------------------------------------------------------------
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _kFsBg,
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF13213A), Color(0xFF1E2D4E)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            const Text('Friends Zone ✨',
+                style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.3)),
+            const Spacer(),
+            if (_totalStreaks > 0)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                      colors: [Color(0xFFFF5E7E), Color(0xFFFF9900)]),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.local_fire_department_rounded,
+                        color: Colors.white, size: 16),
+                    const SizedBox(width: 4),
+                    Text('$_totalStreaks',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(48),
+          child: TabBar(
+            controller: _tabs,
+            isScrollable: true,
+            indicator: BoxDecoration(
+              borderRadius: BorderRadius.circular(30),
+              gradient: const LinearGradient(
+                colors: [Color(0xFFFF5E7E), Color(0xFF9B5BFF)],
+              ),
+            ),
+            indicatorSize: TabBarIndicatorSize.tab,
+            indicatorPadding:
+                const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
+            dividerColor: Colors.transparent,
+            labelColor: Colors.white,
+            unselectedLabelColor: const Color(0xFF8AA0C2),
+            labelStyle:
+                const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+            tabs: const [
+              Tab(icon: Icon(Icons.stars_rounded, size: 16), text: 'My Circle'),
+              Tab(icon: Icon(Icons.theater_comedy_rounded, size: 16), text: 'Duo Studio'),
+              Tab(icon: Icon(Icons.radar_rounded, size: 16), text: 'Radar & Discover'),
+              Tab(icon: Icon(Icons.chat_bubble_rounded, size: 16), text: 'Chats'),
+            ],
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          _profileHeader(),
+          Expanded(
+            child: TabBarView(
+              controller: _tabs,
+              children: [
+                _myCircleTab(),
+                _duoStudioTab(),
+                _radarDiscoverTab(),
+                _messagesTab(),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _profileHeader() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1B2C49), Color(0xFF15243E)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(color: const Color(0xFF26395A)),
+      ),
+      child: Row(
+        children: [
+          _GradientAvatar(_me.isEmpty ? '?' : _me, size: 50),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_me.isEmpty ? 'You' : _me,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800)),
+                const SizedBox(height: 2),
+                const Text('AI Social Lounge',
+                    style: TextStyle(color: Color(0xFFFF7E9E), fontSize: 11.5, fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ),
+          _statBlock('$_totalStreaks 🔥', 'Streaks'),
+          const SizedBox(width: 8),
+          Container(width: 1, height: 28, color: const Color(0xFF2A3D5E)),
+          const SizedBox(width: 8),
+          _statBlock('${_friends.length}', 'Friends'),
+        ],
+      ),
+    );
+  }
+
+  Widget _statBlock(String value, String label) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(value,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800)),
+        Text(label,
+            style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 10.5)),
+      ],
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 0: My Circle
+  // --------------------------------------------------------------------------
+
+  Widget _myCircleTab() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator(color: Color(0xFFFF5E7E)));
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadOverview,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 20),
+        children: [
+          // Enrolled Quick-Add Carousel
+          if (_enrolledSuggestions.isNotEmpty) ...[
+            Row(
+              children: [
+                const Icon(Icons.auto_awesome, color: Color(0xFFFF5E7E), size: 16),
+                const SizedBox(width: 6),
+                const Text('Studio Faces You Can Connect',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13.5)),
+                const Spacer(),
+                Text('${_enrolledSuggestions.length}',
+                    style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 105,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _enrolledSuggestions.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (ctx, i) {
+                  final s = _enrolledSuggestions[i];
+                  final name = s['name']?.toString() ?? '';
+                  return Container(
+                    width: 90,
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1B2C49),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFF2A3D5E)),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _GradientAvatar(name, size: 36),
+                        const SizedBox(height: 4),
+                        Text(name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 4),
+                        InkWell(
+                          onTap: () => _quickConnect(name),
+                          borderRadius: BorderRadius.circular(10),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                  colors: [Color(0xFFFF5E7E), Color(0xFF9B5BFF)]),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Text('+ Connect',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w800)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
+
+          if (_friends.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 30),
+              child: _emptyState(
+                Icons.people_outline_rounded,
+                'Your circle is empty',
+                'Connect with faces enrolled in Face Studio above, or find phone contacts in Radar!',
+              ),
+            )
+          else ...[
+            Row(
+              children: [
+                const Text('Connected Friends',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14)),
+                const Spacer(),
+                Text('${_friends.length}',
+                    style: const TextStyle(color: Color(0xFF8AA0C2))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            ..._friends.map(_friendCard),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _friendCard(Map<String, dynamic> f) {
+    final name = (f['username'] ?? '-').toString();
+    final streak = int.tryParse((f['streak'] ?? 1).toString()) ?? 1;
+    final badge = (f['vibe_badge'] ?? 'Besties ✨').toString();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _kFsCard,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFF22344F)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              _GradientAvatar(name, size: 48, ring: true),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFF5E7E).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(badge,
+                              style: const TextStyle(
+                                  color: Color(0xFFFF7E9E),
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFF7043).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text('🔥 $streak d',
+                              style: const TextStyle(
+                                  color: Color(0xFFFF8A65),
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Chat',
+                icon: const Icon(Icons.chat_bubble_outline_rounded,
+                    color: Color(0xFF9FC3FF), size: 20),
+                onPressed: () => _openChat(name),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // Quick Action Bar
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF5E7E),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () => _openDuoStudio(name),
+                  icon: const Icon(Icons.theater_comedy_rounded, size: 15),
+                  label: const Text('Duo AI', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFB9C9E4),
+                    side: const BorderSide(color: Color(0xFF3A4E6E)),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () => _openVibeMatch(name),
+                  icon: const Icon(Icons.auto_awesome, size: 15, color: Color(0xFFFF7E9E)),
+                  label: const Text('Vibe', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFB9C9E4),
+                    side: const BorderSide(color: Color(0xFF3A4E6E)),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () => _openFaceMorph(name),
+                  icon: const Icon(Icons.lens_blur_rounded, size: 15, color: Color(0xFFB57AFF)),
+                  label: const Text('Morph', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 1: Duo Studio
+  // --------------------------------------------------------------------------
+
+  Widget _duoStudioTab() {
+    final scenarios = [
+      {'key': 'cyberpunk', 'title': 'Cyberpunk Tokyo 🕶️'},
+      {'key': 'astronauts', 'title': 'Cosmic Space Station 🚀'},
+      {'key': 'royalty', 'title': 'Royal Dynasty 🏰'},
+      {'key': 'cafe', 'title': 'Cafe Besties ☕'},
+      {'key': 'superheroes', 'title': 'Superhero Partners 🦸'},
+    ];
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF3B7BF6), Color(0xFF9B5BFF), Color(0xFFFF5E7E)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.auto_awesome, color: Colors.white, size: 24),
+                  SizedBox(width: 8),
+                  Text('AI Duo Studio',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900)),
+                ],
+              ),
+              const SizedBox(height: 4),
+              const Text('Create epic 2-person adventures with real personalized faces!',
+                  style: TextStyle(color: Color(0xFFEAF1FF), fontSize: 12.5)),
+              const SizedBox(height: 14),
+
+              // Friend Picker
+              if (_friends.isEmpty)
+                const Text('Add friends in My Circle first to launch Duo Studio!',
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700))
+              else
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _selectedFriend,
+                      isExpanded: true,
+                      dropdownColor: const Color(0xFF13213A),
+                      icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                      items: _friends.map((f) {
+                        final nm = f['username']?.toString() ?? '';
+                        return DropdownMenuItem<String>(
+                          value: nm,
+                          child: Text('With Friend: $nm',
+                              style: const TextStyle(
+                                  color: Colors.white, fontWeight: FontWeight.w700)),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) setState(() => _selectedFriend = val);
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+
+        const Text('Choose Adventure Scenario',
+            style: TextStyle(
+                color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
+        const SizedBox(height: 10),
+
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: scenarios.map((s) {
+            final active = _activeScenario == s['key'];
+            return ChoiceChip(
+              label: Text(s['title']!),
+              selected: active,
+              onSelected: (val) {
+                if (val) setState(() => _activeScenario = s['key']!);
+              },
+              selectedColor: const Color(0xFFFF5E7E),
+              backgroundColor: const Color(0xFF1B2C49),
+              labelStyle: TextStyle(
+                  color: active ? Colors.white : const Color(0xFF8AA0C2),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 18),
+
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFFF5E7E),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            ),
+            onPressed: _duoGenerating ? null : _generateDuoAvatar,
+            icon: _duoGenerating
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.auto_awesome, size: 20),
+            label: Text(_duoGenerating
+                ? 'Synthesizing Duo Scene…'
+                : '✨ Generate Duo Photo With ${_selectedFriend ?? "Friend"}'),
+          ),
+        ),
+
+        // Generated Result Showcase
+        if (_duoResultB64 != null) ...[
+          const SizedBox(height: 22),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1B2C49),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFFF5E7E), width: 1.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.celebration_rounded, color: Color(0xFFFF7043), size: 18),
+                    const SizedBox(width: 8),
+                    Text('Duo Portrait: $_me & $_selectedFriend',
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Image.memory(
+                    base64Decode(_duoResultB64!),
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF22344F),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        ),
+                        onPressed: () {
+                          if (_selectedFriend != null) _openChat(_selectedFriend!);
+                        },
+                        icon: const Icon(Icons.send_rounded, size: 16),
+                        label: const Text('Send in Chat'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF2E8B57),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        ),
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Saved to Gallery! ✨')));
+                        },
+                        icon: const Icon(Icons.download_rounded, size: 16),
+                        label: const Text('Save HD'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 2: Radar & Discover
+  // --------------------------------------------------------------------------
+
+  Widget _radarDiscoverTab() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF1B2C49), Color(0xFF13213A)],
+            ),
+            border: Border.all(color: const Color(0xFF2E4060)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF3B7BF6).withOpacity(0.18),
+                ),
+                child: const Icon(Icons.radar_rounded, color: Color(0xFF4F8BFF), size: 34),
+              ),
+              const SizedBox(height: 12),
+              const Text('Discovery Radar',
+                  style: TextStyle(
+                      color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              const Text('Sync phone contacts or connect enrolled studio faces',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF8AA0C2), fontSize: 12)),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF13213A),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: _busy ? null : _discover,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.contacts_rounded, size: 18),
+                  label: Text(_busy
+                      ? (_discoverStatus.isEmpty ? 'Searching…' : _discoverStatus)
+                      : 'Scan Contacts'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+
+        if (_suggestions.isNotEmpty) ...[
+          Row(
+            children: [
+              const Text('Contacts on Face Studio',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
+              const Spacer(),
+              Text('${_suggestions.length}',
+                  style: const TextStyle(color: Color(0xFF8AA0C2))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ..._suggestions.map(_userTile),
+        ] else
+          Padding(
+            padding: const EdgeInsets.only(top: 30),
+            child: _emptyState(
+              Icons.travel_explore_rounded,
+              'Scan to find friends',
+              'Tap "Scan Contacts" to see who from your phone is on Face Studio.',
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _userTile(Map<String, dynamic> u) {
+    final name = (u['username'] ?? '-').toString();
+    final following = u['following'] == true;
+    final followsYou = u['follows_you'] == true;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: _kFsCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF22344F)),
+      ),
+      child: Row(
+        children: [
+          _GradientAvatar(name, size: 44, ring: !following),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(followsYou ? 'Follows you' : 'On Face Studio',
+                    style: TextStyle(
+                        color: followsYou
+                            ? const Color(0xFF7EE3B4)
+                            : const Color(0xFF8AA0C2),
+                        fontSize: 11.5)),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Message',
+            icon: const Icon(Icons.chat_bubble_outline_rounded,
+                color: Color(0xFF9FC3FF), size: 19),
+            onPressed: () => _openChat(name),
+          ),
+          following
+              ? OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFB9C9E4),
+                    side: const BorderSide(color: Color(0xFF3A4E6E)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                  ),
+                  onPressed: () => _toggleFollow(u),
+                  child: const Text('Following', style: TextStyle(fontSize: 12)))
+              : FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF5E7E),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                  ),
+                  onPressed: () => _toggleFollow(u),
+                  child: const Text('Follow', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                ),
+        ],
+      ),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Tab 3: Chats
+  // --------------------------------------------------------------------------
 
   Widget _messagesTab() {
     return RefreshIndicator(
@@ -18543,8 +19267,8 @@ class _FriendsPageState extends State<FriendsPage>
       child: _inbox.isEmpty
           ? ListView(children: [
               const SizedBox(height: 60),
-              _emptyState(Icons.forum_outlined, 'No chats yet',
-                  'Follow someone and tap the chat icon to start a conversation.'),
+              _emptyState(Icons.forum_outlined, 'No conversations yet',
+                  'Tap the chat icon on any friend in My Circle to start talking!'),
             ])
           : ListView(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 16),
@@ -18559,21 +19283,16 @@ class _FriendsPageState extends State<FriendsPage>
                   onTap: () => _openChat(name),
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 8),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
-                      color: hasUnread
-                          ? const Color(0xFF1A2E4E)
-                          : _kFsCard,
+                      color: hasUnread ? const Color(0xFF1A2E4E) : _kFsCard,
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                          color: hasUnread
-                              ? const Color(0xFF2E5B8F)
-                              : const Color(0xFF22344F)),
+                          color: hasUnread ? const Color(0xFFFF5E7E) : const Color(0xFF22344F)),
                     ),
                     child: Row(
                       children: [
-                        _GradientAvatar(name, size: 50, ring: hasUnread),
+                        _GradientAvatar(name, size: 48, ring: hasUnread),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Column(
@@ -18583,28 +19302,24 @@ class _FriendsPageState extends State<FriendsPage>
                                   style: TextStyle(
                                       color: Colors.white,
                                       fontSize: 15,
-                                      fontWeight: hasUnread
-                                          ? FontWeight.w700
-                                          : FontWeight.w600)),
+                                      fontWeight: hasUnread ? FontWeight.w800 : FontWeight.w600)),
                               const SizedBox(height: 3),
                               Text('${mine ? 'You: ' : ''}$last',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
-                                      color: hasUnread
-                                          ? const Color(0xFFD6E2F5)
-                                          : const Color(0xFF8AA0C2),
-                                      fontSize: 13)),
+                                      color: hasUnread ? const Color(0xFFD6E2F5) : const Color(0xFF8AA0C2),
+                                      fontSize: 12.5)),
                             ],
                           ),
                         ),
                         if (hasUnread)
                           Container(
                             margin: const EdgeInsets.only(left: 8),
-                            padding: const EdgeInsets.all(7),
+                            padding: const EdgeInsets.all(6),
                             decoration: const BoxDecoration(
-                                shape: BoxShape.circle, gradient: _kFsGradient),
-                            constraints: const BoxConstraints(minWidth: 24),
+                                shape: BoxShape.circle, color: Color(0xFFFF5E7E)),
+                            constraints: const BoxConstraints(minWidth: 22),
                             child: Text('$unread',
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
@@ -18616,92 +19331,40 @@ class _FriendsPageState extends State<FriendsPage>
                     ),
                   ),
                 );
-              }).toList()),
-    );
-  }
-
-  // A filled gradient button (pill). Compact = small inline (Follow); else wide.
-  Widget _gradientButton({
-    required String label,
-    required VoidCallback? onTap,
-    IconData? icon,
-    bool busy = false,
-    bool compact = false,
-  }) {
-    return Opacity(
-      opacity: onTap == null && !busy ? 0.6 : 1,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(26),
-          onTap: onTap,
-          child: Ink(
-            decoration: BoxDecoration(
-              gradient: _kFsGradient,
-              borderRadius: BorderRadius.circular(26),
+              }).toList(),
             ),
-            child: Container(
-              width: compact ? null : double.infinity,
-              padding: EdgeInsets.symmetric(
-                  horizontal: compact ? 18 : 16, vertical: compact ? 9 : 13),
-              child: Row(
-                mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  if (busy)
-                    const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                  else if (icon != null)
-                    Icon(icon, color: Colors.white, size: 18),
-                  if (busy || icon != null) const SizedBox(width: 8),
-                  Text(label,
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: compact ? 13 : 14.5)),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 
   Widget _emptyState(IconData icon, String title, String subtitle) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 30),
+        padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
                   colors: [
-                    const Color(0xFF4F8BFF).withOpacity(0.18),
-                    const Color(0xFFFF5BA8).withOpacity(0.18),
+                    const Color(0xFFFF5E7E).withOpacity(0.18),
+                    const Color(0xFF9B5BFF).withOpacity(0.18),
                   ],
                 ),
               ),
-              child: Icon(icon, size: 38, color: const Color(0xFFAFC4E6)),
+              child: Icon(icon, size: 36, color: const Color(0xFFFF7E9E)),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             Text(title,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700)),
+                    color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
             Text(subtitle,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 13)),
+                style: const TextStyle(color: Color(0xFF8AA0C2), fontSize: 12.5)),
           ],
         ),
       ),

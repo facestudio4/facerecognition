@@ -868,8 +868,22 @@ class Phase3ServiceHub:
 
     def _connect(self):
         db_p = os.path.abspath(self.db_path).replace('\\', '/')
-        conn = sqlite3.connect(db_p, factory=AutoClosingConnection)
-        conn.row_factory = sqlite3.Row
+        try:
+            conn = sqlite3.connect(db_p, factory=AutoClosingConnection)
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1")
+        except sqlite3.OperationalError:
+            import tempfile, shutil
+            safe_dir = os.path.join(tempfile.gettempdir(), 'facestudio_runtime')
+            os.makedirs(safe_dir, exist_ok=True)
+            safe_db = os.path.join(safe_dir, os.path.basename(self.db_path))
+            if os.path.exists(self.db_path) and (not os.path.exists(safe_db) or os.path.getmtime(self.db_path) > os.path.getmtime(safe_db)):
+                try:
+                    shutil.copy2(self.db_path, safe_db)
+                except Exception:
+                    pass
+            conn = sqlite3.connect(safe_db, factory=AutoClosingConnection)
+            conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception:
@@ -3809,32 +3823,39 @@ class Phase3ServiceHub:
         cv2.fillConvexPoly(mask, hull, 255)
         return mask
 
-    def face_swap(self, target_bgr, source_bgr):
-        """Align the source face onto the target via YuNet landmarks,
-        apply anatomical inner-face masking to strictly prevent room/background bleed,
-        harmonize lighting and skin tone via LAB illumination transfer,
-        and blend seamlessly with artifact validation."""
+    def _detect_all_face_lms(self, bgr, det=None):
+        """Return list of (box, lms) for the primary faces in image, sorted left-to-right."""
         from frontend import facercognition as legacy
-        # 1. Clean watermark from target scene
-        target_bgr = self.clean_pollinations_watermark(target_bgr)
+        h, w = bgr.shape[:2]
+        if det is None:
+            det = legacy._create_yunet(w, h)
+        else:
+            det.setInputSize((w, h))
+        _, faces = det.detect(bgr)
+        if faces is None or len(faces) == 0:
+            return []
+        valid = []
+        for f in faces:
+            if float(f[14]) >= 0.45 and float(f[2]) >= 28 and float(f[3]) >= 28:
+                box = f[:4].astype(float)
+                lms = f[4:14].reshape(5, 2).astype("float32")
+                area = float(f[2]) * float(f[3])
+                valid.append((box, lms, area))
+        if not valid:
+            return []
+        # Sort by area descending to isolate the 2 largest character faces (filters out background posters/lamps)
+        valid.sort(key=lambda item: item[2], reverse=True)
+        primary = valid[:2]
+        # Sort the primary characters left-to-right by horizontal coordinate
+        primary.sort(key=lambda item: item[0][0])
+        return [(item[0], item[1]) for item in primary]
 
-        # Cap working size so memory/CPU stay modest on the free tier.
-        if max(target_bgr.shape[:2]) > 768:
-            sc = 768.0 / max(target_bgr.shape[:2])
-            target_bgr = cv2.resize(
-                target_bgr, (int(target_bgr.shape[1] * sc),
-                             int(target_bgr.shape[0] * sc)))
-        if max(source_bgr.shape[:2]) > 640:
-            sc = 640.0 / max(source_bgr.shape[:2])
-            source_bgr = cv2.resize(
-                source_bgr, (int(source_bgr.shape[1] * sc),
-                             int(source_bgr.shape[0] * sc)))
-        det = legacy._create_yunet(target_bgr.shape[1], target_bgr.shape[0])
-        t = self._detect_face_lms(target_bgr, det)
+    def _swap_single_face_at(self, target_bgr, tbox, tlms, source_bgr, det=None):
+        """Core high-fidelity face swap of source_bgr onto target_bgr at the given landmarks."""
+        from frontend import facercognition as legacy
         s = self._detect_face_lms(source_bgr, det)
-        if t is None or s is None:
+        if s is None:
             return target_bgr
-        tbox, tlms = t
         sbox, slms = s
         M, _ = cv2.estimateAffinePartial2D(slms, tlms, method=cv2.LMEDS)
         if M is None:
@@ -3843,19 +3864,14 @@ class Phase3ServiceHub:
         warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_CUBIC,
                                 borderMode=cv2.BORDER_REFLECT)
 
-        # Source face geometry & anatomical mask: prevents ANY room background / wall tiles
-        # from the source photo from ever leaking into the target while enclosing glasses.
         s_eyed = float(np.linalg.norm(slms[0] - slms[1])) or float(max(sbox[2], 20))
         src_mask = self._build_anatomical_mask(source_bgr.shape, slms, s_eyed)
         warped_src_mask = cv2.warpAffine(src_mask, M, (ww, hh), flags=cv2.INTER_NEAREST,
                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-        # Target face geometry & anatomical mask: matches target face boundaries
-        # including temples, cheeks, and chin without touching hair or background.
         eye_d = float(np.linalg.norm(tlms[0] - tlms[1])) or float(max(tbox[2], 24))
         tgt_mask = self._build_anatomical_mask(target_bgr.shape, tlms, eye_d)
 
-        # Intersect masks so only clean source facial pixels inside the target face are kept.
         combined_mask = cv2.bitwise_and(tgt_mask, warped_src_mask)
         kernel_size = max(3, int(eye_d * 0.08) | 1)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -3865,12 +3881,9 @@ class Phase3ServiceHub:
             sel = combined_mask > 0
             eroded_mask = combined_mask
 
-        # Multi-band illumination and color harmonization in LAB space:
         if int(sel.sum()) > 40:
             w_lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype("float32")
             t_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB).astype("float32")
-
-            # Match skin color channels (A and B)
             for c in [1, 2]:
                 wch = w_lab[:, :, c][sel]
                 tch = t_lab[:, :, c][sel]
@@ -3878,25 +3891,18 @@ class Phase3ServiceHub:
                 tm, ts = float(tch.mean()), float(tch.std()) + 1e-3
                 w_lab[:, :, c] = np.clip((w_lab[:, :, c] - wm) * (ts / ws) + tm, 0, 255)
 
-            # High-frequency illumination transfer for L (luminance):
-            # Target provides the ambient scene lighting and shadows; source provides identity features.
             sigma = max(3.0, eye_d * 0.22)
             t_low = cv2.GaussianBlur(t_lab[:, :, 0], (0, 0), sigma)
             w_low = cv2.GaussianBlur(w_lab[:, :, 0], (0, 0), sigma)
             w_high = w_lab[:, :, 0] - w_low
-
             w_lab[:, :, 0] = np.clip(t_low + 0.85 * w_high, 0, 255)
             warped = cv2.cvtColor(w_lab.astype("uint8"), cv2.COLOR_LAB2BGR)
 
-        # Soft feathering mask
         feather_sigma = max(3.0, eye_d * 0.12)
         feathered_mask = cv2.GaussianBlur(eroded_mask, (0, 0), feather_sigma).astype("float32") / 255.0
         fm = feathered_mask[:, :, None]
-
-        # Calculate high-quality alpha blend
         alpha_blended = (warped.astype("float32") * fm + target_bgr.astype("float32") * (1.0 - fm)).astype("uint8")
 
-        # Check Poisson seamlessClone candidate on ROI
         ys, xs = np.where(eroded_mask > 0)
         if len(xs) > 0:
             pad = int(eye_d * 1.5) + 8
@@ -3917,12 +3923,10 @@ class Phase3ServiceHub:
                           (int(mys.min()) + int(mys.max())) // 2)
                 try:
                     clone_candidate = cv2.seamlessClone(sub_w, sub_t, sub_m, center, cv2.NORMAL_CLONE)
-                    # Discoloration check: compare mean luminance inside face
                     clone_face = clone_candidate[sub_m > 200]
                     target_face = sub_t[sub_m > 200]
                     if len(clone_face) > 20:
                         l_diff = abs(float(clone_face.mean()) - float(target_face.mean()))
-                        # If clone produces excessive discoloration (e.g. gray/black mud), reject it
                         if l_diff < 18.0:
                             out = target_bgr.copy()
                             out[y0:y1 + 1, x0:x1 + 1] = clone_candidate
@@ -3930,8 +3934,56 @@ class Phase3ServiceHub:
                 except Exception:
                     pass
 
-        # Return the artifact-free feathered illumination blend
         return alpha_blended
+
+    def face_swap(self, target_bgr, source_bgr):
+        """Align the source face onto the target via YuNet landmarks,
+        apply anatomical inner-face masking to strictly prevent room/background bleed,
+        harmonize lighting and skin tone via LAB illumination transfer,
+        and blend seamlessly with artifact validation."""
+        from frontend import facercognition as legacy
+        target_bgr = self.clean_pollinations_watermark(target_bgr)
+        if max(target_bgr.shape[:2]) > 768:
+            sc = 768.0 / max(target_bgr.shape[:2])
+            target_bgr = cv2.resize(
+                target_bgr, (int(target_bgr.shape[1] * sc), int(target_bgr.shape[0] * sc)))
+        if max(source_bgr.shape[:2]) > 640:
+            sc = 640.0 / max(source_bgr.shape[:2])
+            source_bgr = cv2.resize(
+                source_bgr, (int(source_bgr.shape[1] * sc), int(source_bgr.shape[0] * sc)))
+        det = legacy._create_yunet(target_bgr.shape[1], target_bgr.shape[0])
+        t = self._detect_face_lms(target_bgr, det)
+        if t is None:
+            return target_bgr
+        tbox, tlms = t
+        return self._swap_single_face_at(target_bgr, tbox, tlms, source_bgr, det)
+
+    def duo_face_swap(self, target_bgr, source1_bgr, source2_bgr):
+        """Clean watermark and swap source1 onto the left-hand face and source2
+        onto the right-hand face in a 2-person scene."""
+        from frontend import facercognition as legacy
+        target_bgr = self.clean_pollinations_watermark(target_bgr)
+        if max(target_bgr.shape[:2]) > 768:
+            sc = 768.0 / max(target_bgr.shape[:2])
+            target_bgr = cv2.resize(
+                target_bgr, (int(target_bgr.shape[1] * sc), int(target_bgr.shape[0] * sc)))
+        det = legacy._create_yunet(target_bgr.shape[1], target_bgr.shape[0])
+        faces = self._detect_all_face_lms(target_bgr, det)
+        if not faces:
+            return target_bgr
+        if len(faces) == 1:
+            box, lms = faces[0]
+            return self._swap_single_face_at(target_bgr, box, lms, source1_bgr, det)
+        box1, lms1 = faces[0]
+        box2, lms2 = faces[1]
+        out = self._swap_single_face_at(target_bgr, box1, lms1, source1_bgr, det)
+        faces_updated = self._detect_all_face_lms(out, det)
+        if len(faces_updated) >= 2:
+            box2_u, lms2_u = faces_updated[1]
+            out = self._swap_single_face_at(out, box2_u, lms2_u, source2_bgr, det)
+        else:
+            out = self._swap_single_face_at(out, box2, lms2, source2_bgr, det)
+        return out
 
     def generate_face_swap(self, image_b64: str, prompt: str):
         """Given a generated scene + the prompt, clean any watermarks and,
@@ -4294,8 +4346,6 @@ class Phase3ServiceHub:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(sender, recipient, id)"
             )
-            # Short-lived incoming-call invites, polled by the callee's app so the
-            # ring works even when FCM push is delayed/undelivered.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pending_calls (
@@ -4305,6 +4355,31 @@ class Phase3ServiceHub:
                     room TEXT NOT NULL,
                     mode TEXT DEFAULT 'video',
                     created_ts REAL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS friendship_streaks (
+                    user1 TEXT NOT NULL,
+                    user2 TEXT NOT NULL,
+                    streak_count INTEGER DEFAULT 1,
+                    last_interaction TEXT DEFAULT '',
+                    vibe_badge TEXT DEFAULT '',
+                    PRIMARY KEY (user1, user2)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS duo_generations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user1 TEXT NOT NULL,
+                    user2 TEXT NOT NULL,
+                    scenario TEXT DEFAULT '',
+                    prompt TEXT DEFAULT '',
+                    image_b64 TEXT DEFAULT '',
+                    created TEXT DEFAULT ''
                 )
                 """
             )
@@ -4541,6 +4616,319 @@ class Phase3ServiceHub:
                 (uname,),
             ).fetchone()["c"]
         return {"ok": True, "data": {"unread": int(n)}}
+
+    # =========================================================================
+    # Friends Zone: Streaks, Vibe Matcher, Duo AI Avatars & Face Morph
+    # =========================================================================
+
+    _DUO_SCENARIOS = {
+        "cyberpunk": {
+            "title": "Cyberpunk Tokyo 🕶️",
+            "prompt": "two stylish best friends standing together on a neon-lit futuristic cyberpunk Tokyo street at night, glowing neon signs, high-tech streetwear jackets, cinematic atmospheric purple and cyan lighting, photorealistic 8k",
+        },
+        "astronauts": {
+            "title": "Cosmic Space Station 🚀",
+            "prompt": "two astronauts floating together in futuristic white spacesuits inside a modern orbital space station cupola with planet Earth glowing in background, cinematic sci-fi lighting, 8k",
+        },
+        "royalty": {
+            "title": "Royal Dynasty 🏰",
+            "prompt": "two regal friends dressed in luxurious gilded medieval royal garments standing in an ornate golden palace throne room, majestic warm lighting, photorealistic 8k",
+        },
+        "cafe": {
+            "title": "Cafe Besties ☕",
+            "prompt": "two happy friends sitting together enjoying coffee at a wooden table in an aesthetic minimalist modern cafe, morning sunlight streaming through windows, shallow depth of field, 8k",
+        },
+        "superheroes": {
+            "title": "Superhero Partners 🦸",
+            "prompt": "two heroic superheroes standing shoulder to shoulder on a skyscraper rooftop overlooking a grand modern metropolis at golden sunset, epic superhero suits, dramatic lighting, 8k",
+        },
+    }
+
+    def _update_streak(self, user1: str, user2: str) -> int:
+        u1, u2 = sorted([user1.lower().strip(), user2.lower().strip()])
+        if not u1 or not u2 or u1 == u2:
+            return 1
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT streak_count, last_interaction FROM friendship_streaks WHERE user1=? AND user2=?",
+                (u1, u2)
+            ).fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO friendship_streaks(user1, user2, streak_count, last_interaction, vibe_badge) VALUES (?,?,?,?,?)",
+                    (u1, u2, 1, today, "Besties ✨")
+                )
+                conn.commit()
+                return 1
+            last = str(row["last_interaction"] or "")
+            count = int(row["streak_count"] or 1)
+            if last == today:
+                return count
+            from datetime import timedelta
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            new_count = count + 1 if last == yesterday else 1
+            conn.execute(
+                "UPDATE friendship_streaks SET streak_count=?, last_interaction=? WHERE user1=? AND user2=?",
+                (new_count, today, u1, u2)
+            )
+            conn.commit()
+            return new_count
+
+    def vibe_match(self, user1: str, user2: str):
+        """Analyze facial embedding harmony and generate a friendship affinity score and badge."""
+        u1 = (user1 or "").strip()
+        u2 = (user2 or "").strip()
+        if not u1 or not u2:
+            return {"ok": False, "error": "Both usernames required"}
+        self._ensure_social_tables()
+        streak = self._update_streak(u1, u2)
+
+        _, pdir1 = self._person_dir(u1)
+        _, pdir2 = self._person_dir(u2)
+        ref1 = self._best_reference_face(pdir1) if pdir1 else None
+        ref2 = self._best_reference_face(pdir2) if pdir2 else None
+
+        score = 62
+        if ref1 is not None and ref2 is not None:
+            from frontend import facercognition as legacy
+            det = legacy._create_yunet(300, 300)
+            d1 = self._detect_face_lms(ref1, det)
+            d2 = self._detect_face_lms(ref2, det)
+            if d1 and d2:
+                lms1 = d1[1]
+                lms2 = d2[1]
+                d1_norm = (lms1 - lms1[2]) / (float(np.linalg.norm(lms1[0] - lms1[1])) + 1e-5)
+                d2_norm = (lms2 - lms2[2]) / (float(np.linalg.norm(lms2[0] - lms2[1])) + 1e-5)
+                diff = float(np.mean(np.abs(d1_norm - d2_norm)))
+                calc = int(round(92.0 - diff * 45.0))
+                score = max(38, min(94, calc))
+
+        h = int(hashlib.md5(f"{sorted([u1.lower(), u2.lower()])}".encode()).hexdigest()[:4], 16)
+        score = max(38, min(94, (score + (h % 9))))
+
+        if score >= 80:
+            badge = "Cosmic Twins ✨"
+            title = "Telepathic Resonance"
+            desc = "You two share uncannily aligned facial harmonies! Expressions and vibes are in perfect sync."
+        elif score >= 68:
+            badge = "Dynamic Duo ⚡"
+            title = "Iconic Partnership"
+            desc = "High charisma and complementary energy. You bring out spontaneous creative power together."
+        elif score >= 54:
+            badge = "Tech Alchemists 🔬"
+            title = "Mind Mesh"
+            desc = "Curious, witty, and inventive. You form an unstoppable problem-solving team."
+        else:
+            badge = "Chaos Partners 🕶️"
+            title = "Opposites in Orbit"
+            desc = "Electrifying chemistry through contrasting styles. Every hangout is an adventure!"
+
+        with self._connect() as conn:
+            pair = sorted([u1.lower(), u2.lower()])
+            conn.execute(
+                "UPDATE friendship_streaks SET vibe_badge=? WHERE user1=? AND user2=?",
+                (badge, pair[0], pair[1])
+            )
+            conn.commit()
+
+        return {
+            "ok": True,
+            "data": {
+                "user1": u1,
+                "user2": u2,
+                "similarity_score": score,
+                "vibe_badge": badge,
+                "vibe_title": title,
+                "vibe_desc": desc,
+                "streak": streak,
+            }
+        }
+
+    def generate_duo_avatar(self, user1: str, user2: str, scenario: str = "cyberpunk"):
+        """Generate a 2-person scene and swap both user1 and user2's faces into it."""
+        u1 = (user1 or "").strip()
+        u2 = (user2 or "").strip()
+        if not u1 or not u2:
+            return {"ok": False, "error": "Both user1 and user2 required"}
+        self._ensure_social_tables()
+        self._ensure_friends_table()
+
+        _, pdir1 = self._person_dir(u1)
+        _, pdir2 = self._person_dir(u2)
+        ref1 = self._best_reference_face(pdir1) if pdir1 else None
+        ref2 = self._best_reference_face(pdir2) if pdir2 else None
+        if ref1 is None or ref2 is None:
+            return {"ok": False, "error": f"Need enrolled face photos for both {u1} and {u2}"}
+
+        sc_info = self._DUO_SCENARIOS.get(scenario, self._DUO_SCENARIOS["cyberpunk"])
+        hint1 = self._person_visual_hint(u1)
+        hint2 = self._person_visual_hint(u2)
+        base_prompt = (
+            f"award-winning cinematic 8k photography portrait of two friends standing together, "
+            f"{hint1} on the left, {hint2} on the right, {sc_info['prompt']}, "
+            f"ultra-detailed skin texture, realistic lighting, masterpiece"
+        )
+
+        base_bgr = None
+        try:
+            from backend.services.hf_image_gen import pollinations_text_to_image
+            data = pollinations_text_to_image(base_prompt, width=768, height=768)
+            if data and len(data) >= 1024:
+                nparr = np.frombuffer(data, np.uint8)
+                base_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            self._log_activity("DuoGen", f"Pollinations failed: {e}")
+
+        if base_bgr is None:
+            # Fallback high quality template base if offline or API limit
+            base_bgr = np.zeros((768, 768, 3), dtype=np.uint8)
+            for y in range(768):
+                base_bgr[y, :] = (int(30 + 30 * (y / 768)), int(20 + 20 * (y / 768)), int(40 + 40 * (y / 768)))
+            # Add side-by-side reference faces
+            r1 = cv2.resize(ref1, (300, 300))
+            r2 = cv2.resize(ref2, (300, 300))
+            base_bgr[200:500, 60:360] = r1
+            base_bgr[200:500, 408:708] = r2
+
+        swapped = self.duo_face_swap(base_bgr.copy(), ref1, ref2)
+        streak = self._update_streak(u1, u2)
+
+        b64 = self._encode_image_b64(swapped, 90)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO duo_generations(user1, user2, scenario, prompt, image_b64, created) VALUES (?,?,?,?,?,?)",
+                (u1, u2, scenario, sc_info["title"], b64[:200] + "...", now)
+            )
+            conn.commit()
+
+        return {
+            "ok": True,
+            "data": {
+                "user1": u1,
+                "user2": u2,
+                "scenario": scenario,
+                "scenario_title": sc_info["title"],
+                "streak": streak,
+                "image_b64": b64
+            }
+        }
+
+    def face_morph(self, user1: str, user2: str):
+        """Cross-dissolve and blend 50/50 facial geometry of two friends."""
+        u1 = (user1 or "").strip()
+        u2 = (user2 or "").strip()
+        _, pdir1 = self._person_dir(u1)
+        _, pdir2 = self._person_dir(u2)
+        ref1 = self._best_reference_face(pdir1) if pdir1 else None
+        ref2 = self._best_reference_face(pdir2) if pdir2 else None
+        if ref1 is None or ref2 is None:
+            return {"ok": False, "error": f"Need enrolled face photos for both {u1} and {u2}"}
+
+        r1 = cv2.resize(ref1, (512, 512))
+        r2 = cv2.resize(ref2, (512, 512))
+        from frontend import facercognition as legacy
+        det = legacy._create_yunet(512, 512)
+        d1 = self._detect_face_lms(r1, det)
+        d2 = self._detect_face_lms(r2, det)
+        if not d1 or not d2:
+            blended = cv2.addWeighted(r1, 0.5, r2, 0.5, 0)
+        else:
+            slms1 = d1[1]
+            slms2 = d2[1]
+            mid_lms = (slms1 + slms2) / 2.0
+            M1, _ = cv2.estimateAffinePartial2D(slms1, mid_lms, method=cv2.LMEDS)
+            M2, _ = cv2.estimateAffinePartial2D(slms2, mid_lms, method=cv2.LMEDS)
+            w1 = cv2.warpAffine(r1, M1, (512, 512), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) if M1 is not None else r1
+            w2 = cv2.warpAffine(r2, M2, (512, 512), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) if M2 is not None else r2
+            blended = cv2.addWeighted(w1, 0.5, w2, 0.5, 0)
+
+        streak = self._update_streak(u1, u2)
+        b64 = self._encode_image_b64(blended, 90)
+        return {"ok": True, "data": {"image_b64": b64, "user1": u1, "user2": u2, "streak": streak}}
+
+    def friends_zone_overview(self, username: str):
+        """Unified dashboard payload for Friends Zone: circle, streaks, lookalikes, suggestions, presets."""
+        uname = (username or "").strip()
+        self._ensure_social_tables()
+        self._ensure_friends_table()
+
+        flist = self.list_friends(uname).get("data", {}).get("friends", [])
+        enriched = []
+        total_streaks = 0
+        with self._connect() as conn:
+            for f in flist:
+                fname = f["username"]
+                u1, u2 = sorted([uname.lower(), fname.lower()])
+                s_row = conn.execute(
+                    "SELECT streak_count, vibe_badge FROM friendship_streaks WHERE user1=? AND user2=?",
+                    (u1, u2)
+                ).fetchone()
+                streak = int(s_row["streak_count"]) if s_row else 1
+                badge = str(s_row["vibe_badge"]) if s_row and s_row["vibe_badge"] else "Besties ✨"
+                total_streaks += streak
+
+                _, pdir = self._person_dir(fname)
+                has_face = pdir is not None and bool(self._first_face_image(pdir) is not None)
+                enriched.append({
+                    **f,
+                    "streak": streak,
+                    "vibe_badge": badge,
+                    "has_face": has_face,
+                })
+
+        all_enrolled = self._known_people_names()
+        current_friends_lower = {f["username"].lower() for f in enriched}
+        current_friends_lower.add(uname.lower())
+        suggestions = []
+        for p in all_enrolled:
+            if p.lower() not in current_friends_lower and p != "known_faces":
+                suggestions.append({
+                    "name": p,
+                    "visual_hint": self._person_visual_hint(p)
+                })
+
+        presets = []
+        for k, v in self._DUO_SCENARIOS.items():
+            presets.append({
+                "key": k,
+                "title": v["title"],
+                "description": v["prompt"][:65] + "..."
+            })
+
+        return {
+            "ok": True,
+            "data": {
+                "friends": enriched,
+                "count": len(enriched),
+                "total_streaks": total_streaks,
+                "enrolled_suggestions": suggestions[:15],
+                "duo_presets": presets
+            }
+        }
+
+    def quick_add_enrolled_friend(self, username: str, enrolled_name: str):
+        """Instant 1-tap connect an enrolled face into user's Friends Zone."""
+        uname = (username or "").strip()
+        fname = (enrolled_name or "").strip()
+        if not uname or not fname:
+            return {"ok": False, "error": "Username and enrolled friend name required"}
+        self._ensure_friends_table()
+        self._ensure_social_tables()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO friends(owner, friend, created) VALUES (?,?,?)",
+                (uname, fname, now)
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO friends(owner, friend, created) VALUES (?,?,?)",
+                (fname, uname, now)
+            )
+            conn.commit()
+        streak = self._update_streak(uname, fname)
+        return {"ok": True, "data": {"added": fname, "streak": streak}}
 
     # ----- Push notifications: device token registry (FCM) -----
     def _ensure_push_tokens_table(self):
@@ -5753,6 +6141,41 @@ class Phase3ServiceHub:
                         result = hub.remove_friend(
                             username, str(payload.get("friend", "")).strip())
                         self._send_json(200 if result.get("ok") else 400, result)
+                        return
+
+                    if path == "/api/mobile/friends/zone-overview":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip() or str(payload.get("username", "")).strip()
+                        self._send_json(200, hub.friends_zone_overview(username))
+                        return
+
+                    if path == "/api/mobile/friends/vibe-match":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip() or str(payload.get("user1", "")).strip()
+                        friend = str(payload.get("friend", "") or payload.get("friend_name", "") or payload.get("user2", "")).strip()
+                        self._send_json(200, hub.vibe_match(username, friend))
+                        return
+
+                    if path == "/api/mobile/friends/duo-generate":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip() or str(payload.get("user1", "")).strip()
+                        friend = str(payload.get("friend", "") or payload.get("friend_name", "") or payload.get("user2", "")).strip()
+                        scenario = str(payload.get("scenario", "cyberpunk")).strip()
+                        self._send_json(200, hub.generate_duo_avatar(username, friend, scenario))
+                        return
+
+                    if path == "/api/mobile/friends/face-morph":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip() or str(payload.get("user1", "")).strip()
+                        friend = str(payload.get("friend", "") or payload.get("friend_name", "") or payload.get("user2", "")).strip()
+                        self._send_json(200, hub.face_morph(username, friend))
+                        return
+
+                    if path == "/api/mobile/friends/quick-add-enrolled":
+                        token_payload = self._token_payload() or {}
+                        username = str(token_payload.get("sub", "")).strip() or str(payload.get("username", "")).strip()
+                        enrolled = str(payload.get("enrolled_name", "") or payload.get("friend", "") or payload.get("friend_name", "")).strip()
+                        self._send_json(200, hub.quick_add_enrolled_friend(username, enrolled))
                         return
 
                     # --- Social: follow graph + direct messages ---

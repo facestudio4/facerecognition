@@ -1,4 +1,7 @@
+import os
+import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,7 +14,20 @@ def resolve_db_path() -> Path:
 
 @contextmanager
 def get_connection():
-    conn = sqlite3.connect(str(resolve_db_path()))
+    db_p = resolve_db_path()
+    try:
+        conn = sqlite3.connect(str(db_p))
+        conn.execute("SELECT 1")
+    except sqlite3.OperationalError:
+        safe_dir = Path(tempfile.gettempdir()) / "facestudio_runtime"
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        safe_db = safe_dir / db_p.name
+        if db_p.exists() and (not safe_db.exists() or db_p.stat().st_mtime > safe_db.stat().st_mtime):
+            try:
+                shutil.copy2(str(db_p), str(safe_db))
+            except Exception:
+                pass
+        conn = sqlite3.connect(str(safe_db))
     try:
         yield conn
     finally:

@@ -556,8 +556,22 @@ def _validate_code (key :str ,entered_code :str )->bool :
 
 def _sql_connect ():
     db_p = os.path.abspath(SQL_DB_PATH).replace('\\', '/')
-    conn =sqlite3 .connect (db_p )
-    conn .row_factory =sqlite3 .Row
+    try:
+        conn = sqlite3.connect(db_p)
+        conn.row_factory = sqlite3.Row
+        conn.execute("SELECT 1")
+    except sqlite3.OperationalError:
+        import tempfile, shutil
+        safe_dir = os.path.join(tempfile.gettempdir(), 'facestudio_runtime')
+        os.makedirs(safe_dir, exist_ok=True)
+        safe_db = os.path.join(safe_dir, os.path.basename(SQL_DB_PATH))
+        if os.path.exists(SQL_DB_PATH) and (not os.path.exists(safe_db) or os.path.getmtime(SQL_DB_PATH) > os.path.getmtime(safe_db)):
+            try:
+                shutil.copy2(SQL_DB_PATH, safe_db)
+            except Exception:
+                pass
+        conn = sqlite3.connect(safe_db)
+        conn.row_factory = sqlite3.Row
     for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=ON"):
         try:
             conn.execute(pragma)
