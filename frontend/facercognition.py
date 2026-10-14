@@ -555,84 +555,93 @@ def _validate_code (key :str ,entered_code :str )->bool :
 
 
 def _sql_connect ():
-    conn =sqlite3 .connect (SQL_DB_PATH )
+    db_p = os.path.abspath(SQL_DB_PATH).replace('\\', '/')
+    conn =sqlite3 .connect (db_p )
     conn .row_factory =sqlite3 .Row
-    conn .execute ("PRAGMA journal_mode=WAL")
-    conn .execute ("PRAGMA synchronous=NORMAL")
-    conn .execute ("PRAGMA foreign_keys=ON")
+    for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=ON"):
+        try:
+            conn.execute(pragma)
+        except Exception:
+            pass
     return conn
 
 
+
+
 def _init_sql_db ():
-    with _sql_connect ()as conn :
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT,
-            email TEXT,
-            phone TEXT,
-            role TEXT,
-            created TEXT,
-            logins_json TEXT,
-            verified_email INTEGER,
-            data_json TEXT
-        )
-        """
-        )
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS kv_store (
-            key TEXT PRIMARY KEY,
-            value_json TEXT NOT NULL
-        )
-        """
-        )
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS face_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            distance REAL,
-            event_time TEXT,
-            payload_json TEXT NOT NULL
-        )
-        """
-        )
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS activity_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_time TEXT,
-            username TEXT,
-            role TEXT,
-            action TEXT,
-            detail TEXT,
-            payload_json TEXT NOT NULL
-        )
-        """
-        )
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS attendance_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            payload_json TEXT NOT NULL
-        )
-        """
-        )
-        conn .execute (
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-            setting_key TEXT PRIMARY KEY,
-            value_json TEXT NOT NULL
-        )
-        """
-        )
-        conn .execute ("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-        conn .execute ("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
-        conn .execute ("CREATE INDEX IF NOT EXISTS idx_face_events_time ON face_events(event_time)")
-        conn .execute ("CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(event_time)")
-        conn .commit ()
+    try:
+        with _sql_connect ()as conn :
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password TEXT,
+                email TEXT,
+                phone TEXT,
+                role TEXT,
+                created TEXT,
+                logins_json TEXT,
+                verified_email INTEGER,
+                data_json TEXT
+            )
+            """
+            )
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            )
+            """
+            )
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS face_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                distance REAL,
+                event_time TEXT,
+                payload_json TEXT NOT NULL
+            )
+            """
+            )
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS activity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_time TEXT,
+                username TEXT,
+                role TEXT,
+                action TEXT,
+                detail TEXT,
+                payload_json TEXT NOT NULL
+            )
+            """
+            )
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS attendance_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_json TEXT NOT NULL
+            )
+            """
+            )
+            conn .execute (
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                setting_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            )
+            """
+            )
+            conn .execute ("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            conn .execute ("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
+            conn .execute ("CREATE INDEX IF NOT EXISTS idx_face_events_time ON face_events(event_time)")
+            conn .execute ("CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(event_time)")
+            conn .commit ()
+    except Exception as e:
+        print(f"[SQL] Warning during _init_sql_db: {e}")
+
 
 
 def _kv_legacy_load (key :str ,default ):
@@ -850,8 +859,12 @@ def _kv_save (key :str ,value ):
 
 
 def _migrate_json_to_sql ():
-    with _sql_connect ()as conn :
-        users_count =conn .execute ("SELECT COUNT(*) FROM users").fetchone ()[0 ]
+    try:
+        with _sql_connect ()as conn :
+            users_count =conn .execute ("SELECT COUNT(*) FROM users").fetchone ()[0 ]
+    except Exception as e:
+        print(f"[SQL] Warning during _migrate_json_to_sql: {e}")
+        return
     if users_count ==0 and os .path .exists (USERS_DB_PATH ):
         try :
             with open (USERS_DB_PATH ,"r",encoding ="utf-8")as f :
@@ -862,6 +875,7 @@ def _migrate_json_to_sql ():
             pass 
 
     if _kv_load ("face_log",None )is None and os .path .exists (FACE_LOG_JSON_PATH ):
+
         try :
             with open (FACE_LOG_JSON_PATH ,"r",encoding ="utf-8")as f :
                 _kv_save ("face_log",json .load (f ))

@@ -69,7 +69,8 @@ def _read_api_key() -> str:
         return env_key
     try:
         if os.path.isfile(DB_PATH):
-            con = sqlite3.connect(DB_PATH)
+            db_p = os.path.abspath(DB_PATH).replace('\\', '/')
+            con = sqlite3.connect(db_p)
             try:
                 row = con.execute(
                     "SELECT meta_value FROM project_meta WHERE meta_key='api_key'"

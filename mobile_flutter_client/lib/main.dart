@@ -428,7 +428,48 @@ class _EnrollmentUploadQueue {
       _processing = false;
     }
   }
+
+  static Future<void> syncSavedLocalFaces() async {
+    try {
+      final base = await getApplicationDocumentsDirectory();
+      final facesDir = Directory('${base.path}${Platform.pathSeparator}faces');
+      if (!await facesDir.exists()) return;
+      final dirs = await facesDir
+          .list()
+          .where((e) => e is Directory)
+          .cast<Directory>()
+          .toList();
+      final queue = await _loadQueue();
+      final queuedPeople = queue
+          .map((e) => (e['person'] ?? '').toString().toLowerCase().trim())
+          .toSet();
+      for (final pdir in dirs) {
+        final person = pdir.path.split(Platform.pathSeparator).last.trim();
+        if (person.isEmpty || person.startsWith('.')) continue;
+        if (queuedPeople.contains(person.toLowerCase())) continue;
+        final files = await pdir
+            .list()
+            .where((e) => e is File)
+            .cast<File>()
+            .toList();
+        final frames = <Uint8List>[];
+        for (final f in files) {
+          final lp = f.path.toLowerCase();
+          if (lp.endsWith('.jpg') || lp.endsWith('.jpeg') || lp.endsWith('.png')) {
+            try {
+              frames.add(await f.readAsBytes());
+            } catch (_) {}
+          }
+        }
+        if (frames.isNotEmpty) {
+          await enqueueFrames(personName: person, frames: frames);
+        }
+      }
+      unawaited(processQueue());
+    } catch (_) {}
+  }
 }
+
 
 final _faceReferenceCache = _FaceReferenceCache();
 
@@ -1170,7 +1211,7 @@ Future<void> main() async {
   await _loadGlobal3dIntensity();
   await _UpdateNotificationService.initialize();
   await PushMessagingService.initApp();
-  unawaited(_EnrollmentUploadQueue.processQueue());
+  unawaited(_EnrollmentUploadQueue.syncSavedLocalFaces());
   runApp(const FaceStudioMobileClientApp());
 }
 
@@ -4808,8 +4849,10 @@ BackendApi _createBackendApi() {
     'FACE_STUDIO_BASE_URL',
     defaultValue: 'https://facerecognition-jcu9.onrender.com',
   );
-  const apiKey =
-      String.fromEnvironment('FACE_STUDIO_API_KEY', defaultValue: '');
+  const apiKey = String.fromEnvironment(
+    'FACE_STUDIO_API_KEY',
+    defaultValue: 'eaca516e121f1f3fdd6661840b65611892fd11160b50d7df',
+  );
   return BackendApi(baseUrl: baseUrl, apiKey: apiKey);
 }
 

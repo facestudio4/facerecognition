@@ -867,11 +867,8 @@ class Phase3ServiceHub:
         self._mobile_known_loaded_at = time.time()
 
     def _connect(self):
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        except Exception:
-            pass
-        conn = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
+        db_p = os.path.abspath(self.db_path).replace('\\', '/')
+        conn = sqlite3.connect(db_p, factory=AutoClosingConnection)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -3645,8 +3642,8 @@ class Phase3ServiceHub:
         return None
 
     def _best_reference_face(self, person_dir: str):
-        """Pick the most frontal, well-sized reference face for a cleaner swap.
-        Scans only a few photos (downscaled) to stay within free-tier memory."""
+        """Pick the most frontal, sharp, overlay-free reference face for a cleaner swap.
+        Filters out screenshots with red camera bounding boxes or synthetic UI."""
         from frontend import facercognition as legacy
         try:
             files = [f for f in sorted(os.listdir(person_dir))
@@ -3656,7 +3653,7 @@ class Phase3ServiceHub:
         best = None
         best_score = -1.0
         det = legacy._create_yunet(480, 480)
-        for fname in files[:4]:
+        for fname in files[:10]:
             img = cv2.imread(os.path.join(person_dir, fname))
             if img is None:
                 continue
@@ -3675,7 +3672,16 @@ class Phase3ServiceHub:
             mid_x = (r_eye[0] + l_eye[0]) / 2.0
             centered = 1.0 - min(1.0, abs(nose[0] - mid_x) / (eye_d / 2.0 + 1e-3))
             size = min(1.0, eye_d / 55.0)
-            score = level * 0.4 + centered * 0.4 + size * 0.2
+
+            # Sharpness metric
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            sharpness = min(1.0, cv2.Laplacian(gray, cv2.CV_64F).var() / 250.0)
+
+            # Penalize synthetic UI overlays (e.g. camera red boxes / tags)
+            red_mask = (img[:, :, 2] > 180) & (img[:, :, 0] < 70) & (img[:, :, 1] < 100)
+            overlay_penalty = 0.5 if red_mask.sum() > 300 else 0.0
+
+            score = (level * 0.35 + centered * 0.35 + size * 0.15 + sharpness * 0.15) - overlay_penalty
             if score > best_score:
                 best_score, best = score, img
         return best if best is not None else self._first_face_image(person_dir)
@@ -3696,10 +3702,9 @@ class Phase3ServiceHub:
         return f[:4].astype(float), f[4:14].reshape(5, 2).astype("float32")
 
     def face_swap(self, target_bgr, source_bgr):
-        """Rough swap: align the source face onto the target via YuNet's 5
-        landmarks, colour-match it, and feather-blend. Deliberately avoids
-        cv2.seamlessClone (heavy Poisson solve) to fit the 512MB free tier.
-        Returns swapped image or None."""
+        """Align the source face onto the target via YuNet landmarks,
+        apply anatomical inner-face masking to strictly prevent room/background bleed,
+        harmonize lighting/skin tone in LAB space, and blend seamlessly."""
         from frontend import facercognition as legacy
         # Cap working size so memory/CPU stay modest on the free tier.
         if max(target_bgr.shape[:2]) > 768:
@@ -3718,27 +3723,56 @@ class Phase3ServiceHub:
         if t is None or s is None:
             return None
         tbox, tlms = t
-        _, slms = s
+        sbox, slms = s
         M, _ = cv2.estimateAffinePartial2D(slms, tlms, method=cv2.LMEDS)
         if M is None:
             return None
         hh, ww = target_bgr.shape[:2]
         warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_REFLECT)
-        # Tie the blend region to the real face scale (eye distance) so we don't
-        # pull in the reference photo's hair/background -> tighter, cleaner swap.
+
+        # Source face geometry & mask: prevents ANY room background / wall tiles
+        # from the source photo from ever leaking into the target.
+        s_eyed = float(np.linalg.norm(slms[0] - slms[1])) or float(max(sbox[2], 20))
+        s_eye_vec = slms[1] - slms[0]
+        s_angle = float(np.degrees(np.arctan2(s_eye_vec[1], s_eye_vec[0])))
+        s_ec = (slms[0] + slms[1]) / 2.0
+        s_mc = (slms[3] + slms[4]) / 2.0
+        s_fc = s_ec * 0.45 + s_mc * 0.55
+        s_rx = max(14, int(s_eyed * 0.85))
+        s_ry = max(18, int(s_eyed * 1.20))
+        src_mask = np.zeros(source_bgr.shape[:2], np.uint8)
+        cv2.ellipse(src_mask, (int(round(s_fc[0])), int(round(s_fc[1]))),
+                    (s_rx, s_ry), s_angle, 0, 360, 255, -1)
+        warped_src_mask = cv2.warpAffine(src_mask, M, (ww, hh), flags=cv2.INTER_NEAREST,
+                                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+        # Target face geometry & mask: anatomical radius that stays strictly inside
+        # the cheek contours and upper forehead, avoiding hair and background.
         eye_d = float(np.linalg.norm(tlms[0] - tlms[1])) or float(max(tbox[2], 24))
-        cx = int(round(float(tlms[:, 0].mean())))
-        cy = int(round(float(tlms[:, 1].mean())))
-        # Fuller face mask (forehead->chin, cheek->cheek) for a complete swap.
-        rx = max(18, int(eye_d * 1.5))
-        ry = max(24, int(eye_d * 1.95))
-        mask = np.zeros((hh, ww), np.uint8)
-        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
-        # Match the real face's lighting + skin tone to the scene (Reinhard
-        # transfer in LAB) so it blends in instead of looking like a pale patch.
-        sel = mask > 0
-        if int(sel.sum()) > 50:
+        eye_vec = tlms[1] - tlms[0]
+        angle = float(np.degrees(np.arctan2(eye_vec[1], eye_vec[0])))
+        eye_c = (tlms[0] + tlms[1]) / 2.0
+        mouth_c = (tlms[3] + tlms[4]) / 2.0
+        face_c = eye_c * 0.45 + mouth_c * 0.55
+        rx = max(14, int(eye_d * 0.82))
+        ry = max(18, int(eye_d * 1.16))
+        tgt_mask = np.zeros((hh, ww), np.uint8)
+        cv2.ellipse(tgt_mask, (int(round(face_c[0])), int(round(face_c[1]))),
+                    (rx, ry), angle, 0, 360, 255, -1)
+
+        # Intersect masks so only clean source facial pixels inside the target face are kept.
+        combined_mask = cv2.bitwise_and(tgt_mask, warped_src_mask)
+        kernel_size = max(3, int(eye_d * 0.08) | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        eroded_mask = cv2.erode(combined_mask, kernel, iterations=1)
+        sel = eroded_mask > 200
+        if int(sel.sum()) < 40:
+            sel = combined_mask > 0
+            eroded_mask = combined_mask
+
+        # Match lighting and skin tone (Reinhard transfer in LAB space) on the true face region only.
+        if int(sel.sum()) > 40:
             w_lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB).astype("float32")
             t_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB).astype("float32")
             for c in range(3):
@@ -3746,47 +3780,49 @@ class Phase3ServiceHub:
                 tch = t_lab[:, :, c][sel]
                 wm, ws = float(wch.mean()), float(wch.std()) + 1e-3
                 tm, ts = float(tch.mean()), float(tch.std()) + 1e-3
-                w_lab[:, :, c] = (w_lab[:, :, c] - wm) * (ts / ws) + tm
-            warped = cv2.cvtColor(np.clip(w_lab, 0, 255).astype("uint8"),
-                                  cv2.COLOR_LAB2BGR)
-        # Poisson seamless blend on a TIGHT ROI only — natural lighting/edges
-        # like seamlessClone, but small enough to not OOM the 512MB tier.
-        ys, xs = np.where(mask > 0)
+                scaled = (w_lab[:, :, c] - wm) * (ts / ws) + tm
+                if c == 0:
+                    # In luminance, preserve 20% of target ambient lighting/shadows for natural integration
+                    w_lab[:, :, 0] = np.clip(0.80 * scaled + 0.20 * t_lab[:, :, 0], 0, 255)
+                else:
+                    w_lab[:, :, c] = np.clip(scaled, 0, 255)
+            warped = cv2.cvtColor(w_lab.astype("uint8"), cv2.COLOR_LAB2BGR)
+
+        # Soft feathering for seamless blending
+        feather_sigma = max(3.0, eye_d * 0.14)
+        soft_mask = cv2.GaussianBlur(eroded_mask, (0, 0), feather_sigma).astype("float32") / 255.0
+
+        # Poisson seamless clone on ROI
+        ys, xs = np.where(eroded_mask > 0)
         if len(xs) == 0:
             return None
-        pad = int(eye_d * 1.6) + 6  # generous margin so the mask never touches
-        x0 = max(0, int(xs.min()) - pad)        # the ROI border (seamlessClone
-        y0 = max(0, int(ys.min()) - pad)        # asserts otherwise)
+        pad = int(eye_d * 1.5) + 8
+        x0 = max(0, int(xs.min()) - pad)
+        y0 = max(0, int(ys.min()) - pad)
         x1 = min(ww - 1, int(xs.max()) + pad)
         y1 = min(hh - 1, int(ys.max()) + pad)
         sub_t = target_bgr[y0:y1 + 1, x0:x1 + 1].copy()
         sub_w = warped[y0:y1 + 1, x0:x1 + 1].copy()
-        sub_m = mask[y0:y1 + 1, x0:x1 + 1].copy()
-        # Force a clean zero border in the sub-mask (robustness for seamlessClone).
-        sub_m[:3, :] = 0
-        sub_m[-3:, :] = 0
-        sub_m[:, :3] = 0
-        sub_m[:, -3:] = 0
+        sub_m = eroded_mask[y0:y1 + 1, x0:x1 + 1].copy()
+        sub_m[:4, :] = 0
+        sub_m[-4:, :] = 0
+        sub_m[:, :4] = 0
+        sub_m[:, -4:] = 0
         mys, mxs = np.where(sub_m > 0)
-        if len(mxs) == 0:
-            return None
-        # seamlessClone places the source's mask-bbox centred at `center`, so it
-        # MUST be the bbox centre (not the centroid) or it overruns the ROI.
-        center = ((int(mxs.min()) + int(mxs.max())) // 2,
-                  (int(mys.min()) + int(mys.max())) // 2)
-        try:
-            blended = cv2.seamlessClone(sub_w, sub_t, sub_m, center,
-                                        cv2.NORMAL_CLONE)
-            out = target_bgr.copy()
-            out[y0:y1 + 1, x0:x1 + 1] = blended
-            return out
-        except Exception:
-            # Feathered alpha blend (still colour-matched -> looks decent).
-            soft = cv2.GaussianBlur(mask, (0, 0),
-                                    max(3.0, eye_d * 0.22)).astype("float32")
-            m = (soft / 255.0)[:, :, None]
-            return (warped.astype("float32") * m
-                    + target_bgr.astype("float32") * (1 - m)).astype("uint8")
+        if len(mxs) > 0:
+            center = ((int(mxs.min()) + int(mxs.max())) // 2,
+                      (int(mys.min()) + int(mys.max())) // 2)
+            try:
+                blended = cv2.seamlessClone(sub_w, sub_t, sub_m, center, cv2.NORMAL_CLONE)
+                out = target_bgr.copy()
+                out[y0:y1 + 1, x0:x1 + 1] = blended
+                return out
+            except Exception:
+                pass
+
+        # Feathered alpha fallback
+        m = soft_mask[:, :, None]
+        return (warped.astype("float32") * m + target_bgr.astype("float32") * (1.0 - m)).astype("uint8")
 
     def generate_face_swap(self, image_b64: str, prompt: str):
         """Given a generated scene + the prompt, if the prompt names a known
