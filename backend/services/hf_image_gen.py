@@ -153,6 +153,11 @@ def pollinations_text_to_image(prompt: str, width: int = 1024,
             last = RuntimeError("empty image")
         except urllib.error.HTTPError as e:
             last = e
+            if e.code in (402, 403):
+                # Model hit payment gate or quota on keyless endpoint; fallback to turbo
+                model = "turbo"
+                time.sleep(1.0)
+                continue
             if e.code in (429, 500, 502, 503, 504):
                 # Keyless endpoint rate-limits shared IPs; ride out the window.
                 time.sleep(min(20.0, 5.0 + attempt * 3.0))

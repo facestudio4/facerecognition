@@ -3652,7 +3652,7 @@ class Phase3ServiceHub:
         "prayosha": "a cute young Indian child with big bright expressive eyes, cheerful smile",
         "dhanishtha": "a graceful young Indian woman with beautiful dark hair, gentle expression",
         "pratham": "a young Indian man with short dark hair, glasses, friendly look",
-        "soham": "a young Indian man with short dark hair, athletic build",
+        "soham": "a cute young Indian boy with short dark hair, big bright expressive eyes, cheerful playful smile",
         "tatva": "a young Indian youth with short dark hair, energetic expression",
         "vraj": "a young Indian young man with short dark hair, neat style",
         "vraj_m": "a young Indian man with short dark hair, stylish glasses",
@@ -3781,6 +3781,34 @@ class Phase3ServiceHub:
         f = max(faces, key=lambda r: float(r[2]) * float(r[3]))
         return f[:4].astype(float), f[4:14].reshape(5, 2).astype("float32")
 
+    def _build_anatomical_mask(self, shape, lms, eye_d):
+        """Construct a 10-point convex anatomical face polygon around eyes,
+        spectacles/temples, cheeks, and jawline, avoiding hair and neck."""
+        h, w = shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        r_eye, l_eye, nose, r_mouth, l_mouth = lms
+        ec = (r_eye + l_eye) / 2.0
+        mc = (r_mouth + l_mouth) / 2.0
+        eye_vec = l_eye - r_eye
+        eye_u = eye_vec / (np.linalg.norm(eye_vec) + 1e-6)
+        perp_d = np.array([-eye_u[1], eye_u[0]])
+
+        top_c = ec - perp_d * (eye_d * 0.95)
+        top_r = top_c - eye_u * (eye_d * 0.65)
+        top_l = top_c + eye_u * (eye_d * 0.65)
+        temple_r = r_eye - eye_u * (eye_d * 0.58) - perp_d * (eye_d * 0.15)
+        temple_l = l_eye + eye_u * (eye_d * 0.58) - perp_d * (eye_d * 0.15)
+        cheek_r = r_eye - eye_u * (eye_d * 0.52) + perp_d * (eye_d * 0.50)
+        cheek_l = l_eye + eye_u * (eye_d * 0.52) + perp_d * (eye_d * 0.50)
+        jaw_r = r_mouth - eye_u * (eye_d * 0.35) + perp_d * (eye_d * 0.40)
+        jaw_l = l_mouth + eye_u * (eye_d * 0.35) + perp_d * (eye_d * 0.40)
+        chin = mc + perp_d * (eye_d * 0.70)
+
+        pts = np.array([top_c, top_l, temple_l, cheek_l, jaw_l, chin, jaw_r, cheek_r, temple_r, top_r], dtype=np.int32)
+        hull = cv2.convexHull(pts)
+        cv2.fillConvexPoly(mask, hull, 255)
+        return mask
+
     def face_swap(self, target_bgr, source_bgr):
         """Align the source face onto the target via YuNet landmarks,
         apply anatomical inner-face masking to strictly prevent room/background bleed,
@@ -3815,35 +3843,17 @@ class Phase3ServiceHub:
         warped = cv2.warpAffine(source_bgr, M, (ww, hh), flags=cv2.INTER_CUBIC,
                                 borderMode=cv2.BORDER_REFLECT)
 
-        # Source face geometry & mask: prevents ANY room background / wall tiles
-        # from the source photo from ever leaking into the target.
+        # Source face geometry & anatomical mask: prevents ANY room background / wall tiles
+        # from the source photo from ever leaking into the target while enclosing glasses.
         s_eyed = float(np.linalg.norm(slms[0] - slms[1])) or float(max(sbox[2], 20))
-        s_eye_vec = slms[1] - slms[0]
-        s_angle = float(np.degrees(np.arctan2(s_eye_vec[1], s_eye_vec[0])))
-        s_ec = (slms[0] + slms[1]) / 2.0
-        s_mc = (slms[3] + slms[4]) / 2.0
-        s_fc = s_ec * 0.45 + s_mc * 0.55
-        s_rx = max(14, int(s_eyed * 0.85))
-        s_ry = max(18, int(s_eyed * 1.20))
-        src_mask = np.zeros(source_bgr.shape[:2], np.uint8)
-        cv2.ellipse(src_mask, (int(round(s_fc[0])), int(round(s_fc[1]))),
-                    (s_rx, s_ry), s_angle, 0, 360, 255, -1)
+        src_mask = self._build_anatomical_mask(source_bgr.shape, slms, s_eyed)
         warped_src_mask = cv2.warpAffine(src_mask, M, (ww, hh), flags=cv2.INTER_NEAREST,
                                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-        # Target face geometry & mask: anatomical radius that stays strictly inside
-        # the cheek contours and upper forehead, avoiding hair and background.
+        # Target face geometry & anatomical mask: matches target face boundaries
+        # including temples, cheeks, and chin without touching hair or background.
         eye_d = float(np.linalg.norm(tlms[0] - tlms[1])) or float(max(tbox[2], 24))
-        eye_vec = tlms[1] - tlms[0]
-        angle = float(np.degrees(np.arctan2(eye_vec[1], eye_vec[0])))
-        eye_c = (tlms[0] + tlms[1]) / 2.0
-        mouth_c = (tlms[3] + tlms[4]) / 2.0
-        face_c = eye_c * 0.45 + mouth_c * 0.55
-        rx = max(14, int(eye_d * 0.80))
-        ry = max(18, int(eye_d * 1.15))
-        tgt_mask = np.zeros((hh, ww), np.uint8)
-        cv2.ellipse(tgt_mask, (int(round(face_c[0])), int(round(face_c[1]))),
-                    (rx, ry), angle, 0, 360, 255, -1)
+        tgt_mask = self._build_anatomical_mask(target_bgr.shape, tlms, eye_d)
 
         # Intersect masks so only clean source facial pixels inside the target face are kept.
         combined_mask = cv2.bitwise_and(tgt_mask, warped_src_mask)
